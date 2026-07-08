@@ -32,26 +32,46 @@
 - `GET /aa/account/:agentId`
 
 ## 4. 接口单元测试与验证 (`test/aa-bridge.test.ts`)
-使用 `vitest` 与 Fastify 原生的 `.inject()` 请求注入能力实现了 4 个核心 API 的全链路测试：
-1. **创建智能账户**：验证能够成功且确定性返回符合格式要求的以太坊地址。
-2. **授予 Session Key 权限**：验证能够成功获取授权响应及 32 字节的交易哈希。
-3. **获取 Agent 详情与余额**：验证获取的对象中包含正确的余额键值。
-4. **结算 Escrow**：验证即便在以太坊 RPC 离线下依然能正常触发高可用回退并取得结算成功的交易哈希。
-
-**测试执行输出**：
-```bash
-> aa-bridge@1.0.0 test
-> vitest run
-
- RUN  v1.6.1 /Users/oraclez/code/AgentPay/aa-bridge
-
- ✓ test/aa-bridge.test.ts  (4 tests) 2189ms
-
- Test Files  1 passed (1)
-      Tests  4 passed (4)
-   Start at  17:40:16
-   Duration  2.87s
-```
+使用 `vitest` 与 Fastify 原生的 `.inject()` 请求注入能力实现了 4 个核心 API 的全链路测试。
 
 ## 5. Git 提交
 所有开发的新增代码均已被 add 并 commit 到当前 git 本地分支 `feat/payment-escrow-reputation`。
+
+---
+
+## 6. 状态容灾与生产安全加固修复 (V2 补丁)
+
+针对评审中提出的 “Critical 静默降级与生产环境状态丢失漏洞”，我们对 `aa-bridge` 微服务进行了全面重构：
+
+### 6.1 禁用生产环境下的静默降级 (`/aa/settle`)
+- 移除了非 `DEV_MODE` 生产环境下的异常吞没机制。
+- 当 `DEV_MODE !== "true"` 时，如果发生链上交易执行错误（如 Gas 估算失败、RPC 掉线或 Proof 验证失败），系统**禁止**返回 Mock 的哈希，而是直接向请求方返回 **HTTP 500** 状态码，并附带错误描述 `{ success: false, error: error.message }`。
+
+### 6.2 链上身份逆向反查灾备 (`GET /aa/account/:agentId`)
+- 废除了对内存 Map 的强依赖，在缓存未命中时增加了自动向链上反查所有权的灾备逻辑。
+- 在生产环境下，若内存缓存未命中，使用 `viem` 通过 `readContract` 调用链上 `AgentIdentityRegistry` 合约的 `ownerOf(agentId)` 动态获取所有权人（EOA 所有者）。
+- 成功取得所有权人地址后，调用 `getSmartAccountAddress` 离线计算智能钱包账户并动态回写缓存后返回。
+- 若在链上未查到该 `agentId` 对应的 NFT（合约调用 revert），则直接向客户端返回 **HTTP 404** 错误 `{ error: "Agent identity not registered" }`。
+
+### 6.3 安全加固与全局异常防御
+- **以太坊地址合法性校验**：所有接收以太坊地址作为输入参数的接口（如 `ownerAddress`, `sessionKeyAddress`, `agentOwner`, `escrowAddress`）引入了 `viem` 的 `isAddress` 方法进行格式安全过滤。对于格式不合法的地址，统一拦截并返回 **HTTP 400** 状态码。
+- **全局 Promise Rejection 拦截**：在 Fastify 中配置了全局 `setErrorHandler` 机制，提供最终的 Promise 异常与未捕获的报错拦截防线，始终返回 **HTTP 500**，确保微服务在任何黑天鹅异常下都不会静默退出。
+
+### 6.4 Vitest 测试用例更新与通过验证
+- 更新了 `test/aa-bridge.test.ts`，利用 `vi.mock` 劫持 `viem.createPublicClient` 的底层 JSON-RPC 传输通道（如拦截 `eth_chainId`, `eth_getBalance`, `eth_getCode`），并 Mock 本地 `account.ts` 的 `getSmartAccountAddress` 以避免在离线测试时发起真实的 EntryPoint 网络调用。
+- 新增了 3 个集成测试用例，覆盖：地址合法性校验 (HTTP 400)、生产环境下缓存未命中且 NFT 存在时的成功反查与缓存重写、生产环境下未注册 NFT 返回 HTTP 404 错误、以及生产环境调用交易失败返回 HTTP 500。
+- **测试通过结果**：
+  ```bash
+  > aa-bridge@1.0.0 test
+  > vitest run
+
+   RUN  v1.6.1 /Users/oraclez/code/AgentPay/aa-bridge
+
+   ✓ test/aa-bridge.test.ts  (6 tests) 1111ms
+
+   Test Files  1 passed (1)
+        Tests  6 passed (6)
+     Start at  17:42:48
+     Duration  1.73s
+  ```
+  6 个测试用例全部正常通过！

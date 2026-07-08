@@ -2,7 +2,7 @@ import fastify from 'fastify';
 import dotenv from 'dotenv';
 import { getSmartAccountAddress, getAccountBalance } from './kernel/account.js';
 import { grantPermission } from './kernel/permissions.js';
-import { createPublicClient, createWalletClient, http } from 'viem';
+import { createPublicClient, createWalletClient, http, isAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 
@@ -15,6 +15,15 @@ const accountsDb = new Map<
   number,
   { ownerAddress: string; salt: string; smartAccountAddress: string }
 >();
+
+// Global Error Handler for Promise Rejections & Uncaught Errors
+server.setErrorHandler((error, request, reply) => {
+  server.log.error(error);
+  reply.status(500).send({
+    success: false,
+    error: error.message || 'Internal Server Error',
+  });
+});
 
 // Helper to check bytecode size on-chain to determine deployment status
 async function checkIsDeployed(address: string): Promise<boolean> {
@@ -44,6 +53,11 @@ server.post('/aa/account/create', async (request, reply) => {
 
   if (!ownerAddress || agentId === undefined || !salt) {
     return reply.status(400).send({ error: 'Missing ownerAddress, agentId, or salt' });
+  }
+
+  // Input address validation
+  if (!isAddress(ownerAddress)) {
+    return reply.status(400).send({ error: 'Invalid ownerAddress format' });
   }
 
   try {
@@ -80,6 +94,11 @@ server.post('/aa/permission/grant', async (request, reply) => {
     return reply.status(400).send({ error: 'Missing agentId, sessionKeyAddress, scopes, or spendLimit' });
   }
 
+  // Input address validation
+  if (!isAddress(sessionKeyAddress)) {
+    return reply.status(400).send({ error: 'Invalid sessionKeyAddress format' });
+  }
+
   try {
     const result = await grantPermission(Number(agentId), sessionKeyAddress, scopes, spendLimit);
     return result;
@@ -100,6 +119,14 @@ server.post('/aa/settle', async (request, reply) => {
 
   if (!lockId || !proof || !agentOwner || !escrowAddress) {
     return reply.status(400).send({ error: 'Missing lockId, proof, agentOwner, or escrowAddress' });
+  }
+
+  // Input address validation
+  if (!isAddress(agentOwner)) {
+    return reply.status(400).send({ error: 'Invalid agentOwner address format' });
+  }
+  if (!isAddress(escrowAddress)) {
+    return reply.status(400).send({ error: 'Invalid escrowAddress format' });
   }
 
   const escrowAbi = [
@@ -153,8 +180,19 @@ server.post('/aa/settle', async (request, reply) => {
       txHash: hash,
     };
   } catch (error: any) {
-    server.log.warn(`Escrow transaction failed/skipped: ${error.message}. Returning Mock fallback hash.`);
-    // Safe mock fallback hash when chain connection isn't available
+    const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
+    
+    server.log.warn(`Escrow transaction failed/skipped: ${error.message}. DevMode: ${devMode}`);
+
+    // If not in DevMode (Production), DO NOT silently fallback. Propagate the error as HTTP 500.
+    if (!devMode) {
+      return reply.status(500).send({
+        success: false,
+        error: error.message || 'Escrow settlement transaction execution failed',
+      });
+    }
+
+    // Safe mock fallback hash ONLY when in DevMode
     return {
       success: true,
       txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
@@ -176,16 +214,84 @@ server.get('/aa/account/:agentId', async (request, reply) => {
   const entry = accountsDb.get(numericAgentId);
 
   if (!entry) {
-    // If not found in the DB, fallback gracefully by deriving a deterministic Mock address
-    // to prevent service crash during arbitrary queries.
-    const mockOwner = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
-    const smartAccountAddress = await getSmartAccountAddress(mockOwner, numericAgentId, 'fallback-salt');
-    const balance = await getAccountBalance(smartAccountAddress);
+    const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
+    
+    if (devMode) {
+      // In Mock mode: fallback gracefully by deriving a deterministic Mock address
+      const mockOwner = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+      const smartAccountAddress = await getSmartAccountAddress(mockOwner, numericAgentId, 'fallback-salt');
+      const balance = await getAccountBalance(smartAccountAddress);
 
-    return {
-      smartAccountAddress,
-      balance,
-    };
+      return {
+        smartAccountAddress,
+        balance,
+      };
+    } else {
+      // In Production/Non-Mock mode: fetch owner from blockchain AgentIdentityRegistry
+      const registryAddress = process.env.IDENTITY_REGISTRY_ADDRESS;
+      if (!registryAddress) {
+        return reply.status(500).send({ error: 'IDENTITY_REGISTRY_ADDRESS not configured' });
+      }
+
+      try {
+        const rpcUrl = process.env.RPC_URL || 'https://sepolia.base.org';
+        const publicClient = createPublicClient({
+          chain: baseSepolia,
+          transport: http(rpcUrl),
+        });
+
+        // Call ownerOf on AgentIdentityRegistry contract (implements ERC721)
+        const owner = await publicClient.readContract({
+          address: registryAddress as `0x${string}`,
+          abi: [
+            {
+              name: 'ownerOf',
+              type: 'function',
+              stateMutability: 'view',
+              inputs: [{ name: 'tokenId', type: 'uint256' }],
+              outputs: [{ name: '', type: 'address' }],
+            },
+          ],
+          functionName: 'ownerOf',
+          args: [BigInt(numericAgentId)],
+        }) as string;
+
+        if (!owner || owner === '0x0000000000000000000000000000000000000000') {
+          return reply.status(404).send({ error: 'Agent identity not registered' });
+        }
+
+        // Deterministically compute smart account address using standard default-salt
+        const smartAccountAddress = await getSmartAccountAddress(owner, numericAgentId, 'default-salt');
+        const balance = await getAccountBalance(smartAccountAddress);
+
+        // Cache the newly resolved account details
+        accountsDb.set(numericAgentId, {
+          ownerAddress: owner,
+          salt: 'default-salt',
+          smartAccountAddress,
+        });
+
+        return {
+          smartAccountAddress,
+          balance,
+        };
+      } catch (error: any) {
+        server.log.error(`Failed to lookup agent owner on-chain: ${error.message}`);
+        
+        // Return 404 if the contract reverted on ownerOf (token doesn't exist)
+        if (
+          error.message.includes('ownerOf') ||
+          error.message.includes('revert') ||
+          error.message.includes('not exist') ||
+          error.message.includes('AgentDoesNotExist')
+        ) {
+          return reply.status(404).send({ error: 'Agent identity not registered' });
+        }
+        
+        // Propagate other system/RPC errors as 500
+        return reply.status(500).send({ error: `Failed to query AgentIdentityRegistry: ${error.message}` });
+      }
+    }
   }
 
   try {
