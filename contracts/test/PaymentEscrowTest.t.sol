@@ -6,6 +6,8 @@ import "../src/payment/PaymentEscrow.sol";
 import "../src/identity/ReputationRegistry.sol";
 import "../src/identity/ValidationRegistry.sol";
 import "./MockERC20.sol";
+import "../src/payment/AgentTokenBoundAccount.sol";
+import "../src/identity/AgentIdentityRegistry.sol";
 
 contract MockValidator is IValidator {
     bool private _shouldPass;
@@ -23,12 +25,59 @@ contract MockValidator is IValidator {
     }
 }
 
+contract MockERC6551Registry is IERC6551Registry {
+    mapping(address => mapping(bytes32 => mapping(uint256 => mapping(address => mapping(uint256 => address))))) private _accounts;
+
+    function createAccount(
+        address implementation,
+        bytes32 salt,
+        uint256 chainId,
+        address tokenContract,
+        uint256 tokenId
+    ) external override returns (address) {
+        address addr = account(implementation, salt, chainId, tokenContract, tokenId);
+        if (addr.code.length == 0) {
+            new AgentTokenBoundAccount{salt: salt}(chainId, tokenContract, tokenId);
+        }
+        return addr;
+    }
+
+    function account(
+        address /* implementation */,
+        bytes32 salt,
+        uint256 chainId,
+        address tokenContract,
+        uint256 tokenId
+    ) public view override returns (address) {
+        bytes32 codeHash = keccak256(
+            abi.encodePacked(
+                type(AgentTokenBoundAccount).creationCode,
+                abi.encode(chainId, tokenContract, tokenId)
+            )
+        );
+        
+        bytes32 data = keccak256(
+            abi.encodePacked(
+                bytes1(0xff),
+                address(this),
+                salt,
+                codeHash
+            )
+        );
+        return address(uint160(uint256(data)));
+    }
+}
+
 contract PaymentEscrowTest is Test {
     PaymentEscrow public escrow;
     ReputationRegistry public reputation;
     ValidationRegistry public validationRegistry;
     MockERC20 public usdc;
     MockValidator public validator;
+
+    MockERC6551Registry public registry;
+    AgentTokenBoundAccount public tbaImplementation;
+    AgentIdentityRegistry public agentIdentityRegistry;
 
     address public settler = address(0x1);
     address public payer = address(0x2);
@@ -41,13 +90,40 @@ contract PaymentEscrowTest is Test {
     function setUp() public {
         usdc = new MockERC20("USDC Mock", "USDC");
         validationRegistry = new ValidationRegistry();
-        
-        escrow = new PaymentEscrow(address(usdc), address(validationRegistry), settler);
+
+        registry = new MockERC6551Registry();
+        tbaImplementation = new AgentTokenBoundAccount(block.chainid, address(0), 0);
+        agentIdentityRegistry = new AgentIdentityRegistry();
+
+        escrow = new PaymentEscrow(
+            address(usdc),
+            address(validationRegistry),
+            settler,
+            address(registry),
+            address(tbaImplementation),
+            address(agentIdentityRegistry)
+        );
         reputation = new ReputationRegistry(address(escrow));
 
         // 注册 TEE 验证器
         validator = new MockValidator(true);
         validationRegistry.registerValidator("TEE", address(validator));
+
+        // 循环注册 Agent NFT 使得 agentId = 88 的 owner 是 address(0x3) (原本的 EOA agentOwner)
+        address nftOwner = address(0x3);
+        for (uint256 i = 1; i <= 88; i++) {
+            vm.prank(nftOwner);
+            agentIdentityRegistry.registerAgent("model", "endpoint", bytes32(0), "caps");
+        }
+
+        // 部署专属 TBA 并赋值给 agentOwner
+        agentOwner = registry.createAccount(
+            address(tbaImplementation),
+            bytes32(0),
+            block.chainid,
+            address(agentIdentityRegistry),
+            agentId
+        );
 
         // 给 payer 分发代币并授权
         usdc.mint(payer, 10000 * 10**6);
@@ -249,13 +325,22 @@ contract PaymentEscrowTest is Test {
     // 12. 边界加固测试：验证构造函数空地址防御
     function test_constructorZeroAddressReverts() public {
         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-        new PaymentEscrow(address(0), address(validationRegistry), settler);
+        new PaymentEscrow(address(0), address(validationRegistry), settler, address(registry), address(tbaImplementation), address(agentIdentityRegistry));
 
         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-        new PaymentEscrow(address(usdc), address(0), settler);
+        new PaymentEscrow(address(usdc), address(0), settler, address(registry), address(tbaImplementation), address(agentIdentityRegistry));
 
         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-        new PaymentEscrow(address(usdc), address(validationRegistry), address(0));
+        new PaymentEscrow(address(usdc), address(validationRegistry), address(0), address(registry), address(tbaImplementation), address(agentIdentityRegistry));
+
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        new PaymentEscrow(address(usdc), address(validationRegistry), settler, address(0), address(tbaImplementation), address(agentIdentityRegistry));
+
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        new PaymentEscrow(address(usdc), address(validationRegistry), settler, address(registry), address(0), address(agentIdentityRegistry));
+
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        new PaymentEscrow(address(usdc), address(validationRegistry), settler, address(registry), address(tbaImplementation), address(0));
 
         vm.expectRevert(ReputationRegistry.InvalidAddress.selector);
         new ReputationRegistry(address(0));
@@ -594,5 +679,115 @@ contract PaymentEscrowTest is Test {
         vm.expectRevert(PaymentEscrow.InvalidStatus.selector);
         vm.prank(settler);
         escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+    }
+
+    // 22. 测试批量结算资金流入 TBA 账户并且 payer 收到退款
+    function test_BatchSettleToTBARecipientSuccess() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        // 充值并授权
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        uint256 maxAmount = 500 * 10**6;
+        uint256 duration = 3600;
+
+        // 锁定通道
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, duration);
+
+        // 线下生成 EIP-712 签名
+        uint256 accumulatedAmount = 300 * 10**6;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        uint256 agentOwnerBalanceBefore = usdc.balanceOf(agentOwner);
+        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
+
+        // settler 结算
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+
+        // 验证资金：TBA 账户收到 300，payer 收到退款 200
+        assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + accumulatedAmount);
+        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + (maxAmount - accumulatedAmount));
+    }
+
+    // 23. 测试非 TBA 结算接收人被 Revert 拦截
+    function test_BatchSettleToNonTBARecipientReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 300 * 10**6;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // 传入一个普通 EOA 地址作为接收方，应该被 Revert
+        address nonTbaRecipient = address(0x999);
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, nonTbaRecipient);
+    }
+
+    // 24. 测试 TBA.execute 只有 NFT owner 可调用
+    function test_TBAExecuteOnlyOwner() public {
+        // 先往 TBA 账户中转入一些 USDC 作为余额
+        uint256 tbaBalance = 100 * 10**6;
+        usdc.mint(agentOwner, tbaBalance);
+        assertEq(usdc.balanceOf(agentOwner), tbaBalance);
+
+        // NFT owner 是 address(0x3) (nftOwner)
+        address nftOwner = address(0x3);
+        address hacker = address(0x888);
+
+        // 构造 transfer 调用数据
+        bytes memory callData = abi.encodeWithSelector(
+            IERC20.transfer.selector,
+            address(0x555),
+            50 * 10**6
+        );
+
+        // 非 NFT owner (hacker) 尝试 execute，应该 Revert
+        vm.expectRevert(AgentTokenBoundAccount.NotOwner.selector);
+        vm.prank(hacker);
+        AgentTokenBoundAccount(payable(agentOwner)).execute(address(usdc), 0, callData);
+
+        // NFT owner 尝试 execute，应该成功
+        vm.prank(nftOwner);
+        AgentTokenBoundAccount(payable(agentOwner)).execute(address(usdc), 0, callData);
+
+        assertEq(usdc.balanceOf(address(0x555)), 50 * 10**6);
+        assertEq(usdc.balanceOf(agentOwner), 50 * 10**6);
     }
 }

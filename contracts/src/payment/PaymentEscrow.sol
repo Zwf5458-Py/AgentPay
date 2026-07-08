@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "../interfaces/IERC6551Registry.sol";
 
 interface IValidationRegistry {
     function validateProof(
@@ -39,6 +40,9 @@ contract PaymentEscrow {
     IERC20 public immutable paymentToken;
     IValidationRegistry public immutable validationRegistry;
     address public immutable settler;
+    address public erc6551Registry;
+    address public tbaImplementation;
+    address public agentIdentityRegistry;
 
     uint256 private _nonce;
     mapping(bytes32 => PaymentLock) private _locks;
@@ -96,13 +100,30 @@ contract PaymentEscrow {
         _;
     }
 
-    constructor(address _paymentToken, address _validationRegistry, address _settler) {
-        if (_paymentToken == address(0) || _validationRegistry == address(0) || _settler == address(0)) {
+    constructor(
+        address _paymentToken,
+        address _validationRegistry,
+        address _settler,
+        address _erc6551Registry,
+        address _tbaImplementation,
+        address _agentIdentityRegistry
+    ) {
+        if (
+            _paymentToken == address(0) ||
+            _validationRegistry == address(0) ||
+            _settler == address(0) ||
+            _erc6551Registry == address(0) ||
+            _tbaImplementation == address(0) ||
+            _agentIdentityRegistry == address(0)
+        ) {
             revert InvalidAddress();
         }
         paymentToken = IERC20(_paymentToken);
         validationRegistry = IValidationRegistry(_validationRegistry);
         settler = _settler;
+        erc6551Registry = _erc6551Registry;
+        tbaImplementation = _tbaImplementation;
+        agentIdentityRegistry = _agentIdentityRegistry;
 
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
@@ -159,6 +180,16 @@ contract PaymentEscrow {
         PaymentLock storage lock = _locks[lockId];
         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
         if (block.timestamp > lock.expiresAt) revert LockExpired();
+
+        // 专属 TBA 校验防御
+        address expectedTba = IERC6551Registry(erc6551Registry).account(
+            tbaImplementation,
+            bytes32(0),
+            block.chainid,
+            agentIdentityRegistry,
+            lock.agentId
+        );
+        if (agentOwner != expectedTba) revert InvalidAddress();
 
         bool isValid = validationRegistry.validateProof(lock.agentId, "TEE", proof);
         if (!isValid) revert ProofValidationFailed();
@@ -226,6 +257,16 @@ contract PaymentEscrow {
         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
         if (block.timestamp > lock.expiresAt) revert ChannelExpired();
         if (accumulatedAmount == 0 || accumulatedAmount > lock.maxAmount) revert InvalidAmount();
+
+        // 专属 TBA 校验防御
+        address expectedTba = IERC6551Registry(erc6551Registry).account(
+            tbaImplementation,
+            bytes32(0),
+            block.chainid,
+            agentIdentityRegistry,
+            lock.agentId
+        );
+        if (agentOwner != expectedTba) revert InvalidAddress();
 
         bytes32 hashStruct = keccak256(abi.encode(
             CHANNEL_SETTLE_TYPEHASH,
