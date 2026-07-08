@@ -1,0 +1,351 @@
+diff --git a/agent/src/index.ts b/agent/src/index.ts
+new file mode 100644
+index 0000000..07aa153
+--- /dev/null
++++ b/agent/src/index.ts
+@@ -0,0 +1,99 @@
++import Fastify from 'fastify';
++import dotenv from 'dotenv';
++import { fileURLToPath } from 'url';
++import { generateProof, serializeProof } from './plugins/erc8004/proof.js';
++import { getAgentPrivateKey } from './tee/mock.js';
++
++// 加载环境变量
++dotenv.config();
++
++const server = Fastify({
++  logger: process.env.NODE_ENV !== 'test'
++});
++
++interface ExecuteBody {
++  input: string;
++  agentId: number;
++}
++
++// POST /agent/execute
++server.post('/agent/execute', async (request, reply) => {
++  const body = request.body as ExecuteBody;
++
++  // 1. 校验参数完整性与类型限制
++  if (!body) {
++    return reply.status(400).send({ error: 'Missing request body' });
++  }
++
++  const { input, agentId } = body;
++
++  // 限制 input 必须是有效的非空字符串
++  if (typeof input !== 'string' || input.trim() === '') {
++    return reply.status(400).send({ error: 'Invalid input. Must be a non-empty string.' });
++  }
++
++  // 限制 agentId 必须是安全的、合规的非负整数
++  if (typeof agentId !== 'number' || !Number.isSafeInteger(agentId) || agentId < 0) {
++    return reply.status(400).send({ error: 'Invalid agentId. Must be a non-negative safe integer.' });
++  }
++
++  try {
++    // 3. 生成 mock 的推理输出
++    const output = `Processed by AgentPay AI: ${input}`;
++
++    // 获取私钥
++    const privateKey = getAgentPrivateKey();
++
++    // 4. 调用 generateProof，生成包含签名的 InferenceProof
++    const proof = await generateProof(
++      BigInt(agentId),
++      input,
++      output,
++      'deepseek-r1', // mock 模型的 modelId
++      privateKey
++    );
++
++    // 将 InferenceProof 序列化并 Base64 编码，附加至返回的 Response Header `X-Agent-Proof` 中
++    const proofJson = serializeProof(proof);
++    const proofBase64 = Buffer.from(proofJson).toString('base64');
++    reply.header('X-Agent-Proof', proofBase64);
++
++    // 5. 返回 Body 格式：{ output: string, proof: InferenceProof }
++    // 使用自定义序列化以支持 bigint 字段的 JSON 传输
++    const responseJson = JSON.stringify(
++      { output, proof },
++      (_, value) => (typeof value === 'bigint' ? value.toString() : value)
++    );
++
++    return reply.type('application/json').send(responseJson);
++  } catch (error: any) {
++    server.log.error(error);
++    return reply.status(500).send({ error: error.message || 'Internal Server Error' });
++  }
++});
++
++const start = async () => {
++  try {
++    const port = 3002;
++    const host = '127.0.0.1';
++    await server.listen({ port, host });
++    console.log(`AgentPay Agent server running at http://${host}:${port}`);
++  } catch (err) {
++    server.log.error(err);
++    process.exit(1);
++  }
++};
++
++// 检查是否作为主模块运行
++const isMain = process.argv[1] && (
++  process.argv[1] === fileURLToPath(import.meta.url) ||
++  process.argv[1].endsWith('index.ts') ||
++  process.argv[1].endsWith('src/index.ts') ||
++  process.argv[1].endsWith('index.js')
++);
++
++if (isMain) {
++  start();
++}
++
++export { server };
+diff --git a/agent/src/plugins/erc8004/proof.ts b/agent/src/plugins/erc8004/proof.ts
+new file mode 100644
+index 0000000..d43b783
+--- /dev/null
++++ b/agent/src/plugins/erc8004/proof.ts
+@@ -0,0 +1,80 @@
++import { encodePacked, keccak256, toBytes } from 'viem';
++import { privateKeyToAccount } from 'viem/accounts';
++
++export interface InferenceProof {
++  agentId: bigint;
++  inputHash: `0x${string}`;
++  outputHash: `0x${string}`;
++  modelId: string;
++  timestamp: number;
++  signature: `0x${string}`;
++}
++
++/**
++ * 根据 ERC-8004 规范生成 AI 推理证明与签名
++ * 
++ * @param agentId 智能体 ID
++ * @param input 推理输入文本
++ * @param output 推理输出文本
++ * @param modelId 模型 ID
++ * @param privateKey 用于签名的私钥
++ */
++export async function generateProof(
++  agentId: bigint,
++  input: string,
++  output: string,
++  modelId: string,
++  privateKey: `0x${string}`
++): Promise<InferenceProof> {
++  // 1. 计算 inputHash = keccak256(toBytes(input))
++  const inputHash = keccak256(toBytes(input));
++
++  // 2. 计算 outputHash = keccak256(toBytes(output))
++  const outputHash = keccak256(toBytes(output));
++
++  // 3. 获取当前时间戳
++  const timestamp = Math.floor(Date.now() / 1000);
++
++  // 4. 构造需要被签名的结构体消息，使用 Solidity ABI 兼容的打包编码
++  // 打包顺序与类型：[agentId (uint256), inputHash (bytes32), outputHash (bytes32), modelId (string), timestamp (uint256)]
++  const encoded = encodePacked(
++    ['uint256', 'bytes32', 'bytes32', 'string', 'uint256'],
++    [agentId, inputHash, outputHash, modelId, BigInt(timestamp)]
++  );
++  const messageHash = keccak256(encoded);
++
++  // 5. 使用私钥进行 EIP-191 签名
++  const account = privateKeyToAccount(privateKey);
++  const signature = await account.signMessage({
++    message: { raw: messageHash }
++  });
++
++  return {
++    agentId,
++    inputHash,
++    outputHash,
++    modelId,
++    timestamp,
++    signature
++  };
++}
++
++/**
++ * 将 InferenceProof 序列化为 JSON 字符串，安全处理 bigint 类型
++ */
++export function serializeProof(proof: InferenceProof): string {
++  return JSON.stringify(proof, (_, value) => 
++    typeof value === 'bigint' ? value.toString() : value
++  );
++}
++
++/**
++ * 将 JSON 字符串反序列化为 InferenceProof 对象，恢复 bigint 类型
++ */
++export function deserializeProof(jsonStr: string): InferenceProof {
++  const parsed = JSON.parse(jsonStr);
++  return {
++    ...parsed,
++    agentId: BigInt(parsed.agentId)
++  };
++}
+diff --git a/agent/src/tee/mock.ts b/agent/src/tee/mock.ts
+new file mode 100644
+index 0000000..55ff76a
+--- /dev/null
++++ b/agent/src/tee/mock.ts
+@@ -0,0 +1,31 @@
++import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
++
++let cachedPrivateKey: `0x${string}` | null = null;
++
++/**
++ * 获取 Agent 的私钥。优先从环境变量 AGENT_PRIVATE_KEY 获取。
++ * 如果没有配置环境变量，则动态生成一个临时的私钥并缓存，确保不因私钥缺失而中断。
++ */
++export function getAgentPrivateKey(): `0x${string}` {
++  const envKey = process.env.AGENT_PRIVATE_KEY;
++  if (envKey) {
++    if (envKey.startsWith('0x')) {
++      return envKey as `0x${string}`;
++    }
++    return `0x${envKey}` as `0x${string}`;
++  }
++
++  if (!cachedPrivateKey) {
++    cachedPrivateKey = generatePrivateKey();
++  }
++  return cachedPrivateKey;
++}
++
++/**
++ * 获取 Agent 的公钥地址（由私钥派生）
++ */
++export function getAgentAddress(): `0x${string}` {
++  const privateKey = getAgentPrivateKey();
++  const account = privateKeyToAccount(privateKey);
++  return account.address;
++}
+diff --git a/agent/test/agent.test.ts b/agent/test/agent.test.ts
+new file mode 100644
+index 0000000..29a541e
+--- /dev/null
++++ b/agent/test/agent.test.ts
+@@ -0,0 +1,117 @@
++import { describe, it, expect } from 'vitest';
++import { server } from '../src/index.js';
++import { deserializeProof } from '../src/plugins/erc8004/proof.js';
++import { getAgentAddress } from '../src/tee/mock.js';
++import { encodePacked, keccak256, recoverMessageAddress } from 'viem';
++
++describe('Agent execute endpoint & cryptography validation', () => {
++  it('should successfully execute inference and return a valid signature proof', async () => {
++    const payload = {
++      input: 'hello world',
++      agentId: 1
++    };
++
++    // 使用 Fastify 的 inject 发起 HTTP POST 请求，不会实际监听物理端口，便于并行测试
++    const response = await server.inject({
++      method: 'POST',
++      url: '/agent/execute',
++      payload
++    });
++
++    expect(response.statusCode).toBe(200);
++
++    const body = JSON.parse(response.body);
++    expect(body).toHaveProperty('output');
++    expect(body.output).toBe('Processed by AgentPay AI: hello world');
++    expect(body).toHaveProperty('proof');
++
++    const proof = body.proof;
++    expect(proof).toHaveProperty('agentId');
++    expect(proof.agentId).toBe('1'); // JSON 序列化中 bigint 被转换为 string 传输
++    expect(proof).toHaveProperty('inputHash');
++    expect(proof).toHaveProperty('outputHash');
++    expect(proof).toHaveProperty('modelId');
++    expect(proof).toHaveProperty('timestamp');
++    expect(proof).toHaveProperty('signature');
++
++    // 验证 Response Header 中的 X-Agent-Proof
++    const headerProofBase64 = response.headers['x-agent-proof'] as string;
++    expect(headerProofBase64).toBeDefined();
++
++    // 验证 Base64 完美还原为 Proof 对象
++    const headerProofJson = Buffer.from(headerProofBase64, 'base64').toString('utf8');
++    const headerProof = deserializeProof(headerProofJson);
++
++    expect(headerProof.agentId).toBe(1n);
++    expect(headerProof.inputHash).toBe(proof.inputHash);
++    expect(headerProof.outputHash).toBe(proof.outputHash);
++    expect(headerProof.modelId).toBe(proof.modelId);
++    expect(headerProof.timestamp).toBe(proof.timestamp);
++    expect(headerProof.signature).toBe(proof.signature);
++
++    // 验证 Proof 对象的密码学签名合法性：
++    // 1. 构造相同的数据包进行 keccak256
++    const encoded = encodePacked(
++      ['uint256', 'bytes32', 'bytes32', 'string', 'uint256'],
++      [
++        headerProof.agentId,
++        headerProof.inputHash,
++        headerProof.outputHash,
++        headerProof.modelId,
++        BigInt(headerProof.timestamp)
++      ]
++    );
++    const messageHash = keccak256(encoded);
++
++    // 2. 反解签名地址
++    const recoveredAddress = await recoverMessageAddress({
++      message: { raw: messageHash },
++      signature: headerProof.signature
++    });
++
++    // 3. 验证反解出的地址与 Agent 的 Public Address 完全一致
++    const expectedAddress = getAgentAddress();
++    expect(recoveredAddress.toLowerCase()).toBe(expectedAddress.toLowerCase());
++  });
++
++  it('should return 400 for various invalid inputs', async () => {
++    const invalidInputs = [
++      { payload: { agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // missing input
++      { payload: { input: '', agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // empty string
++      { payload: { input: '   ', agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // blank string
++      { payload: { input: null, agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // null input
++      { payload: { input: 123, agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // non-string input
++    ];
++
++    for (const { payload, errorMsg } of invalidInputs) {
++      const response = await server.inject({
++        method: 'POST',
++        url: '/agent/execute',
++        payload
++      });
++      expect(response.statusCode).toBe(400);
++      expect(JSON.parse(response.body).error).toBe(errorMsg);
++    }
++  });
++
++  it('should return 400 for various invalid agentIds', async () => {
++    const invalidAgentIds = [
++      { payload: { input: 'hello' }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // missing agentId
++      { payload: { input: 'hello', agentId: -1 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // negative
++      { payload: { input: 'hello', agentId: 1.5 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // float
++      { payload: { input: 'hello', agentId: NaN }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // NaN
++      { payload: { input: 'hello', agentId: null }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // null agentId
++      { payload: { input: 'hello', agentId: Number.MAX_SAFE_INTEGER + 10 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // unsafe integer
++    ];
++
++    for (const { payload, errorMsg } of invalidAgentIds) {
++      const response = await server.inject({
++        method: 'POST',
++        url: '/agent/execute',
++        payload
++      });
++      expect(response.statusCode).toBe(400);
++      expect(JSON.parse(response.body).error).toBe(errorMsg);
++    }
++  });
++});
