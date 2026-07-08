@@ -288,5 +288,21 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
       expect(res2.statusCode).toBe(401);
       expect(JSON.parse(res2.body).error).toContain('Unauthorized');
     });
+
+    it('should handle OPTIONS preflight request successfully without authorization', async () => {
+      const response = await server.inject({
+        method: 'OPTIONS',
+        url: '/aa/settle',
+        headers: {
+          'Origin': 'http://localhost:3000',
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'x-internal-secret'
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['access-control-allow-origin']).toBe('*');
+      expect(response.headers['access-control-allow-headers']).toContain('x-internal-secret');
+    });
   });
 });

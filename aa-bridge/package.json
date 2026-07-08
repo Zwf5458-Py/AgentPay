@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@fastify/cors": "^8.5.0",
     "@zerodev/ecdsa-validator": "^5.0.0",
     "@zerodev/permissions": "^5.0.0",
     "@zerodev/sdk": "^5.0.0",

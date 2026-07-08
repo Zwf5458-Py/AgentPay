@@ -1,4 +1,5 @@
 import fastify from 'fastify';
+import cors from '@fastify/cors';
 import dotenv from 'dotenv';
 import { getSmartAccountAddress, getAccountBalance } from './kernel/account.js';
 import { grantPermission } from './kernel/permissions.js';
@@ -9,6 +10,13 @@ import { baseSepolia } from 'viem/chains';
 dotenv.config();
 
 const server = fastify({ logger: true });
+
+await server.register(cors, {
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-internal-secret'],
+  optionsSuccessStatus: 200,
+});
 
 // In-memory registry mapping agentId -> account details
 const accountsDb = new Map<
@@ -27,6 +35,9 @@ server.setErrorHandler((error, request, reply) => {
 
 // onRequest hook to enforce security credentials validation via x-internal-secret
 server.addHook('onRequest', async (request, reply) => {
+  if (request.method === 'OPTIONS') {
+    return;
+  }
   const secret = process.env.INTERNAL_SECRET;
   if (!secret) {
     server.log.error('INTERNAL_SECRET is not configured in the environment');
