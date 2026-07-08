@@ -558,10 +558,10 @@ index 648621b..ed3702d 100644
 -}
 diff --git a/gateway/internal/queue/sqlite_queue.go b/gateway/internal/queue/sqlite_queue.go
 new file mode 100644
-index 0000000..cf8de1b
+index 0000000..3e1eb58
 --- /dev/null
 +++ b/gateway/internal/queue/sqlite_queue.go
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,284 @@
 +package queue
 +
 +import (
@@ -594,6 +594,7 @@ index 0000000..cf8de1b
 +	internalSecret string
 +	mu             sync.Mutex // SQLite 互斥锁，确保并发写安全
 +	client         *http.Client
++	wg             sync.WaitGroup // 追踪协程以实现优雅退出
 +}
 +
 +// NewQueueManager 构造函数
@@ -601,6 +602,19 @@ index 0000000..cf8de1b
 +	db, err := sql.Open("sqlite", dbPath)
 +	if err != nil {
 +		return nil, fmt.Errorf("failed to open sqlite db: %w", err)
++	}
++
++	// 限制最大打开连接数为 1，彻底杜绝并发文件锁死
++	db.SetMaxOpenConns(1)
++
++	// 配置性能优化与忙碌重试
++	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
++		db.Close()
++		return nil, fmt.Errorf("failed to set journal_mode WAL: %w", err)
++	}
++	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
++		db.Close()
++		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
 +	}
 +
 +	qm := &QueueManager{
@@ -645,8 +659,9 @@ index 0000000..cf8de1b
 +	return nil
 +}
 +
-+// Close 关闭数据库
++// Close 关闭数据库，阻塞等待重试协程安全退出
 +func (qm *QueueManager) Close() error {
++	qm.wg.Wait()
 +	return qm.db.Close()
 +}
 +
@@ -671,7 +686,9 @@ index 0000000..cf8de1b
 +
 +// StartWorker 启动后台 Worker 协程
 +func (qm *QueueManager) StartWorker(ctx context.Context) {
++	qm.wg.Add(1)
 +	go func() {
++		defer qm.wg.Done()
 +		ticker := time.NewTicker(2 * time.Second)
 +		defer ticker.Stop()
 +		for {
