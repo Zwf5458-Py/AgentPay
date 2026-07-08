@@ -129,7 +129,21 @@ server.post('/aa/permission/grant', async (request, reply) => {
 });
 
 // 3. Settle Payment
-server.post('/aa/settle', async (request, reply) => {
+server.post('/aa/settle', {
+  schema: {
+    body: {
+      type: 'object',
+      properties: {
+        lockId: { type: 'string' },
+        proof: { type: 'string' },
+        channelId: { type: 'string' },
+        accumulatedAmount: { type: 'string' },
+        signature: { type: 'string' },
+        agentId: { type: 'integer' }
+      }
+    }
+  }
+}, async (request, reply) => {
   const body = request.body as any;
 
   if (body && body.channelId !== undefined) {

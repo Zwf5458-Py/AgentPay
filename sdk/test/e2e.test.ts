@@ -276,27 +276,19 @@ describe('AgentPay SDK E2E Integration Test', () => {
       env: 'development'
     });
 
-    // 第一次调用 (agentId 888)
-    const result1 = await client.execute(888, 'Channel Call 1');
+    // 并发触发两个请求
+    const [result1, result2] = await Promise.all([
+      client.execute(888, 'Channel Call 1'),
+      client.execute(888, 'Channel Call 2')
+    ]);
+
     expect(result1.output).toBe('Processed by AgentPay AI: Channel Call 1');
-
-    // 等待异步网关转发和桥结算完成
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    expect(gatewayRequestCount).toBe(2); // 第一笔会经历 1 次 402 + 1 次重试 (2)
-    expect(agentRequestCount).toBe(1);
-    expect(bridgeRequestCount).toBe(1);
-    expect(bridgeLastBody.channelId).toBe('channel-888');
-    expect(bridgeLastBody.accumulatedAmount).toBe('1000');
-
-    // 第二次调用 (agentId 888)
-    const result2 = await client.execute(888, 'Channel Call 2');
     expect(result2.output).toBe('Processed by AgentPay AI: Channel Call 2');
 
     // 等待异步网关转发和桥结算完成
     await new Promise(resolve => setTimeout(resolve, 100));
 
-    expect(gatewayRequestCount).toBe(3); // 第二笔直接带上累计金额 2000 发送 (3)
+    expect(gatewayRequestCount).toBe(3); // 第一笔 1 次 402 + 1 次重试，第二笔排队执行直接携带累计额通过，共 3 次请求
     expect(agentRequestCount).toBe(2);
     expect(bridgeRequestCount).toBe(2);
     expect(bridgeLastBody.channelId).toBe('channel-888');

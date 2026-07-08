@@ -13,6 +13,7 @@ export class AgentPayClient {
   private privateKey?: `0x${string}`;
   private env: 'development' | 'production';
   private channels = new Map<number, { id: string; confirmedSpend: bigint; accumulatedSpend: bigint; lastPrice: bigint }>();
+  private channelLocks = new Map<number, Promise<any>>();
 
   constructor(config: AgentPayClientConfig = {}) {
     this.gatewayUrl = config.gatewayUrl || 'http://127.0.0.1:8080';
@@ -22,6 +23,14 @@ export class AgentPayClient {
   }
 
   public async execute(agentId: number, input: string): Promise<any> {
+    const currentLock = this.channelLocks.get(agentId) || Promise.resolve();
+    const nextLock = currentLock.then(() => this.executeInternal(agentId, input));
+    // 捕获异常防止后续排队发生死锁阻塞
+    this.channelLocks.set(agentId, nextLock.catch(() => {}));
+    return nextLock;
+  }
+
+  private async executeInternal(agentId: number, input: string): Promise<any> {
     if (typeof input !== 'string' || input.trim() === '') {
       throw new Error('Invalid input. Must be a non-empty string.');
     }
