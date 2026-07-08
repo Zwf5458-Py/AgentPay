@@ -1,471 +1,612 @@
-diff --git a/contracts/src/identity/AgentIdentityRegistry.sol b/contracts/src/identity/AgentIdentityRegistry.sol
+diff --git a/contracts/src/interfaces/IERC6551Registry.sol b/contracts/src/interfaces/IERC6551Registry.sol
 new file mode 100644
-index 0000000..ac18163
+index 0000000..9d045bc
 --- /dev/null
-+++ b/contracts/src/identity/AgentIdentityRegistry.sol
-@@ -0,0 +1,172 @@
++++ b/contracts/src/interfaces/IERC6551Registry.sol
+@@ -0,0 +1,29 @@
 +// SPDX-License-Identifier: MIT
 +pragma solidity ^0.8.20;
 +
-+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-+import "@openzeppelin/contracts/access/Ownable.sol";
-+
-+contract AgentIdentityRegistry is ERC721, Ownable {
-+    struct AgentMetadata {
-+        string modelId;
-+        string serviceEndpoint;
-+        bytes32 teeAttestation;
-+        string capabilities;
-+        uint256 registeredAt;
-+    }
-+
-+    // 存储 agentId (即 tokenId) 到其元数据的映射
-+    mapping(uint256 => AgentMetadata) private _agentMetadata;
-+    
-+    // tokenId 计数器
-+    uint256 private _nextTokenId;
-+
-+    event AgentRegistered(
-+        uint256 indexed agentId,
-+        address indexed owner,
-+        string modelId,
-+        string serviceEndpoint,
-+        bytes32 teeAttestation,
-+        string capabilities
++interface IERC6551Registry {
++    event ERC6551AccountCreated(
++        address account,
++        address indexed implementation,
++        bytes32 salt,
++        uint256 chainId,
++        address indexed tokenContract,
++        uint256 indexed tokenId
 +    );
 +
-+    event MetadataUpdated(
-+        uint256 indexed agentId,
-+        string modelId,
-+        string serviceEndpoint,
-+        bytes32 teeAttestation,
-+        string capabilities
-+    );
++    function createAccount(
++        address implementation,
++        bytes32 salt,
++        uint256 chainId,
++        address tokenContract,
++        uint256 tokenId
++    ) external returns (address);
 +
-+    error NotAgentOwner();
-+    error SoulboundTransferBlocked();
-+    error AgentDoesNotExist();
-+    error InvalidMetadata();
-+
-+    constructor() ERC721("Agent Identity NFT", "AGENT") Ownable(msg.sender) {
-+        _nextTokenId = 1;
++    function account(
++        address implementation,
++        bytes32 salt,
++        uint256 chainId,
++        address tokenContract,
++        uint256 tokenId
++    ) external view returns (address);
++}
+diff --git a/contracts/src/payment/PaymentEscrow.sol b/contracts/src/payment/PaymentEscrow.sol
+index 9f91612..edb357d 100644
+--- a/contracts/src/payment/PaymentEscrow.sol
++++ b/contracts/src/payment/PaymentEscrow.sol
+@@ -1,15 +1,16 @@
+ // SPDX-License-Identifier: MIT
+ pragma solidity ^0.8.20;
+ 
+ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
++import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+ 
+ interface IValidationRegistry {
+     function validateProof(
+         uint256 agentId,
+         string calldata validationType,
+         bytes calldata proof
+     ) external view returns (bool);
+ }
+ 
+ contract PaymentEscrow {
+@@ -19,60 +20,106 @@ contract PaymentEscrow {
+ 
+     struct PaymentLock {
+         address payer;
+         uint256 agentId;
+         uint256 amount;
+         bytes32 requestHash;
+         uint256 expiresAt;
+         PaymentStatus status;
+     }
+ 
++    struct ChannelLock {
++        address payer;
++        uint256 agentId;
++        uint256 maxAmount;
++        uint256 settledAmount;
++        uint256 expiresAt;
++        PaymentStatus status;
 +    }
 +
-+    // 注册 Agent
-+    function registerAgent(
-+        string calldata modelId,
-+        string calldata serviceEndpoint,
-+        bytes32 teeAttestation,
-+        string calldata capabilities
-+    ) external returns (uint256) {
-+        if (bytes(modelId).length == 0 || bytes(serviceEndpoint).length == 0) {
-+            revert InvalidMetadata();
-+        }
+     IERC20 public immutable paymentToken;
+     IValidationRegistry public immutable validationRegistry;
+     address public immutable settler;
+ 
+     uint256 private _nonce;
+     mapping(bytes32 => PaymentLock) private _locks;
++    mapping(bytes32 => ChannelLock) public channels;
 +
-+        uint256 agentId = _nextTokenId++;
-+        _safeMint(msg.sender, agentId);
++    bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
++    bytes32 public immutable DOMAIN_SEPARATOR;
+ 
+     event PaymentLocked(
+         bytes32 indexed lockId,
+         address indexed payer,
+         uint256 indexed agentId,
+         uint256 amount,
+         bytes32 requestHash,
+         uint256 expiresAt
+     );
+ 
+     event PaymentReleased(bytes32 indexed lockId, address indexed agentOwner);
+     event PaymentRefunded(bytes32 indexed lockId, address indexed payer);
+ 
++    event ChannelLocked(
++        bytes32 indexed channelId,
++        address indexed payer,
++        uint256 indexed agentId,
++        uint256 maxAmount,
++        uint256 expiresAt
++    );
 +
-+        _agentMetadata[agentId] = AgentMetadata({
-+            modelId: modelId,
-+            serviceEndpoint: serviceEndpoint,
-+            teeAttestation: teeAttestation,
-+            capabilities: capabilities,
-+            registeredAt: block.timestamp
++    event ChannelSettled(
++        bytes32 indexed channelId,
++        address indexed agentOwner,
++        uint256 settledAmount
++    );
++
++    event ChannelRefunded(
++        bytes32 indexed channelId,
++        address indexed payer,
++        uint256 refundedAmount
++    );
++
+     error InvalidAmount();
+     error NotSettler();
+     error InvalidStatus();
+     error LockExpired();
+     error LockNotExpired();
+     error ProofValidationFailed();
+     error InvalidAddress();
+     error InvalidDuration();
++    error InvalidSignature();
++    error ChannelExpired();
++    error ChannelNotExpired();
+ 
+     modifier onlySettler() {
+         if (msg.sender != settler) revert NotSettler();
+         _;
+     }
+ 
+     constructor(address _paymentToken, address _validationRegistry, address _settler) {
+         if (_paymentToken == address(0) || _validationRegistry == address(0) || _settler == address(0)) {
+             revert InvalidAddress();
+         }
+         paymentToken = IERC20(_paymentToken);
+         validationRegistry = IValidationRegistry(_validationRegistry);
+         settler = _settler;
++
++        DOMAIN_SEPARATOR = keccak256(
++            abi.encode(
++                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
++                keccak256(bytes("PaymentEscrow")),
++                keccak256(bytes("1")),
++                block.chainid,
++                address(this)
++            )
++        );
+     }
+ 
+     function lockPayment(
+         uint256 agentId,
+         uint256 amount,
+         bytes32 requestHash,
+         uint256 duration
+     ) external returns (bytes32 lockId) {
+         if (amount == 0) revert InvalidAmount();
+         if (duration == 0) revert InvalidDuration();
+@@ -128,14 +175,97 @@ contract PaymentEscrow {
+         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
+         if (block.timestamp <= lock.expiresAt) revert LockNotExpired();
+ 
+         lock.status = PaymentStatus.Refunded;
+ 
+         paymentToken.safeTransfer(lock.payer, lock.amount);
+ 
+         emit PaymentRefunded(lockId, lock.payer);
+     }
+ 
++    function lockChannel(
++        uint256 agentId,
++        uint256 amount,
++        uint256 duration
++    ) external returns (bytes32 channelId) {
++        if (amount == 0) revert InvalidAmount();
++        if (duration == 0) revert InvalidDuration();
++
++        paymentToken.safeTransferFrom(msg.sender, address(this), amount);
++
++        channelId = keccak256(abi.encodePacked(
++            msg.sender,
++            agentId,
++            amount,
++            block.timestamp,
++            _nonce++
++        ));
++
++        uint256 expiresAt = block.timestamp + duration;
++
++        channels[channelId] = ChannelLock({
++            payer: msg.sender,
++            agentId: agentId,
++            maxAmount: amount,
++            settledAmount: 0,
++            expiresAt: expiresAt,
++            status: PaymentStatus.Locked
 +        });
 +
-+        emit AgentRegistered(
-+            agentId,
-+            msg.sender,
-+            modelId,
-+            serviceEndpoint,
-+            teeAttestation,
-+            capabilities
-+        );
-+
-+        return agentId;
++        emit ChannelLocked(channelId, msg.sender, agentId, amount, expiresAt);
 +    }
 +
-+    // 更新元数据
-+    function updateMetadata(
-+        uint256 agentId,
-+        string calldata modelId,
-+        string calldata serviceEndpoint,
-+        bytes32 teeAttestation,
-+        string calldata capabilities
-+    ) external {
-+        address agentOwner = _ownerOf(agentId);
-+        if (agentOwner == address(0)) {
-+            revert AgentDoesNotExist();
-+        }
-+        // 只有 NFT 拥有者可以修改
-+        if (agentOwner != msg.sender) {
-+            revert NotAgentOwner();
-+        }
++    function batchSettle(
++        bytes32 channelId,
++        uint256 accumulatedAmount,
++        bytes calldata signature,
++        address agentOwner
++    ) external onlySettler {
++        if (agentOwner == address(0)) revert InvalidAddress();
 +
-+        AgentMetadata storage metadata = _agentMetadata[agentId];
-+        metadata.modelId = modelId;
-+        metadata.serviceEndpoint = serviceEndpoint;
-+        metadata.teeAttestation = teeAttestation;
-+        metadata.capabilities = capabilities;
++        ChannelLock storage lock = channels[channelId];
++        if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
++        if (block.timestamp > lock.expiresAt) revert ChannelExpired();
++        if (accumulatedAmount == 0 || accumulatedAmount > lock.maxAmount) revert InvalidAmount();
 +
-+        emit MetadataUpdated(
-+            agentId,
-+            modelId,
-+            serviceEndpoint,
-+            teeAttestation,
-+            capabilities
-+        );
-+    }
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            DOMAIN_SEPARATOR,
++            hashStruct
++        ));
++        address signer = ECDSA.recover(digest, signature);
++        if (signer != lock.payer) revert InvalidSignature();
 +
-+    // 获取 Agent 元数据
-+    function getAgent(uint256 agentId) external view returns (
-+        string memory modelId,
-+        string memory serviceEndpoint,
-+        bytes32 teeAttestation,
-+        string memory capabilities,
-+        uint256 registeredAt,
-+        address owner
-+    ) {
-+        address agentOwner = _ownerOf(agentId);
-+        if (agentOwner == address(0)) {
-+            revert AgentDoesNotExist();
++        lock.status = PaymentStatus.Released;
++        lock.settledAmount = accumulatedAmount;
++
++        paymentToken.safeTransfer(agentOwner, accumulatedAmount);
++
++        uint256 remainder = lock.maxAmount - accumulatedAmount;
++        if (remainder > 0) {
++            paymentToken.safeTransfer(lock.payer, remainder);
 +        }
 +
-+        AgentMetadata memory metadata = _agentMetadata[agentId];
-+        return (
-+            metadata.modelId,
-+            metadata.serviceEndpoint,
-+            metadata.teeAttestation,
-+            metadata.capabilities,
-+            metadata.registeredAt,
-+            agentOwner
-+        );
++        emit ChannelSettled(channelId, agentOwner, accumulatedAmount);
 +    }
 +
-+    // 验证 Agent 存在
-+    function verifyAgent(uint256 agentId) external view returns (bool) {
-+        address owner = _ownerOf(agentId);
-+        return owner != address(0);
++    function refundChannel(bytes32 channelId) external {
++        ChannelLock storage lock = channels[channelId];
++        if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
++        if (block.timestamp <= lock.expiresAt) revert ChannelNotExpired();
++
++        lock.status = PaymentStatus.Refunded;
++
++        paymentToken.safeTransfer(lock.payer, lock.maxAmount);
++
++        emit ChannelRefunded(channelId, lock.payer, lock.maxAmount);
 +    }
 +
-+    // 允许拥有者销毁自己的 Agent Identity NFT
-+    function burn(uint256 agentId) external {
-+        address agentOwner = _ownerOf(agentId);
-+        if (agentOwner == address(0)) {
-+            revert AgentDoesNotExist();
-+        }
-+        if (agentOwner != msg.sender) {
-+            revert NotAgentOwner();
-+        }
-+        _burn(agentId);
-+    }
+     function getLock(bytes32 lockId) external view returns (PaymentLock memory) {
+         return _locks[lockId];
+     }
+ }
+diff --git a/contracts/test/PaymentEscrowTest.t.sol b/contracts/test/PaymentEscrowTest.t.sol
+index 10c3587..09e3c8c 100644
+--- a/contracts/test/PaymentEscrowTest.t.sol
++++ b/contracts/test/PaymentEscrowTest.t.sol
+@@ -253,11 +253,346 @@ contract PaymentEscrowTest is Test {
+ 
+         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+         new PaymentEscrow(address(usdc), address(0), settler);
+ 
+         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+         new PaymentEscrow(address(usdc), address(validationRegistry), address(0));
+ 
+         vm.expectRevert(ReputationRegistry.InvalidAddress.selector);
+         new ReputationRegistry(address(0));
+     }
 +
-+    // 重写 _update 函数以确保 Soulbound 属性 (禁止转让)
-+    function _update(
-+        address to,
-+        uint256 tokenId,
-+        address auth
-+    ) internal virtual override returns (address) {
-+        address previousOwner = _ownerOf(tokenId);
-+        
-+        // 如果 previousOwner != address(0) 且 to != address(0)，则是 transfer，需要禁止
-+        if (previousOwner != address(0) && to != address(0)) {
-+            revert SoulboundTransferBlocked();
-+        }
-+        
-+        return super._update(to, tokenId, auth);
-+    }
-+}
-diff --git a/contracts/src/identity/ValidationRegistry.sol b/contracts/src/identity/ValidationRegistry.sol
-new file mode 100644
-index 0000000..50ab7bc
---- /dev/null
-+++ b/contracts/src/identity/ValidationRegistry.sol
-@@ -0,0 +1,57 @@
-+// SPDX-License-Identifier: MIT
-+pragma solidity ^0.8.20;
++    bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
 +
-+import "@openzeppelin/contracts/access/Ownable.sol";
++    // 13. 测试正常状态通道锁定与 EIP-712 批量结算流程
++    function test_ChannelBatchSettle() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
 +
-+interface IValidator {
-+    function validate(uint256 agentId, bytes calldata proof) external view returns (bool);
-+}
++        // 充值并授权
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
 +
-+contract ValidationRegistry is Ownable {
-+    // 映射验证类型（如 "TEE"）到其验证器合约地址
-+    mapping(string => address) private _validators;
++        uint256 maxAmount = 500 * 10**6;
++        uint256 duration = 3600;
 +
-+    event ValidatorRegistered(string indexed validationType, address indexed validatorAddress);
++        // 锁定通道
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, duration);
 +
-+    error ValidatorNotContract();
-+
-+    constructor() Ownable(msg.sender) {}
-+
-+    // 注册/修改验证器地址，只有 Owner 可操作
-+    function registerValidator(
-+        string calldata validationType,
-+        address validatorAddress
-+    ) external onlyOwner {
-+        if (validatorAddress != address(0) && validatorAddress.code.length == 0) {
-+            revert ValidatorNotContract();
-+        }
-+        _validators[validationType] = validatorAddress;
-+        emit ValidatorRegistered(validationType, validatorAddress);
-+    }
-+
-+    // 获取验证器地址
-+    function getValidator(string calldata validationType) external view returns (address) {
-+        return _validators[validationType];
-+    }
-+
-+    // 校验证明
-+    function validateProof(
-+        uint256 agentId,
-+        string calldata validationType,
-+        bytes calldata proof
-+    ) external view returns (bool) {
-+        address validator = _validators[validationType];
-+        
-+        // 如果没有注册对应的验证器，直接返回 false
-+        if (validator == address(0)) {
-+            return false;
-+        }
-+
-+        // 调用对应验证器合约进行验证
-+        try IValidator(validator).validate(agentId, proof) returns (bool result) {
-+            return result;
-+        } catch {
-+            return false;
-+        }
-+    }
-+}
-diff --git a/contracts/test/AgentIdentityTest.t.sol b/contracts/test/AgentIdentityTest.t.sol
-new file mode 100644
-index 0000000..1316091
---- /dev/null
-+++ b/contracts/test/AgentIdentityTest.t.sol
-@@ -0,0 +1,224 @@
-+// SPDX-License-Identifier: MIT
-+pragma solidity ^0.8.20;
-+
-+import "forge-std/Test.sol";
-+import "../src/identity/AgentIdentityRegistry.sol";
-+import "../src/identity/ValidationRegistry.sol";
-+
-+// Mock 验证器用于测试自定义验证逻辑路由
-+contract MockValidator is IValidator {
-+    function validate(uint256 /*agentId*/, bytes calldata proof) external pure override returns (bool) {
-+        // 如果 proof 以 0x01 开头，返回 true，否则返回 false
-+        if (proof.length > 0 && proof[0] == 0x01) {
-+            return true;
-+        }
-+        return false;
-+    }
-+}
-+
-+contract AgentIdentityTest is Test {
-+    AgentIdentityRegistry public identityRegistry;
-+    ValidationRegistry public validationRegistry;
-+
-+    address public owner = address(0xABC);
-+    address public user1 = address(0x111);
-+    address public user2 = address(0x222);
-+
-+    function setUp() public {
-+        // 切换到 owner 部署合约
-+        vm.startPrank(owner);
-+        identityRegistry = new AgentIdentityRegistry();
-+        validationRegistry = new ValidationRegistry();
-+        vm.stopPrank();
-+    }
-+
-+    // 1. 测试 AgentIdentityRegistry 的注册和基本元数据读取
-+    function testRegisterAgent() public {
-+        vm.startPrank(user1);
-+        
-+        string memory modelId = "deepseek-r1";
-+        string memory serviceEndpoint = "https://api.deepseek.com/v1";
-+        bytes32 teeAttestation = keccak256("attestation-data");
-+        string memory capabilities = "inference,payment";
-+
-+        uint256 agentId = identityRegistry.registerAgent(
-+            modelId,
-+            serviceEndpoint,
-+            teeAttestation,
-+            capabilities
-+        );
-+
-+        // 验证返回的 agentId 应该为 1
-+        assertEq(agentId, 1);
-+
-+        // 验证元数据是否正确写入
++        // 检查 channels 存储
 +        (
-+            string memory rModelId,
-+            string memory rServiceEndpoint,
-+            bytes32 rTeeAttestation,
-+            string memory rCapabilities,
-+            uint256 rRegisteredAt,
-+            address rOwner
-+        ) = identityRegistry.getAgent(agentId);
++            address channelPayer,
++            uint256 channelAgentId,
++            uint256 channelMaxAmount,
++            uint256 channelSettledAmount,
++            uint256 channelExpiresAt,
++            PaymentEscrow.PaymentStatus channelStatus
++        ) = escrow.channels(channelId);
 +
-+        assertEq(rModelId, modelId);
-+        assertEq(rServiceEndpoint, serviceEndpoint);
-+        assertEq(rTeeAttestation, teeAttestation);
-+        assertEq(rCapabilities, capabilities);
-+        assertEq(rRegisteredAt, block.timestamp);
-+        assertEq(rOwner, user1);
++        assertEq(channelPayer, customPayer);
++        assertEq(channelAgentId, agentId);
++        assertEq(channelMaxAmount, maxAmount);
++        assertEq(channelSettledAmount, 0);
++        assertEq(channelExpiresAt, block.timestamp + duration);
++        assertEq(uint256(channelStatus), 1); // Locked
 +
-+        // 验证 verifyAgent 接口
-+        assertTrue(identityRegistry.verifyAgent(agentId));
-+        assertFalse(identityRegistry.verifyAgent(999)); // 不存在的 agentId
++        // 线下生成 EIP-712 签名
++        uint256 accumulatedAmount = 300 * 10**6;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
 +
-+        vm.stopPrank();
-+    }
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
 +
-+    // 2. 测试更新元数据
-+    function testUpdateMetadata() public {
-+        vm.startPrank(user1);
-+        uint256 agentId = identityRegistry.registerAgent(
-+            "model-a",
-+            "endpoint-a",
-+            keccak256("tee-a"),
-+            "cap-a"
-+        );
++        uint256 agentOwnerBalanceBefore = usdc.balanceOf(agentOwner);
++        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
 +
-+        // 拥有者成功更新
-+        string memory newModel = "model-b";
-+        string memory newEndpoint = "endpoint-b";
-+        bytes32 newTee = keccak256("tee-b");
-+        string memory newCap = "cap-b";
++        // settler 结算
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
 +
-+        identityRegistry.updateMetadata(agentId, newModel, newEndpoint, newTee, newCap);
-+
-+        (
-+            string memory rModelId,
-+            string memory rServiceEndpoint,
-+            bytes32 rTeeAttestation,
-+            string memory rCapabilities,,
-+        ) = identityRegistry.getAgent(agentId);
-+
-+        assertEq(rModelId, newModel);
-+        assertEq(rServiceEndpoint, newEndpoint);
-+        assertEq(rTeeAttestation, newTee);
-+        assertEq(rCapabilities, newCap);
-+
-+        vm.stopPrank();
-+
-+        // 非拥有者更新应该被 revert
-+        vm.startPrank(user2);
-+        vm.expectRevert(AgentIdentityRegistry.NotAgentOwner.selector);
-+        identityRegistry.updateMetadata(agentId, newModel, newEndpoint, newTee, newCap);
-+        vm.stopPrank();
-+    }
-+
-+    // 3. 测试 Soulbound 限制 (禁止转让)
-+    function testSoulboundTransferBlocked() public {
-+        vm.startPrank(user1);
-+        uint256 agentId = identityRegistry.registerAgent(
-+            "model-a",
-+            "endpoint-a",
-+            keccak256("tee-a"),
-+            "cap-a"
-+        );
-+
-+        // 尝试转让应该 Revert
-+        vm.expectRevert(AgentIdentityRegistry.SoulboundTransferBlocked.selector);
-+        identityRegistry.transferFrom(user1, user2, agentId);
-+
-+        vm.expectRevert(AgentIdentityRegistry.SoulboundTransferBlocked.selector);
-+        identityRegistry.safeTransferFrom(user1, user2, agentId);
-+
-+        vm.stopPrank();
-+    }
-+
-+    // 4. 测试 ValidationRegistry 默认路由（未注册验证器时返回 false）
-+    function testValidationRegistryDefaultRouting() public {
-+        vm.prank(user1); // 避免 view 警告
-+        // 未注册验证器时，对任意 proof 验证应返回 false
-+        bytes memory mockProof = "some-proof";
-+        bool result = validationRegistry.validateProof(1, "TEE", mockProof);
-+        assertFalse(result);
-+
-+        result = validationRegistry.validateProof(1, "MPC", mockProof);
-+        assertFalse(result);
-+    }
-+
-+    // 5. 测试 ValidationRegistry 注册验证器及路由校验
-+    function testValidationRegistryCustomRouting() public {
-+        // 部署 Mock 验证器
-+        MockValidator mockValidator = new MockValidator();
-+
-+        // 只有 Owner 可以注册验证器
-+        vm.startPrank(user1);
-+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", user1));
-+        validationRegistry.registerValidator("TEE", address(mockValidator));
-+        vm.stopPrank();
-+
-+        // 非合约地址注册应该报错 ValidatorNotContract
-+        vm.startPrank(owner);
-+        vm.expectRevert(ValidationRegistry.ValidatorNotContract.selector);
-+        validationRegistry.registerValidator("TEE", user1);
-+
-+        // Owner 注册验证器
-+        validationRegistry.registerValidator("TEE", address(mockValidator));
-+        assertEq(validationRegistry.getValidator("TEE"), address(mockValidator));
-+        vm.stopPrank();
-+
-+        // 验证路由：传递以 0x01 开头的证明，应当验证通过 (true)
-+        bytes memory validProof = abi.encodePacked(uint8(0x01), "valid-attestation");
-+        bool success = validationRegistry.validateProof(1, "TEE", validProof);
-+        assertTrue(success);
-+
-+        // 验证路由：传递其他开头的证明，应当验证失败 (false)
-+        bytes memory invalidProof = abi.encodePacked(uint8(0x00), "invalid-attestation");
-+        bool fail = validationRegistry.validateProof(1, "TEE", invalidProof);
-+        assertFalse(fail);
-+
-+        // 验证路由：对于未注册的验证器类型返回 false
-+        bool result = validationRegistry.validateProof(1, "OTHER_TYPE", invalidProof);
-+        assertFalse(result);
-+    }
-+
-+    // 6. 测试空字段校验
-+    function testRegisterAgentWithEmptyFields() public {
-+        vm.startPrank(user1);
-+        // modelId 为空
-+        vm.expectRevert(AgentIdentityRegistry.InvalidMetadata.selector);
-+        identityRegistry.registerAgent("", "endpoint-a", keccak256("tee-a"), "cap-a");
++        // 验证通道状态
++        (,,,,, channelStatus) = escrow.channels(channelId);
++        assertEq(uint256(channelStatus), 2); // Released
 +        
-+        // serviceEndpoint 为空
-+        vm.expectRevert(AgentIdentityRegistry.InvalidMetadata.selector);
-+        identityRegistry.registerAgent("model-a", "", keccak256("tee-a"), "cap-a");
-+        vm.stopPrank();
++        // 验证余额：agentOwner 获得 accumulatedAmount，payer 获得退回的 remainder (maxAmount - accumulatedAmount)
++        assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + accumulatedAmount);
++        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + (maxAmount - accumulatedAmount));
 +    }
 +
-+    // 7. 测试 NFT 销毁（Burn）行为
-+    function testBurnAgent() public {
-+        vm.startPrank(user1);
-+        uint256 agentId = identityRegistry.registerAgent(
-+            "model-a",
-+            "endpoint-a",
-+            keccak256("tee-a"),
-+            "cap-a"
-+        );
-+        
-+        // 验证销毁
-+        identityRegistry.burn(agentId);
-+        assertFalse(identityRegistry.verifyAgent(agentId));
-+        
-+        // 验证已销毁代币不能再被 getAgent、updateMetadata 或再次 burn
-+        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
-+        identityRegistry.getAgent(agentId);
-+        
-+        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
-+        identityRegistry.updateMetadata(agentId, "model-b", "endpoint-b", keccak256("tee-b"), "cap-b");
-+        
-+        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
-+        identityRegistry.burn(agentId);
-+        
-+        vm.stopPrank();
++    // 14. 逆向测试：伪造签名结算应失败
++    function test_ChannelBatchSettleInvalidSignatureReverts() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
++
++        uint256 accumulatedAmount = 300 * 10**6;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
++
++        // 用错误的私钥签名
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xBAD, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
++
++        vm.expectRevert(PaymentEscrow.InvalidSignature.selector);
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
 +    }
-+}
++
++    // 15. 逆向测试：状态通道超时后结算应被拦截
++    function test_ChannelBatchSettleExpiredReverts() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
++
++        uint256 accumulatedAmount = 300 * 10**6;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
++
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
++
++        // 快进时间到超时
++        skip(3601);
++
++        vm.expectRevert(PaymentEscrow.ChannelExpired.selector);
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
++    }
++
++    // 16. 测试状态通道退款：未超时退款失败与超时退款成功
++    function test_ChannelRefundSuccessAndNotExpiredRevert() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        uint256 maxAmount = 500 * 10**6;
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
++
++        // 未超时退款应被拦截
++        vm.expectRevert(PaymentEscrow.ChannelNotExpired.selector);
++        escrow.refundChannel(channelId);
++
++        // 快进时间到超时后
++        skip(3601);
++
++        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
++        escrow.refundChannel(channelId);
++
++        (,,,,, PaymentEscrow.PaymentStatus channelStatus) = escrow.channels(channelId);
++        assertEq(uint256(channelStatus), 3); // Refunded
++        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + maxAmount);
++    }
++
++    // 17. 增加 test_ChannelBatchSettleNonSettlerReverts
++    function test_ChannelBatchSettleNonSettlerReverts() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
++
++        uint256 accumulatedAmount = 300 * 10**6;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
++
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
++
++        // 模拟非 Settler 尝试结算
++        vm.expectRevert(PaymentEscrow.NotSettler.selector);
++        vm.prank(payer);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
++    }
++
++    // 18. 增加 test_ChannelBatchSettleZeroAddressRecipientReverts
++    function test_ChannelBatchSettleZeroAddressRecipientReverts() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
++
++        uint256 accumulatedAmount = 300 * 10**6;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
++
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
++
++        // 结算传入的 agentOwner = address(0)
++        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, address(0));
++    }
++
++    // 19. 增加 test_ChannelBatchSettleZeroAmountReverts
++    function test_ChannelBatchSettleZeroAmountReverts() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
++
++        // 累计消费 accumulatedAmount = 0
++        uint256 accumulatedAmount = 0;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
++
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
++
++        vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
++    }
++
++    // 20. 增加 test_ChannelBatchSettleExceedMaxAmountReverts
++    function test_ChannelBatchSettleExceedMaxAmountReverts() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        uint256 maxAmount = 500 * 10**6;
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
++
++        // 累计消费超过通道最大上限 maxAmount + 1
++        uint256 accumulatedAmount = maxAmount + 1;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
++
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
++
++        vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
++    }
++
++    // 21. 增加 test_ChannelBatchSettleDoubleSettleReverts
++    function test_ChannelBatchSettleDoubleSettleReverts() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        uint256 maxAmount = 500 * 10**6;
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
++
++        uint256 accumulatedAmount = 300 * 10**6;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
++
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
++
++        // 第一遍成功结算
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
++
++        // 尝试进行二次结算
++        vm.expectRevert(PaymentEscrow.InvalidStatus.selector);
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
++    }
+ }
