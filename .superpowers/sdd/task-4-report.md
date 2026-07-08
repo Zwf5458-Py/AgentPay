@@ -67,3 +67,18 @@
 
 - 所有改动文件已添加到 git 分支。
 - `.gitignore` 已配置，排除 `node_modules` 与构建文件夹 `dist/`。
+
+## 5. API 入参防崩加固修复
+
+针对输入校验不严密漏洞（可能会因传入浮点数、NaN、null 等导致服务发生运行时 500 崩溃），我们执行了如下重构修复：
+
+1. **接口加固 (`agent/src/index.ts`)**:
+   - 限制 `input` 必须为有效非空字符串 (`typeof input === "string"` 且非空)。
+   - 限制 `agentId` 必须是安全的、合规的非负整数 (`Number.isSafeInteger(agentId) && agentId >= 0`)，完美拦截 `NaN`、`1.5`、`null`、`undefined` 等引起的转换崩溃风险。
+   - 校验失败统一返回 **HTTP 400** 状态码。
+2. **测试追加 (`agent/test/agent.test.ts`)**:
+   - 重构了异常参数测试套件，追加了大量针对非法输入的测试（包括 NaN、1.5、null、undefined 等非安全整数和非字符串边界测试）。
+   - 所有的断言均拦截为 **HTTP 400**。
+3. **测试结果**:
+   - 重新执行编译与测试后，全部测试顺利 100% 通过。
+

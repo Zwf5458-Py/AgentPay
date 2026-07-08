@@ -74,30 +74,44 @@ describe('Agent execute endpoint & cryptography validation', () => {
     expect(recoveredAddress.toLowerCase()).toBe(expectedAddress.toLowerCase());
   });
 
-  it('should return 400 if input or agentId is missing', async () => {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agent/execute',
-      payload: {
-        input: 'hello'
-      }
-    });
+  it('should return 400 for various invalid inputs', async () => {
+    const invalidInputs = [
+      { payload: { agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // missing input
+      { payload: { input: '', agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // empty string
+      { payload: { input: '   ', agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // blank string
+      { payload: { input: null, agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // null input
+      { payload: { input: 123, agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // non-string input
+    ];
 
-    expect(response.statusCode).toBe(400);
-    expect(JSON.parse(response.body).error).toBe('Missing input or agentId');
+    for (const { payload, errorMsg } of invalidInputs) {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/agent/execute',
+        payload
+      });
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error).toBe(errorMsg);
+    }
   });
 
-  it('should return 400 if agentId is negative', async () => {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agent/execute',
-      payload: {
-        input: 'hello',
-        agentId: -1
-      }
-    });
+  it('should return 400 for various invalid agentIds', async () => {
+    const invalidAgentIds = [
+      { payload: { input: 'hello' }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // missing agentId
+      { payload: { input: 'hello', agentId: -1 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // negative
+      { payload: { input: 'hello', agentId: 1.5 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // float
+      { payload: { input: 'hello', agentId: NaN }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // NaN
+      { payload: { input: 'hello', agentId: null }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // null agentId
+      { payload: { input: 'hello', agentId: Number.MAX_SAFE_INTEGER + 10 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // unsafe integer
+    ];
 
-    expect(response.statusCode).toBe(400);
-    expect(JSON.parse(response.body).error).toBe('agentId must be a non-negative number');
+    for (const { payload, errorMsg } of invalidAgentIds) {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/agent/execute',
+        payload
+      });
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error).toBe(errorMsg);
+    }
   });
 });

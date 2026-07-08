@@ -20,16 +20,21 @@ interface ExecuteBody {
 server.post('/agent/execute', async (request, reply) => {
   const body = request.body as ExecuteBody;
 
-  // 1. 校验参数完整性
-  if (!body || body.input === undefined || body.agentId === undefined) {
-    return reply.status(400).send({ error: 'Missing input or agentId' });
+  // 1. 校验参数完整性与类型限制
+  if (!body) {
+    return reply.status(400).send({ error: 'Missing request body' });
   }
 
   const { input, agentId } = body;
 
-  // 2. 校验 agentId 必须大于等于 0
-  if (typeof agentId !== 'number' || agentId < 0) {
-    return reply.status(400).send({ error: 'agentId must be a non-negative number' });
+  // 限制 input 必须是有效的非空字符串
+  if (typeof input !== 'string' || input.trim() === '') {
+    return reply.status(400).send({ error: 'Invalid input. Must be a non-empty string.' });
+  }
+
+  // 限制 agentId 必须是安全的、合规的非负整数
+  if (typeof agentId !== 'number' || !Number.isSafeInteger(agentId) || agentId < 0) {
+    return reply.status(400).send({ error: 'Invalid agentId. Must be a non-negative safe integer.' });
   }
 
   try {
