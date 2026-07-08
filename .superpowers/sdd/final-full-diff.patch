@@ -1,9 +1,43 @@
+diff --git a/aa-bridge/package.json b/aa-bridge/package.json
+new file mode 100644
+index 0000000..db6b6a5
+--- /dev/null
++++ b/aa-bridge/package.json
+@@ -0,0 +1,28 @@
++{
++  "name": "aa-bridge",
++  "version": "1.0.0",
++  "type": "module",
++  "description": "Smart Account Bridge for AgentPay",
++  "main": "dist/index.js",
++  "scripts": {
++    "dev": "ts-node src/index.ts",
++    "build": "tsc",
++    "start": "node dist/index.js",
++    "test": "vitest run"
++  },
++  "dependencies": {
++    "@zerodev/ecdsa-validator": "^5.0.0",
++    "@zerodev/permissions": "^5.0.0",
++    "@zerodev/sdk": "^5.0.0",
++    "dotenv": "^16.4.5",
++    "fastify": "^4.28.0",
++    "tslib": "^2.8.1",
++    "viem": "^2.17.0"
++  },
++  "devDependencies": {
++    "@types/node": "^20.14.9",
++    "ts-node": "^10.9.2",
++    "typescript": "^5.5.3",
++    "vitest": "^1.6.0"
++  }
++}
 diff --git a/aa-bridge/src/index.ts b/aa-bridge/src/index.ts
 new file mode 100644
-index 0000000..3d840db
+index 0000000..7449c83
 --- /dev/null
 +++ b/aa-bridge/src/index.ts
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,346 @@
 +import fastify from 'fastify';
 +import dotenv from 'dotenv';
 +import { getSmartAccountAddress, getAccountBalance } from './kernel/account.js';
@@ -29,6 +63,26 @@ index 0000000..3d840db
 +    success: false,
 +    error: error.message || 'Internal Server Error',
 +  });
++});
++
++// onRequest hook to enforce security credentials validation via x-internal-secret
++server.addHook('onRequest', async (request, reply) => {
++  const secret = process.env.INTERNAL_SECRET;
++  if (!secret) {
++    server.log.error('INTERNAL_SECRET is not configured in the environment');
++    return reply.status(500).send({
++      success: false,
++      error: 'INTERNAL_SECRET is not configured on the server',
++    });
++  }
++
++  const clientSecret = request.headers['x-internal-secret'];
++  if (!clientSecret || clientSecret !== secret) {
++    return reply.status(401).send({
++      success: false,
++      error: 'Unauthorized: Missing or invalid x-internal-secret header',
++    });
++  }
 +});
 +
 +// Helper to check bytecode size on-chain to determine deployment status
@@ -540,10 +594,10 @@ index 0000000..ca803e5
 +}
 diff --git a/aa-bridge/test/aa-bridge.test.ts b/aa-bridge/test/aa-bridge.test.ts
 new file mode 100644
-index 0000000..0dbc25e
+index 0000000..0f57a9e
 --- /dev/null
 +++ b/aa-bridge/test/aa-bridge.test.ts
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,248 @@
 +import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 +
 +// Declare Vitest mocks before imports so they are hoisted correctly
@@ -591,6 +645,7 @@ index 0000000..0dbc25e
 +
 +describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability Fixes)', () => {
 +  beforeAll(async () => {
++    process.env.INTERNAL_SECRET = 'test-secret';
 +    await server.ready();
 +  });
 +
@@ -603,6 +658,9 @@ index 0000000..0dbc25e
 +    const response = await server.inject({
 +      method: 'POST',
 +      url: '/aa/account/create',
++      headers: {
++        'x-internal-secret': 'test-secret'
++      },
 +      payload: {
 +        ownerAddress: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
 +        agentId: 42,
@@ -622,6 +680,9 @@ index 0000000..0dbc25e
 +    const createRes = await server.inject({
 +      method: 'POST',
 +      url: '/aa/account/create',
++      headers: {
++        'x-internal-secret': 'test-secret'
++      },
 +      payload: {
 +        ownerAddress: '0xinvalidEthereumAddress',
 +        agentId: 42,
@@ -635,6 +696,9 @@ index 0000000..0dbc25e
 +    const grantRes = await server.inject({
 +      method: 'POST',
 +      url: '/aa/permission/grant',
++      headers: {
++        'x-internal-secret': 'test-secret'
++      },
 +      payload: {
 +        agentId: 42,
 +        sessionKeyAddress: '0xnotAnAddress',
@@ -649,6 +713,9 @@ index 0000000..0dbc25e
 +    const settleRes = await server.inject({
 +      method: 'POST',
 +      url: '/aa/settle',
++      headers: {
++        'x-internal-secret': 'test-secret'
++      },
 +      payload: {
 +        lockId: '0x1111111111111111111111111111111111111111111111111111111111111111',
 +        proof: '0xabcdef',
@@ -663,7 +730,10 @@ index 0000000..0dbc25e
 +  it('should query account balance successfully when cached', async () => {
 +    const response = await server.inject({
 +      method: 'GET',
-+      url: '/aa/account/42'
++      url: '/aa/account/42',
++      headers: {
++        'x-internal-secret': 'test-secret'
++      }
 +    });
 +
 +    expect(response.statusCode).toBe(200);
@@ -699,7 +769,10 @@ index 0000000..0dbc25e
 +
 +      const response = await server.inject({
 +        method: 'GET',
-+        url: '/aa/account/100' // cache miss
++        url: '/aa/account/100', // cache miss
++        headers: {
++          'x-internal-secret': 'test-secret'
++        }
 +      });
 +
 +      expect(response.statusCode).toBe(200);
@@ -720,7 +793,10 @@ index 0000000..0dbc25e
 +
 +      const response = await server.inject({
 +        method: 'GET',
-+        url: '/aa/account/999' // cache miss and unregistered
++        url: '/aa/account/999', // cache miss and unregistered
++        headers: {
++          'x-internal-secret': 'test-secret'
++        }
 +      });
 +
 +      expect(response.statusCode).toBe(404);
@@ -733,6 +809,9 @@ index 0000000..0dbc25e
 +      const response = await server.inject({
 +        method: 'POST',
 +        url: '/aa/settle',
++        headers: {
++          'x-internal-secret': 'test-secret'
++        },
 +        payload: {
 +          lockId: '0x1111111111111111111111111111111111111111111111111111111111111111',
 +          proof: '0xabcdef',
@@ -746,8 +825,57 @@ index 0000000..0dbc25e
 +      expect(body.success).toBe(false);
 +      expect(body).toHaveProperty('error');
 +    });
++
++    it('should return 401 Unauthorized when x-internal-secret header is missing or incorrect', async () => {
++      const res1 = await server.inject({
++        method: 'GET',
++        url: '/aa/account/42'
++      });
++      expect(res1.statusCode).toBe(401);
++      expect(JSON.parse(res1.body).error).toContain('Unauthorized');
++
++      const res2 = await server.inject({
++        method: 'GET',
++        url: '/aa/account/42',
++        headers: {
++          'x-internal-secret': 'wrong-secret'
++        }
++      });
++      expect(res2.statusCode).toBe(401);
++      expect(JSON.parse(res2.body).error).toContain('Unauthorized');
++    });
 +  });
 +});
+diff --git a/agent/package.json b/agent/package.json
+new file mode 100644
+index 0000000..84a9bdf
+--- /dev/null
++++ b/agent/package.json
+@@ -0,0 +1,24 @@
++{
++  "name": "agentpay-agent",
++  "version": "1.0.0",
++  "description": "Eliza Agent ERC-8004 Proof Plugin Mock API Server",
++  "main": "dist/index.js",
++  "type": "module",
++  "scripts": {
++    "build": "tsc",
++    "start": "node dist/index.js",
++    "dev": "tsx src/index.ts",
++    "test": "vitest run"
++  },
++  "dependencies": {
++    "dotenv": "^16.4.5",
++    "fastify": "^4.28.1",
++    "viem": "^2.17.0"
++  },
++  "devDependencies": {
++    "@types/node": "^20.14.9",
++    "tsx": "^4.16.0",
++    "typescript": "^5.5.2",
++    "vitest": "^1.6.0"
++  }
++}
 diff --git a/agent/src/index.ts b/agent/src/index.ts
 new file mode 100644
 index 0000000..07aa153
@@ -1660,10 +1788,10 @@ index 0000000..10c3587
 +}
 diff --git a/docker-compose.yml b/docker-compose.yml
 new file mode 100644
-index 0000000..9de9986
+index 0000000..1439f33
 --- /dev/null
 +++ b/docker-compose.yml
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,49 @@
 +version: '3.8'
 +
 +services:
@@ -1678,12 +1806,13 @@ index 0000000..9de9986
 +      context: ./aa-bridge
 +      dockerfile: Dockerfile
 +    ports:
-+      - "3001:3001"
++      - "127.0.0.1:3001:3001"
 +    environment:
 +      - PORT=3001
 +      - RPC_URL=http://anvil:8545
 +      - DEV_MODE=true
 +      - PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
++      - INTERNAL_SECRET=default-compose-secret
 +    depends_on:
 +      - anvil
 +
@@ -1708,15 +1837,16 @@ index 0000000..9de9986
 +      - ELIZA_AGENT_URL=http://agent:3002
 +      - AA_BRIDGE_URL=http://aa-bridge:3001/aa/settle
 +      - ESCROW_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
++      - INTERNAL_SECRET=default-compose-secret
 +    depends_on:
 +      - agent
 +      - aa-bridge
 diff --git a/gateway/cmd/gateway/main.go b/gateway/cmd/gateway/main.go
 new file mode 100644
-index 0000000..83b449f
+index 0000000..aea4ede
 --- /dev/null
 +++ b/gateway/cmd/gateway/main.go
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,61 @@
 +package main
 +
 +import (
@@ -1759,7 +1889,8 @@ index 0000000..83b449f
 +	r.Use(chiMiddleware.Recoverer)
 +
 +	// 创建反向代理
-+	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL)
++	internalSecret := os.Getenv("INTERNAL_SECRET")
++	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret)
 +	if err != nil {
 +		log.Fatalf("Failed to initialize reverse proxy: %v", err)
 +	}
@@ -1887,10 +2018,10 @@ index 0000000..18103b5
 +}
 diff --git a/gateway/internal/middleware/x402_test.go b/gateway/internal/middleware/x402_test.go
 new file mode 100644
-index 0000000..e00936f
+index 0000000..5138e3c
 --- /dev/null
 +++ b/gateway/internal/middleware/x402_test.go
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,302 @@
 +package middleware_test
 +
 +import (
@@ -2053,6 +2184,13 @@ index 0000000..e00936f
 +			t.Errorf("Bridge received path %q, expected /aa/settle", r.URL.Path)
 +		}
 +
++		secret := r.Header.Get("X-Internal-Secret")
++		if secret != "test-secret" {
++			w.WriteHeader(http.StatusUnauthorized)
++			w.Write([]byte(`{"error":"unauthorized"}`))
++			return
++		}
++
 +		bodyBytes, err := io.ReadAll(r.Body)
 +		if err != nil {
 +			t.Errorf("Failed to read bridge request body: %v", err)
@@ -2070,7 +2208,7 @@ index 0000000..e00936f
 +	defer bridgeServer.Close()
 +
 +	// 3. 初始化 Gateway 反向代理
-+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle")
++	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
 +	if err != nil {
 +		t.Fatalf("Failed to create reverse proxy: %v", err)
 +	}
@@ -2141,13 +2279,21 @@ index 0000000..e00936f
 +		mu.Lock()
 +		attempts++
 +		mu.Unlock()
++
++		secret := r.Header.Get("X-Internal-Secret")
++		if secret != "test-secret" {
++			w.WriteHeader(http.StatusUnauthorized)
++			w.Write([]byte(`{"error":"unauthorized"}`))
++			return
++		}
++
 +		w.WriteHeader(http.StatusInternalServerError)
 +		w.Write([]byte(`{"error":"bridge internal error"}`))
 +	}))
 +	defer bridgeServer.Close()
 +
-+	// 初始化 Gateway 反向代理，指向会失败的 AA Bridge
-+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle")
++	// 初始化 Gateway 反向代理，指向会失败 defects AA Bridge
++	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
 +	if err != nil {
 +		t.Fatalf("Failed to create reverse proxy: %v", err)
 +	}
@@ -2180,10 +2326,10 @@ index 0000000..e00936f
 +}
 diff --git a/gateway/internal/proxy/reverse.go b/gateway/internal/proxy/reverse.go
 new file mode 100644
-index 0000000..a3f795d
+index 0000000..648621b
 --- /dev/null
 +++ b/gateway/internal/proxy/reverse.go
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,152 @@
 +package proxy
 +
 +import (
@@ -2203,15 +2349,16 @@ index 0000000..a3f795d
 +
 +// ReverseProxyWrapper 封装了反向代理的逻辑
 +type ReverseProxyWrapper struct {
-+	proxy         *httputil.ReverseProxy
-+	aaBridgeURL   string
-+	agentOwner    string
-+	escrowAddress string
-+	Client        *http.Client // 复用 HTTP Client，避免并发端口耗尽
++	proxy          *httputil.ReverseProxy
++	aaBridgeURL    string
++	agentOwner     string
++	escrowAddress  string
++	internalSecret string
++	Client         *http.Client // 复用 HTTP Client，避免并发端口耗尽
 +}
 +
 +// NewReverseProxy 构造反向代理实例
-+func NewReverseProxy(targetURL string, aaBridgeURL string) (*ReverseProxyWrapper, error) {
++func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string) (*ReverseProxyWrapper, error) {
 +	url, err := url.Parse(targetURL)
 +	if err != nil {
 +		return nil, err
@@ -2229,9 +2376,10 @@ index 0000000..a3f795d
 +	}
 +
 +	wrapper := &ReverseProxyWrapper{
-+		aaBridgeURL:   aaBridgeURL,
-+		agentOwner:    agentOwner,
-+		escrowAddress: escrowAddress,
++		aaBridgeURL:    aaBridgeURL,
++		agentOwner:     agentOwner,
++		escrowAddress:  escrowAddress,
++		internalSecret: internalSecret,
 +		Client: &http.Client{
 +			Timeout: 10 * time.Second,
 +		},
@@ -2298,6 +2446,9 @@ index 0000000..a3f795d
 +			return
 +		}
 +		req.Header.Set("Content-Type", "application/json")
++		if w.internalSecret != "" {
++			req.Header.Set("X-Internal-Secret", w.internalSecret)
++		}
 +
 +		// 3. 复用结构体自带的 Client 进行网络调用
 +		resp, err = w.Client.Do(req)
@@ -2439,10 +2590,10 @@ index 0000000..c9cfe24
 +}
 diff --git a/sdk/test/e2e.test.ts b/sdk/test/e2e.test.ts
 new file mode 100644
-index 0000000..5be0a46
+index 0000000..f6fca72
 --- /dev/null
 +++ b/sdk/test/e2e.test.ts
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,222 @@
 +import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 +import http from 'http';
 +import { AgentPayClient } from '../src/client.js';
@@ -2463,6 +2614,13 @@ index 0000000..5be0a46
 +beforeAll(async () => {
 +  // 1. Mock AA Bridge (:13001)
 +  mockBridge = http.createServer((req, res) => {
++    const secretHeader = req.headers['x-internal-secret'];
++    const expectedSecret = process.env.INTERNAL_SECRET || 'test-secret';
++    if (!secretHeader || secretHeader !== expectedSecret) {
++      res.writeHead(401, { 'Content-Type': 'application/json' });
++      res.end(JSON.stringify({ error: 'unauthorized' }));
++      return;
++    }
 +    if (req.method === 'POST' && req.url === '/aa/settle') {
 +      let body = '';
 +      req.on('data', chunk => { body += chunk; });
@@ -2554,7 +2712,10 @@ index 0000000..5be0a46
 +                  port: BRIDGE_PORT,
 +                  path: '/aa/settle',
 +                  method: 'POST',
-+                  headers: { 'Content-Type': 'application/json' }
++                  headers: {
++                    'Content-Type': 'application/json',
++                    'x-internal-secret': process.env.INTERNAL_SECRET || 'test-secret'
++                  }
 +                });
 +                bridgeReq.write(JSON.stringify({
 +                  lockId: 'lock-999',
@@ -2635,5 +2796,23 @@ index 0000000..5be0a46
 +    });
 +
 +    await expect(client.execute(1, 'Test 0n Limit')).rejects.toThrow('Price limit exceeded');
++  });
++
++  it('should return 401 from mockBridge if x-internal-secret header is missing', async () => {
++    await new Promise<void>((resolve, reject) => {
++      const req = http.request({
++        host: '127.0.0.1',
++        port: BRIDGE_PORT,
++        path: '/aa/settle',
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' }
++      }, (res) => {
++        expect(res.statusCode).toBe(401);
++        resolve();
++      });
++      req.on('error', reject);
++      req.write(JSON.stringify({}));
++      req.end();
++    });
 +  });
 +});
