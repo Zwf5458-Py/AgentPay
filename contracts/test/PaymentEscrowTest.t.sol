@@ -260,4 +260,168 @@ contract PaymentEscrowTest is Test {
         vm.expectRevert(ReputationRegistry.InvalidAddress.selector);
         new ReputationRegistry(address(0));
     }
+
+    bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
+
+    // 13. 测试正常状态通道锁定与 EIP-712 批量结算流程
+    function test_ChannelBatchSettle() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        // 充值并授权
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        uint256 maxAmount = 500 * 10**6;
+        uint256 duration = 3600;
+
+        // 锁定通道
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, duration);
+
+        // 检查 channels 存储
+        (
+            address channelPayer,
+            uint256 channelAgentId,
+            uint256 channelMaxAmount,
+            uint256 channelSettledAmount,
+            uint256 channelExpiresAt,
+            PaymentEscrow.PaymentStatus channelStatus
+        ) = escrow.channels(channelId);
+
+        assertEq(channelPayer, customPayer);
+        assertEq(channelAgentId, agentId);
+        assertEq(channelMaxAmount, maxAmount);
+        assertEq(channelSettledAmount, 0);
+        assertEq(channelExpiresAt, block.timestamp + duration);
+        assertEq(uint256(channelStatus), 1); // Locked
+
+        // 线下生成 EIP-712 签名
+        uint256 accumulatedAmount = 300 * 10**6;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        uint256 agentOwnerBalanceBefore = usdc.balanceOf(agentOwner);
+        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
+
+        // settler 结算
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+
+        // 验证通道状态
+        (,,,,, channelStatus) = escrow.channels(channelId);
+        assertEq(uint256(channelStatus), 2); // Released
+        
+        // 验证余额：agentOwner 获得 accumulatedAmount，payer 获得退回的 remainder (maxAmount - accumulatedAmount)
+        assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + accumulatedAmount);
+        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + (maxAmount - accumulatedAmount));
+    }
+
+    // 14. 逆向测试：伪造签名结算应失败
+    function test_ChannelBatchSettleInvalidSignatureReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 300 * 10**6;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        // 用错误的私钥签名
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xBAD, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        vm.expectRevert(PaymentEscrow.InvalidSignature.selector);
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+    }
+
+    // 15. 逆向测试：状态通道超时后结算应被拦截
+    function test_ChannelBatchSettleExpiredReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 300 * 10**6;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // 快进时间到超时
+        skip(3601);
+
+        vm.expectRevert(PaymentEscrow.ChannelExpired.selector);
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+    }
+
+    // 16. 测试状态通道退款：未超时退款失败与超时退款成功
+    function test_ChannelRefundSuccessAndNotExpiredRevert() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        uint256 maxAmount = 500 * 10**6;
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
+
+        // 未超时退款应被拦截
+        vm.expectRevert(PaymentEscrow.ChannelNotExpired.selector);
+        escrow.refundChannel(channelId);
+
+        // 快进时间到超时后
+        skip(3601);
+
+        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
+        escrow.refundChannel(channelId);
+
+        (,,,,, PaymentEscrow.PaymentStatus channelStatus) = escrow.channels(channelId);
+        assertEq(uint256(channelStatus), 3); // Refunded
+        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + maxAmount);
+    }
 }
