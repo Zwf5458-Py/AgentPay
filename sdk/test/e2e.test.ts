@@ -18,6 +18,13 @@ const GATEWAY_PORT = 18080;
 beforeAll(async () => {
   // 1. Mock AA Bridge (:13001)
   mockBridge = http.createServer((req, res) => {
+    const secretHeader = req.headers['x-internal-secret'];
+    const expectedSecret = process.env.INTERNAL_SECRET || 'test-secret';
+    if (!secretHeader || secretHeader !== expectedSecret) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
     if (req.method === 'POST' && req.url === '/aa/settle') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
@@ -109,7 +116,10 @@ beforeAll(async () => {
                   port: BRIDGE_PORT,
                   path: '/aa/settle',
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' }
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-internal-secret': process.env.INTERNAL_SECRET || 'test-secret'
+                  }
                 });
                 bridgeReq.write(JSON.stringify({
                   lockId: 'lock-999',
@@ -190,5 +200,23 @@ describe('AgentPay SDK E2E Integration Test', () => {
     });
 
     await expect(client.execute(1, 'Test 0n Limit')).rejects.toThrow('Price limit exceeded');
+  });
+
+  it('should return 401 from mockBridge if x-internal-secret header is missing', async () => {
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: BRIDGE_PORT,
+        path: '/aa/settle',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      }, (res) => {
+        expect(res.statusCode).toBe(401);
+        resolve();
+      });
+      req.on('error', reject);
+      req.write(JSON.stringify({}));
+      req.end();
+    });
   });
 });

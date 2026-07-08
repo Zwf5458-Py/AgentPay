@@ -40,7 +40,8 @@ func main() {
 	r.Use(chiMiddleware.Recoverer)
 
 	// 创建反向代理
-	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL)
+	internalSecret := os.Getenv("INTERNAL_SECRET")
+	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret)
 	if err != nil {
 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
 	}

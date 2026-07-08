@@ -17,15 +17,16 @@ import (
 
 // ReverseProxyWrapper 封装了反向代理的逻辑
 type ReverseProxyWrapper struct {
-	proxy         *httputil.ReverseProxy
-	aaBridgeURL   string
-	agentOwner    string
-	escrowAddress string
-	Client        *http.Client // 复用 HTTP Client，避免并发端口耗尽
+	proxy          *httputil.ReverseProxy
+	aaBridgeURL    string
+	agentOwner     string
+	escrowAddress  string
+	internalSecret string
+	Client         *http.Client // 复用 HTTP Client，避免并发端口耗尽
 }
 
 // NewReverseProxy 构造反向代理实例
-func NewReverseProxy(targetURL string, aaBridgeURL string) (*ReverseProxyWrapper, error) {
+func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string) (*ReverseProxyWrapper, error) {
 	url, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, err
@@ -43,9 +44,10 @@ func NewReverseProxy(targetURL string, aaBridgeURL string) (*ReverseProxyWrapper
 	}
 
 	wrapper := &ReverseProxyWrapper{
-		aaBridgeURL:   aaBridgeURL,
-		agentOwner:    agentOwner,
-		escrowAddress: escrowAddress,
+		aaBridgeURL:    aaBridgeURL,
+		agentOwner:     agentOwner,
+		escrowAddress:  escrowAddress,
+		internalSecret: internalSecret,
 		Client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -112,6 +114,9 @@ func (w *ReverseProxyWrapper) settle(lockID, proof string) {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if w.internalSecret != "" {
+			req.Header.Set("X-Internal-Secret", w.internalSecret)
+		}
 
 		// 3. 复用结构体自带的 Client 进行网络调用
 		resp, err = w.Client.Do(req)

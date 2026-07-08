@@ -25,6 +25,26 @@ server.setErrorHandler((error, request, reply) => {
   });
 });
 
+// onRequest hook to enforce security credentials validation via x-internal-secret
+server.addHook('onRequest', async (request, reply) => {
+  const secret = process.env.INTERNAL_SECRET;
+  if (!secret) {
+    server.log.error('INTERNAL_SECRET is not configured in the environment');
+    return reply.status(500).send({
+      success: false,
+      error: 'INTERNAL_SECRET is not configured on the server',
+    });
+  }
+
+  const clientSecret = request.headers['x-internal-secret'];
+  if (!clientSecret || clientSecret !== secret) {
+    return reply.status(401).send({
+      success: false,
+      error: 'Unauthorized: Missing or invalid x-internal-secret header',
+    });
+  }
+});
+
 // Helper to check bytecode size on-chain to determine deployment status
 async function checkIsDeployed(address: string): Promise<boolean> {
   if (process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID) {

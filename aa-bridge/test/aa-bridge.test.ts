@@ -45,6 +45,7 @@ import { server } from '../src/index.js';
 
 describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability Fixes)', () => {
   beforeAll(async () => {
+    process.env.INTERNAL_SECRET = 'test-secret';
     await server.ready();
   });
 
@@ -57,6 +58,9 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
     const response = await server.inject({
       method: 'POST',
       url: '/aa/account/create',
+      headers: {
+        'x-internal-secret': 'test-secret'
+      },
       payload: {
         ownerAddress: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
         agentId: 42,
@@ -76,6 +80,9 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
     const createRes = await server.inject({
       method: 'POST',
       url: '/aa/account/create',
+      headers: {
+        'x-internal-secret': 'test-secret'
+      },
       payload: {
         ownerAddress: '0xinvalidEthereumAddress',
         agentId: 42,
@@ -89,6 +96,9 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
     const grantRes = await server.inject({
       method: 'POST',
       url: '/aa/permission/grant',
+      headers: {
+        'x-internal-secret': 'test-secret'
+      },
       payload: {
         agentId: 42,
         sessionKeyAddress: '0xnotAnAddress',
@@ -103,6 +113,9 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
     const settleRes = await server.inject({
       method: 'POST',
       url: '/aa/settle',
+      headers: {
+        'x-internal-secret': 'test-secret'
+      },
       payload: {
         lockId: '0x1111111111111111111111111111111111111111111111111111111111111111',
         proof: '0xabcdef',
@@ -117,7 +130,10 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
   it('should query account balance successfully when cached', async () => {
     const response = await server.inject({
       method: 'GET',
-      url: '/aa/account/42'
+      url: '/aa/account/42',
+      headers: {
+        'x-internal-secret': 'test-secret'
+      }
     });
 
     expect(response.statusCode).toBe(200);
@@ -153,7 +169,10 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
 
       const response = await server.inject({
         method: 'GET',
-        url: '/aa/account/100' // cache miss
+        url: '/aa/account/100', // cache miss
+        headers: {
+          'x-internal-secret': 'test-secret'
+        }
       });
 
       expect(response.statusCode).toBe(200);
@@ -174,7 +193,10 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
 
       const response = await server.inject({
         method: 'GET',
-        url: '/aa/account/999' // cache miss and unregistered
+        url: '/aa/account/999', // cache miss and unregistered
+        headers: {
+          'x-internal-secret': 'test-secret'
+        }
       });
 
       expect(response.statusCode).toBe(404);
@@ -187,6 +209,9 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
       const response = await server.inject({
         method: 'POST',
         url: '/aa/settle',
+        headers: {
+          'x-internal-secret': 'test-secret'
+        },
         payload: {
           lockId: '0x1111111111111111111111111111111111111111111111111111111111111111',
           proof: '0xabcdef',
@@ -199,6 +224,25 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
       const body = JSON.parse(response.body);
       expect(body.success).toBe(false);
       expect(body).toHaveProperty('error');
+    });
+
+    it('should return 401 Unauthorized when x-internal-secret header is missing or incorrect', async () => {
+      const res1 = await server.inject({
+        method: 'GET',
+        url: '/aa/account/42'
+      });
+      expect(res1.statusCode).toBe(401);
+      expect(JSON.parse(res1.body).error).toContain('Unauthorized');
+
+      const res2 = await server.inject({
+        method: 'GET',
+        url: '/aa/account/42',
+        headers: {
+          'x-internal-secret': 'wrong-secret'
+        }
+      });
+      expect(res2.statusCode).toBe(401);
+      expect(JSON.parse(res2.body).error).toContain('Unauthorized');
     });
   });
 });

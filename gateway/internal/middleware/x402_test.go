@@ -160,6 +160,13 @@ func TestProxyReverse_AsyncSettle(t *testing.T) {
 			t.Errorf("Bridge received path %q, expected /aa/settle", r.URL.Path)
 		}
 
+		secret := r.Header.Get("X-Internal-Secret")
+		if secret != "test-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("Failed to read bridge request body: %v", err)
@@ -177,7 +184,7 @@ func TestProxyReverse_AsyncSettle(t *testing.T) {
 	defer bridgeServer.Close()
 
 	// 3. 初始化 Gateway 反向代理
-	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle")
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
 	if err != nil {
 		t.Fatalf("Failed to create reverse proxy: %v", err)
 	}
@@ -248,13 +255,21 @@ func TestProxyReverse_SettleRetry(t *testing.T) {
 		mu.Lock()
 		attempts++
 		mu.Unlock()
+
+		secret := r.Header.Get("X-Internal-Secret")
+		if secret != "test-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"bridge internal error"}`))
 	}))
 	defer bridgeServer.Close()
 
-	// 初始化 Gateway 反向代理，指向会失败的 AA Bridge
-	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle")
+	// 初始化 Gateway 反向代理，指向会失败 defects AA Bridge
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
 	if err != nil {
 		t.Fatalf("Failed to create reverse proxy: %v", err)
 	}

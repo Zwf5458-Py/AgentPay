@@ -1,6 +1,7 @@
 {
   "name": "aa-bridge",
   "version": "1.0.0",
+  "type": "module",
   "description": "Smart Account Bridge for AgentPay",
   "main": "dist/index.js",
   "scripts": {
