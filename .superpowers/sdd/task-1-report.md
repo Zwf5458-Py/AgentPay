@@ -40,3 +40,33 @@ Ran 2 test suites in 18.52ms (21.24ms CPU time): 23 tests passed, 0 failed, 0 sk
 - **安全检查**：重构均符合 Checks-Effects-Interactions (CEI) 防重入原则。在将代币 safeTransfer 之前，将状态由 `Locked` 分别修改为 `Released` / `Refunded`，彻底消除了重入攻击的可能。
 - **签名防护**：在 `batchSettle` 中，采用了 `DOMAIN_SEPARATOR` 校验来确保签名的唯一性，防止不同链或不同合约实例之间的重放攻击。
 - **防止零地址转移**：对 `agentOwner` 进行零地址过滤，防止代币转入黑洞。
+
+## 4. 追加边界防御性单元测试（根据 Task 1 Fix Brief）
+为了加固状态通道拦截机制，我们追加了 5 个针对 `batchSettle` 功能的边界测试：
+- **`test_ChannelBatchSettleNonSettlerReverts`**：非 `settler`（普通 EOA）尝试结算时，断言被修饰器 `onlySettler` 成功拦截，抛出 `NotSettler` 错误。
+- **`test_ChannelBatchSettleZeroAddressRecipientReverts`**：结算传入的 `agentOwner` 为零地址时，断言抛出 `InvalidAddress` 错误。
+- **`test_ChannelBatchSettleZeroAmountReverts`**：结算传入的累计消费 `accumulatedAmount` 为 0 时，断言抛出 `InvalidAmount` 错误。
+- **`test_ChannelBatchSettleExceedMaxAmountReverts`**：结算传入的累计消费超过通道最大上限（`maxAmount + 1`）时，断言抛出 `InvalidAmount` 错误。
+- **`test_ChannelBatchSettleDoubleSettleReverts`**：对同一个通道，结算一次后再次尝试结算，断言抛出 `InvalidStatus` 错误（非 `Locked` 状态通道拒绝多次结算）。
+
+运行 `forge test` 的最新输出摘要：
+```text
+Ran 7 tests for test/AgentIdentityTest.t.sol:AgentIdentityTest
+[PASS] testBurnAgent() (gas: 158597)
+...
+Ran 21 tests for test/PaymentEscrowTest.t.sol:PaymentEscrowTest
+[PASS] test_ChannelBatchSettle() (gas: 289440)
+[PASS] test_ChannelBatchSettleDoubleSettleReverts() (gas: 284001)
+[PASS] test_ChannelBatchSettleExceedMaxAmountReverts() (gas: 244747)
+[PASS] test_ChannelBatchSettleExpiredReverts() (gas: 245662)
+[PASS] test_ChannelBatchSettleInvalidSignatureReverts() (gas: 249738)
+[PASS] test_ChannelBatchSettleNonSettlerReverts() (gas: 245006)
+[PASS] test_ChannelBatchSettleZeroAddressRecipientReverts() (gas: 242227)
+[PASS] test_ChannelBatchSettleZeroAmountReverts() (gas: 244904)
+[PASS] test_ChannelRefundSuccessAndNotExpiredRevert() (gas: 231025)
+...
+Suite result: ok. 21 passed; 0 failed; 0 skipped; finished in 1.24ms (4.72ms CPU time)
+
+Ran 2 test suites in 6.87ms (2.47ms CPU time): 28 tests passed, 0 failed, 0 skipped (28 total tests)
+```
+所有原有的与新添加的 28 个测试均已编译无误并 100% 跑通。

@@ -424,4 +424,175 @@ contract PaymentEscrowTest is Test {
         assertEq(uint256(channelStatus), 3); // Refunded
         assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + maxAmount);
     }
+
+    // 17. 增加 test_ChannelBatchSettleNonSettlerReverts
+    function test_ChannelBatchSettleNonSettlerReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 300 * 10**6;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // 模拟非 Settler 尝试结算
+        vm.expectRevert(PaymentEscrow.NotSettler.selector);
+        vm.prank(payer);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+    }
+
+    // 18. 增加 test_ChannelBatchSettleZeroAddressRecipientReverts
+    function test_ChannelBatchSettleZeroAddressRecipientReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 300 * 10**6;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // 结算传入的 agentOwner = address(0)
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, address(0));
+    }
+
+    // 19. 增加 test_ChannelBatchSettleZeroAmountReverts
+    function test_ChannelBatchSettleZeroAmountReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
+
+        // 累计消费 accumulatedAmount = 0
+        uint256 accumulatedAmount = 0;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+    }
+
+    // 20. 增加 test_ChannelBatchSettleExceedMaxAmountReverts
+    function test_ChannelBatchSettleExceedMaxAmountReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        uint256 maxAmount = 500 * 10**6;
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
+
+        // 累计消费超过通道最大上限 maxAmount + 1
+        uint256 accumulatedAmount = maxAmount + 1;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+    }
+
+    // 21. 增加 test_ChannelBatchSettleDoubleSettleReverts
+    function test_ChannelBatchSettleDoubleSettleReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        uint256 maxAmount = 500 * 10**6;
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
+
+        uint256 accumulatedAmount = 300 * 10**6;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_SETTLE_TYPEHASH,
+            channelId,
+            accumulatedAmount
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // 第一遍成功结算
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+
+        // 尝试进行二次结算
+        vm.expectRevert(PaymentEscrow.InvalidStatus.selector);
+        vm.prank(settler);
+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+    }
 }
