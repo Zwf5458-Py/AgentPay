@@ -32,7 +32,6 @@ contract PaymentEscrow {
 
     uint256 private _nonce;
     mapping(bytes32 => PaymentLock) private _locks;
-    mapping(address => mapping(uint256 => bool)) private _hasPaid;
 
     event PaymentLocked(
         bytes32 indexed lockId,
@@ -52,6 +51,8 @@ contract PaymentEscrow {
     error LockExpired();
     error LockNotExpired();
     error ProofValidationFailed();
+    error InvalidAddress();
+    error InvalidDuration();
 
     modifier onlySettler() {
         if (msg.sender != settler) revert NotSettler();
@@ -59,6 +60,9 @@ contract PaymentEscrow {
     }
 
     constructor(address _paymentToken, address _validationRegistry, address _settler) {
+        if (_paymentToken == address(0) || _validationRegistry == address(0) || _settler == address(0)) {
+            revert InvalidAddress();
+        }
         paymentToken = IERC20(_paymentToken);
         validationRegistry = IValidationRegistry(_validationRegistry);
         settler = _settler;
@@ -71,6 +75,7 @@ contract PaymentEscrow {
         uint256 duration
     ) external returns (bytes32 lockId) {
         if (amount == 0) revert InvalidAmount();
+        if (duration == 0) revert InvalidDuration();
 
         paymentToken.safeTransferFrom(msg.sender, address(this), amount);
 
@@ -102,6 +107,8 @@ contract PaymentEscrow {
         bytes calldata proof,
         address agentOwner
     ) external onlySettler {
+        if (agentOwner == address(0)) revert InvalidAddress();
+
         PaymentLock storage lock = _locks[lockId];
         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
         if (block.timestamp > lock.expiresAt) revert LockExpired();
@@ -110,7 +117,6 @@ contract PaymentEscrow {
         if (!isValid) revert ProofValidationFailed();
 
         lock.status = PaymentStatus.Released;
-        _hasPaid[lock.payer][lock.agentId] = true;
 
         paymentToken.safeTransfer(agentOwner, lock.amount);
 
@@ -127,10 +133,6 @@ contract PaymentEscrow {
         paymentToken.safeTransfer(lock.payer, lock.amount);
 
         emit PaymentRefunded(lockId, lock.payer);
-    }
-
-    function hasPaid(address payer, uint256 agentId) external view returns (bool) {
-        return _hasPaid[payer][agentId];
     }
 
     function getLock(bytes32 lockId) external view returns (PaymentLock memory) {

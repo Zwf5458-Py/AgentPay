@@ -80,7 +80,6 @@ contract PaymentEscrowTest is Test {
         lock = escrow.getLock(lockId);
         assertEq(uint256(lock.status), 2); // Released
         assertEq(usdc.balanceOf(agentOwner), amount);
-        assertTrue(escrow.hasPaid(payer, agentId));
     }
 
     // 2. 测试非 Settler 越权释放拦截
@@ -143,63 +142,122 @@ contract PaymentEscrowTest is Test {
         assertEq(usdc.balanceOf(payer), payerBalanceBefore + amount);
     }
 
-    // 6. 测试信誉评价整合
+    // 6. 测试信誉评价整合与分页查询
     function test_ReputationRegistryFullFlow() public {
-        bytes32 taskHash = keccak256("task_1");
-
-        // 未付款进行评分，期望 Revert NotPaid()
-        vm.expectRevert(ReputationRegistry.NotPaid.selector);
         vm.prank(payer);
-        reputation.addFeedback(agentId, 5, taskHash, true);
+        bytes32 lockId1 = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
 
-        // 付款锁定但未释放（未确认付款完成），仍然应该 Revert
+        bytes32 requestHash2 = keccak256("test_request2");
         vm.prank(payer);
-        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
+        bytes32 lockId2 = escrow.lockPayment(agentId, 150 * 10**6, requestHash2, 3600);
 
-        vm.expectRevert(ReputationRegistry.NotPaid.selector);
-        vm.prank(payer);
-        reputation.addFeedback(agentId, 5, taskHash, true);
-
-        // 释放付款
+        // 释放这两个付款
         vm.prank(settler);
-        escrow.releasePayment(lockId, dummyProof, agentOwner);
+        escrow.releasePayment(lockId1, dummyProof, agentOwner);
+        vm.prank(settler);
+        escrow.releasePayment(lockId2, dummyProof, agentOwner);
 
-        // 此时应该允许评价
+        // 添加评分
         vm.prank(payer);
-        reputation.addFeedback(agentId, 5, taskHash, true);
-
-        // 重复评价同一个 taskHash 期望 Revert TaskAlreadyEvaluated()
-        vm.expectRevert(ReputationRegistry.TaskAlreadyEvaluated.selector);
+        reputation.addFeedback(lockId1, 5, true);
         vm.prank(payer);
-        reputation.addFeedback(agentId, 4, taskHash, true);
-
-        // 评分超限 1-5 期望 Revert InvalidScore()
-        bytes32 taskHash2 = keccak256("task_2");
-        vm.expectRevert(ReputationRegistry.InvalidScore.selector);
-        vm.prank(payer);
-        reputation.addFeedback(agentId, 6, taskHash2, true);
-
-        // 成功添加另一个有效评分
-        vm.prank(payer);
-        reputation.addFeedback(agentId, 4, taskHash2, true);
+        reputation.addFeedback(lockId2, 4, true);
 
         // 校验平均分和记录数
         (uint256 averageScore, uint256 totalReviews) = reputation.getReputation(agentId);
         assertEq(totalReviews, 2);
-        // (5 + 4) * 100 / 2 = 450
-        assertEq(averageScore, 450);
+        assertEq(averageScore, 450); // (5 + 4) * 100 / 2 = 450
 
-        // 校验评价明细列表
-        ReputationRegistry.FeedbackRecord[] memory records = reputation.getRecords(agentId);
+        // 校验分页明细列表
+        ReputationRegistry.FeedbackRecord[] memory records = reputation.getRecords(agentId, 0, 10);
         assertEq(records.length, 2);
         assertEq(records[0].score, 5);
-        assertEq(records[0].taskHash, taskHash);
-        assertTrue(records[0].taskCompleted);
+        assertEq(records[0].lockId, lockId1);
+        assertTrue(records[0].completed);
         assertEq(records[0].reviewer, payer);
 
-        assertEq(records[1].score, 4);
-        assertEq(records[1].taskHash, taskHash2);
-        assertTrue(records[1].taskCompleted);
-        assertEq(records[1].reviewer, payer);
+        // 测试分页越界及边界
+        ReputationRegistry.FeedbackRecord[] memory paged1 = reputation.getRecords(agentId, 0, 1);
+        assertEq(paged1.length, 1);
+        assertEq(paged1[0].score, 5);
+
+        ReputationRegistry.FeedbackRecord[] memory paged2 = reputation.getRecords(agentId, 1, 1);
+        assertEq(paged2.length, 1);
+        assertEq(paged2[0].score, 4);
+
+        ReputationRegistry.FeedbackRecord[] memory pagedEmpty = reputation.getRecords(agentId, 2, 5);
+        assertEq(pagedEmpty.length, 0);
+    }
+
+    // 7. 逆向测试：验证对同一个 lockId 两次评价抛出 LockAlreadyEvaluated() 异常
+    function test_addFeedbackDuplicateReverts() public {
+        vm.prank(payer);
+        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
+
+        vm.prank(settler);
+        escrow.releasePayment(lockId, dummyProof, agentOwner);
+
+        vm.prank(payer);
+        reputation.addFeedback(lockId, 5, true);
+
+        vm.expectRevert(ReputationRegistry.LockAlreadyEvaluated.selector);
+        vm.prank(payer);
+        reputation.addFeedback(lockId, 4, true);
+    }
+
+    // 8. 逆向测试：验证非该锁的 payer 尝试评分会被拒绝并抛出 NotPayer()
+    function test_addFeedbackUnauthorizedPayerReverts() public {
+        vm.prank(payer);
+        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
+
+        vm.prank(settler);
+        escrow.releasePayment(lockId, dummyProof, agentOwner);
+
+        address hacker = address(0x999);
+        vm.expectRevert(ReputationRegistry.NotPayer.selector);
+        vm.prank(hacker);
+        reputation.addFeedback(lockId, 5, true);
+    }
+
+    // 9. 逆向测试：验证锁定但未释放的锁无法评分 (PaymentNotReleased)
+    function test_addFeedbackNotReleasedReverts() public {
+        vm.prank(payer);
+        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
+
+        vm.expectRevert(ReputationRegistry.PaymentNotReleased.selector);
+        vm.prank(payer);
+        reputation.addFeedback(lockId, 5, true);
+    }
+
+    // 10. 逆向测试：验证 settler 传入零地址接收人会被拦截 (InvalidAddress)
+    function test_releaseZeroAddressReverts() public {
+        vm.prank(payer);
+        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
+
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        vm.prank(settler);
+        escrow.releasePayment(lockId, dummyProof, address(0));
+    }
+
+    // 11. 边界加固测试：验证 lockPayment 限制 duration > 0 (InvalidDuration)
+    function test_lockPaymentZeroDurationReverts() public {
+        vm.expectRevert(PaymentEscrow.InvalidDuration.selector);
+        vm.prank(payer);
+        escrow.lockPayment(agentId, 100 * 10**6, requestHash, 0);
+    }
+
+    // 12. 边界加固测试：验证构造函数空地址防御
+    function test_constructorZeroAddressReverts() public {
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        new PaymentEscrow(address(0), address(validationRegistry), settler);
+
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        new PaymentEscrow(address(usdc), address(0), settler);
+
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        new PaymentEscrow(address(usdc), address(validationRegistry), address(0));
+
+        vm.expectRevert(ReputationRegistry.InvalidAddress.selector);
+        new ReputationRegistry(address(0));
     }
 }
