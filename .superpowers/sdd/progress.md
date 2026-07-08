@@ -7,4 +7,4 @@
 - Task 3: complete (commits 83999c8..1ab5b8a, review clean)
 - Task 4: complete (commits c81685c..1498db4, review clean)
 - Task 5: complete (commits 7921197..cff2dce, review clean)
-- Task 6: pending
+- Task 6: complete (commits aa11ba6..62413c8, review clean)
