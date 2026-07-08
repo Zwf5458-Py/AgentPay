@@ -58,7 +58,47 @@ Ran 2 test suites in 18.01ms (16.38ms CPU time): 13 tests passed, 0 failed, 0 sk
 
 ---
 
-## 4. Git 提交信息
+## 5. 安全加固与漏洞修复 (根据 task-2-fix-brief.md)
+
+### 5.1 移去 `_hasPaid` 机制与引入基于 `lockId` 的评分机制
+* **重构逻辑**: 彻底废除了 `PaymentEscrow.sol` 中的 `_hasPaid` 存储，防止了单次付款后 payer 对同一个 Agent 任意构造任务哈希无限刷声誉的漏洞。
+* **基于 `lockId` 的防刷绑定**：现在 `ReputationRegistry.sol` 的 `addFeedback` 传入 `lockId`，提取 `lock.payer == msg.sender` 进行权限校验，提取 `lock.status == IPaymentEscrow.PaymentStatus.Released` 验证只有已被释放资金的锁才允许评价。并且在 `ReputationRegistry` 中维护 `_evaluatedLocks[lockId] = true` 映射，实现评分的 1:1 事务绑定。
+
+### 5.2 安全防御强化
+* **零地址接收防御**: `releasePayment` 方法增加了对 `agentOwner == address(0)` 的校验，拦截零地址并抛出 `InvalidAddress()` 自定义错误。
+* **时序与参数加固**: `lockPayment` 方法增加了 `duration > 0` 的校验，为 0 时抛出 `InvalidDuration()`。构造函数对传入的外部合约地址增加了零地址判断，防止空地址初始化。
+* **分页机制优化**: `getRecords` 方法增加了 `offset` 和 `limit` 分页参数，加入了越界与长度保护，避免随着评分增多而导致 Gas Limit 耗尽。
+
+### 5.3 逆向测试追加与通过验证
+在 `PaymentEscrowTest.t.sol` 中追加了 6 个测试，全部跑通：
+* `test_addFeedbackDuplicateReverts` (验证重复评价 lockId 抛出 `LockAlreadyEvaluated`)
+* `test_addFeedbackUnauthorizedPayerReverts` (验证非 payer 对 lockId 评价抛出 `NotPayer`)
+* `test_addFeedbackNotReleasedReverts` (验证未释放的锁无法评分抛出 `PaymentNotReleased`)
+* `test_releaseZeroAddressReverts` (验证释放时传入零地址被拦截抛出 `InvalidAddress`)
+* `test_lockPaymentZeroDurationReverts` (验证锁仓 duration 必须大于 0，否则抛出 `InvalidDuration`)
+* `test_constructorZeroAddressReverts` (验证构造函数防御空地址，抛出 `InvalidAddress`)
+
+### 追加后完整测试运行结果 (12 tests for PaymentEscrowTest):
+```bash
+Ran 12 tests for test/PaymentEscrowTest.t.sol:PaymentEscrowTest
+[PASS] test_LockAndReleaseSuccess() (gas: 262687)
+[PASS] test_RefundSuccessAndLockNotExpiredRevert() (gas: 214319)
+[PASS] test_ReleaseExpiredLockFails() (gas: 225122)
+[PASS] test_ReleaseForbiddenForNonSettler() (gas: 221395)
+[PASS] test_ReleaseInvalidProofFails() (gas: 239009)
+[PASS] test_ReputationRegistryFullFlow() (gas: 689796)
+[PASS] test_addFeedbackDuplicateReverts() (gas: 398287)
+[PASS] test_addFeedbackNotReleasedReverts() (gas: 228166)
+[PASS] test_addFeedbackUnauthorizedPayerReverts() (gas: 260795)
+[PASS] test_constructorZeroAddressReverts() (gas: 149397)
+[PASS] test_lockPaymentZeroDurationReverts() (gas: 16989)
+[PASS] test_releaseZeroAddressReverts() (gas: 221385)
+```
+
+---
+
+## 6. Git 提交信息
 
 * **本地开发分支**: `feat/payment-escrow-reputation`
-* **最新 Commit Hash**: `82f759d4870ead962f3c05037bf28f99f7df3cd2`
+* **修复后最新 Commit Hash**: `bd43c9956a477c507706aaf5d1fe91328a1c065e`
+
