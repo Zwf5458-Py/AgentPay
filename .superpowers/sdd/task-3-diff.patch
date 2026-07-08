@@ -1,848 +1,1437 @@
-diff --git a/gateway/cmd/gateway/main.go b/gateway/cmd/gateway/main.go
-index aea4ede..8dd157c 100644
---- a/gateway/cmd/gateway/main.go
-+++ b/gateway/cmd/gateway/main.go
-@@ -1,22 +1,24 @@
- package main
- 
- import (
-+	"context"
- 	"log"
- 	"net/http"
- 	"os"
- 
- 	"github.com/go-chi/chi/v5"
- 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
- 
- 	"gateway/internal/middleware"
- 	"gateway/internal/proxy"
-+	"gateway/internal/queue"
- )
- 
- func main() {
- 	// 加载配置
- 	port := os.Getenv("PORT")
- 	if port == "" {
- 		port = "8080"
- 	}
- 
- 	elizaAgentURL := os.Getenv("ELIZA_AGENT_URL")
-@@ -32,23 +34,36 @@ func main() {
- 	log.Printf("Starting gateway on port %s", port)
- 	log.Printf("Eliza Agent URL: %s", elizaAgentURL)
- 	log.Printf("AA Bridge Settle URL: %s", aaBridgeURL)
- 
- 	r := chi.NewRouter()
- 
- 	// 基础中间件
- 	r.Use(chiMiddleware.Logger)
- 	r.Use(chiMiddleware.Recoverer)
- 
--	// 创建反向代理
- 	internalSecret := os.Getenv("INTERNAL_SECRET")
--	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret)
-+
-+	// 初始化 SQLite 本地队列管理器
-+	queueMgr, err := queue.NewQueueManager("gateway.db", aaBridgeURL, internalSecret)
-+	if err != nil {
-+		log.Fatalf("Failed to initialize queue manager: %v", err)
-+	}
-+	defer queueMgr.Close()
-+
-+	// 启动后台重试 Worker
-+	ctx, cancel := context.WithCancel(context.Background())
-+	defer cancel()
-+	queueMgr.StartWorker(ctx)
-+
-+	// 创建反向代理
-+	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret, queueMgr)
- 	if err != nil {
- 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
- 	}
- 
- 	// 路由注册
- 	r.Route("/agent", func(r chi.Router) {
- 		r.Use(middleware.X402Middleware)
- 		r.Handle("/execute", proxyHandler)
- 	})
- 
-diff --git a/gateway/internal/middleware/x402_test.go b/gateway/internal/middleware/x402_test.go
-index 5138e3c..ee85a70 100644
---- a/gateway/internal/middleware/x402_test.go
-+++ b/gateway/internal/middleware/x402_test.go
-@@ -1,25 +1,28 @@
- package middleware_test
- 
- import (
-+	"context"
-+	"database/sql"
- 	"encoding/json"
- 	"io"
- 	"net/http"
- 	"net/http/httptest"
- 	"os"
- 	"strings"
- 	"sync"
- 	"testing"
- 	"time"
- 
- 	"gateway/internal/middleware"
- 	"gateway/internal/proxy"
-+	"gateway/internal/queue"
- )
- 
- func TestX402Middleware_NoToken(t *testing.T) {
- 	// 设置环境变量以便测试
- 	escrowAddr := "0xTestEscrowAddress123"
- 	os.Setenv("ESCROW_ADDRESS", escrowAddr)
- 	defer os.Unsetenv("ESCROW_ADDRESS")
- 
- 	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
- 		w.WriteHeader(http.StatusOK)
-@@ -131,172 +134,252 @@ func TestX402Middleware_WithToken(t *testing.T) {
- 		t.Errorf("Expected token 'someToken', got %q", capturedToken)
- 	}
- 	if capturedLockID != "customLockID" {
- 		t.Errorf("Expected lockID 'customLockID', got %q", capturedLockID)
- 	}
- }
- 
- func TestProxyReverse_AsyncSettle(t *testing.T) {
- 	// 1. 模拟下游 Agent 服务
- 	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
--		// 校验请求
- 		if r.URL.Path != "/agent/execute" {
- 			t.Errorf("Agent received path %q, expected /agent/execute", r.URL.Path)
- 		}
--		// 返回带有 X-Agent-Proof 的响应
- 		w.Header().Set("X-Agent-Proof", "MockProofBase64String")
- 		w.WriteHeader(http.StatusOK)
- 		w.Write([]byte(`{"output":"mocked output"}`))
- 	}))
- 	defer agentServer.Close()
- 
- 	// 2. 模拟 AA Bridge 服务，捕获异步结算请求
- 	var receivedSettleBody map[string]string
-+	var receivedSecret string
-+	var mu sync.Mutex
-+	var settleCount int
- 	var wg sync.WaitGroup
- 	wg.Add(1)
- 
- 	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
--		defer wg.Done()
-+		mu.Lock()
-+		defer mu.Unlock()
-+
-+		settleCount++
-+
- 		if r.URL.Path != "/aa/settle" {
- 			t.Errorf("Bridge received path %q, expected /aa/settle", r.URL.Path)
- 		}
- 
--		secret := r.Header.Get("X-Internal-Secret")
--		if secret != "test-secret" {
-+		receivedSecret = r.Header.Get("X-Internal-Secret")
-+		if receivedSecret != "test-secret" {
- 			w.WriteHeader(http.StatusUnauthorized)
- 			w.Write([]byte(`{"error":"unauthorized"}`))
- 			return
- 		}
- 
- 		bodyBytes, err := io.ReadAll(r.Body)
- 		if err != nil {
- 			t.Errorf("Failed to read bridge request body: %v", err)
- 		}
- 
- 		err = json.Unmarshal(bodyBytes, &receivedSettleBody)
- 		if err != nil {
- 			t.Errorf("Failed to parse bridge request body: %v", err)
- 		}
- 
--		// 返回成功响应
- 		w.WriteHeader(http.StatusOK)
- 		w.Write([]byte(`{"success":true,"txHash":"0x7777"}`))
-+
-+		if settleCount == 1 {
-+			wg.Done()
-+		}
- 	}))
- 	defer bridgeServer.Close()
- 
-+	// 创建临时的 QueueManager
-+	dbPath := t.TempDir() + "/test_async_settle.db"
-+	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
-+	if err != nil {
-+		t.Fatalf("Failed to create QueueManager: %v", err)
-+	}
-+	defer queueMgr.Close()
-+
-+	// 启动 Worker
-+	ctx, cancel := context.WithCancel(context.Background())
-+	defer cancel()
-+	queueMgr.StartWorker(ctx)
-+
- 	// 3. 初始化 Gateway 反向代理
--	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
-+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
- 	if err != nil {
- 		t.Fatalf("Failed to create reverse proxy: %v", err)
- 	}
- 
- 	// 4. 将中间件和代理组合成 Router 模拟网关
- 	handler := middleware.X402Middleware(gatewayProxy)
- 
- 	// 5. 客户端发起正常支付放行的请求，携带 X-Payment-Lock-Id
- 	req := httptest.NewRequest("POST", "/agent/execute", nil)
- 	req.Header.Set("Authorization", "Bearer mock-session-token")
- 	req.Header.Set("X-Payment-Lock-Id", "lock-999")
- 	rr := httptest.NewRecorder()
- 
- 	handler.ServeHTTP(rr, req)
- 
- 	// 6. 验证客户端能够即时收到响应，并且不被阻塞
- 	if rr.Code != http.StatusOK {
- 		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
- 	}
- 
--	// 7. 等待异步 goroutine 执行结算请求 (带超时保护)
-+	// 7. 等待异步 worker 执行结算请求 (带超时保护)
- 	c := make(chan struct{})
- 	go func() {
- 		wg.Wait()
- 		close(c)
- 	}()
- 
- 	select {
- 	case <-c:
- 		// 正常接收
--	case <-time.After(3 * time.Second):
--		t.Fatal("Timeout waiting for async settle goroutine to trigger AA Bridge")
-+	case <-time.After(5 * time.Second):
-+		t.Fatal("Timeout waiting for async settle worker to trigger AA Bridge")
- 	}
- 
- 	// 8. 验证结算请求体中的字段
-+	mu.Lock()
-+	defer mu.Unlock()
- 	if receivedSettleBody == nil {
- 		t.Fatal("Bridge did not receive settle request")
- 	}
- 
- 	if receivedSettleBody["lockId"] != "lock-999" {
- 		t.Errorf("Expected lockId 'lock-999', got %q", receivedSettleBody["lockId"])
- 	}
- 	if receivedSettleBody["proof"] != "MockProofBase64String" {
- 		t.Errorf("Expected proof 'MockProofBase64String', got %q", receivedSettleBody["proof"])
- 	}
--	// 验证网关有默认/环境变量中读取的 EOA
--	if receivedSettleBody["agentOwner"] == "" {
--		t.Error("Expected non-empty agentOwner EOA")
--	}
--	if receivedSettleBody["escrowAddress"] == "" {
--		t.Error("Expected non-empty escrowAddress")
-+	if receivedSecret != "test-secret" {
-+		t.Errorf("Expected secret 'test-secret', got %q", receivedSecret)
- 	}
- }
- 
--func TestProxyReverse_SettleRetry(t *testing.T) {
--	// 模拟下游 Agent 服务
-+func TestProxyReverse_BridgeOutageSelfHealing(t *testing.T) {
-+	// 1. 模拟下游 Agent 服务
- 	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
--		w.Header().Set("X-Agent-Proof", "MockProofForRetry")
-+		w.Header().Set("X-Agent-Proof", "MockProofSelfHealing")
- 		w.WriteHeader(http.StatusOK)
- 		w.Write([]byte(`{"output":"mocked output"}`))
- 	}))
- 	defer agentServer.Close()
- 
--	// 模拟一个总是失败的 AA Bridge 服务 (返回 500)
-+	// 2. 模拟可动态调整行为的 AA Bridge 服务
- 	var mu sync.Mutex
--	attempts := 0
-+	shouldFail := true
-+	settleSuccessReceived := false
-+	var receivedSecret string
-+
- 	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
- 		mu.Lock()
--		attempts++
--		mu.Unlock()
-+		defer mu.Unlock()
- 
--		secret := r.Header.Get("X-Internal-Secret")
--		if secret != "test-secret" {
--			w.WriteHeader(http.StatusUnauthorized)
--			w.Write([]byte(`{"error":"unauthorized"}`))
-+		receivedSecret = r.Header.Get("X-Internal-Secret")
-+
-+		if shouldFail {
-+			w.WriteHeader(http.StatusInternalServerError)
-+			w.Write([]byte(`{"error":"bridge temp offline"}`))
- 			return
- 		}
- 
--		w.WriteHeader(http.StatusInternalServerError)
--		w.Write([]byte(`{"error":"bridge internal error"}`))
-+		settleSuccessReceived = true
-+		w.WriteHeader(http.StatusOK)
-+		w.Write([]byte(`{"success":true,"txHash":"0x8888"}`))
- 	}))
- 	defer bridgeServer.Close()
- 
--	// 初始化 Gateway 反向代理，指向会失败 defects AA Bridge
--	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
-+	// 3. 创建临时的 QueueManager
-+	dbPath := t.TempDir() + "/test_self_healing.db"
-+	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
-+	if err != nil {
-+		t.Fatalf("Failed to create QueueManager: %v", err)
-+	}
-+	defer queueMgr.Close()
-+
-+	// 启动 Worker
-+	ctx, cancel := context.WithCancel(context.Background())
-+	defer cancel()
-+	queueMgr.StartWorker(ctx)
-+
-+	// 4. 初始化 Gateway 反向代理
-+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
- 	if err != nil {
- 		t.Fatalf("Failed to create reverse proxy: %v", err)
- 	}
- 
- 	handler := middleware.X402Middleware(gatewayProxy)
- 
-+	// 5. 客户端发起推理请求
- 	req := httptest.NewRequest("POST", "/agent/execute", nil)
- 	req.Header.Set("Authorization", "Bearer mock-session-token")
--	req.Header.Set("X-Payment-Lock-Id", "lock-fail-retry")
-+	req.Header.Set("X-Payment-Lock-Id", "lock-heal-123")
- 	rr := httptest.NewRecorder()
- 
- 	handler.ServeHTTP(rr, req)
- 
-+	// 验证网关能立刻正常向客户端写回推理数据（HTTP 200）
- 	if rr.Code != http.StatusOK {
- 		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
- 	}
- 
--	// 异步重试最长需要 2 秒（每次重试间隔 1 秒，共 3 次请求）
--	// 我们等待 3.5 秒确保重试流程全部走完
--	time.Sleep(3500 * time.Millisecond)
-+	// 6. 稍微等一等以确保 Worker 跑了一轮（第一次请求），然后我们去 SQLite 查任务状态，断言为 'pending'
-+	time.Sleep(2500 * time.Millisecond)
-+
-+	// 打开 SQLite 检查状态
-+	db, err := sql.Open("sqlite", dbPath)
-+	if err != nil {
-+		t.Fatalf("Failed to open test DB: %v", err)
-+	}
-+	defer db.Close()
- 
-+	var status string
-+	var retryCount int
-+	err = db.QueryRow("SELECT status, retry_count FROM settle_tasks WHERE lock_id = ?", "lock-heal-123").Scan(&status, &retryCount)
-+	if err != nil {
-+		t.Fatalf("Failed to query task status: %v", err)
-+	}
-+
-+	if status != "pending" {
-+		t.Errorf("Expected task status 'pending', got %q", status)
-+	}
-+	if retryCount < 1 {
-+		t.Errorf("Expected retry_count to be at least 1, got %d", retryCount)
-+	}
-+
-+	// 7. 将 Mock Bridge 的行为恢复为正常，等待 SQLite Worker 轮询重试自愈
- 	mu.Lock()
--	finalAttempts := attempts
-+	shouldFail = false
- 	mu.Unlock()
- 
--	// 应该在失败后尝试了 3 次
--	if finalAttempts != 3 {
--		t.Errorf("Expected exactly 3 settle attempts, got %d", finalAttempts)
-+	// 刚才 retryCount 为 1，退避延迟时间是 2^1 = 2s。
-+	// 这里我们直接等待退避延迟过去。为稳妥起见，我们直接等待 4.5 秒。
-+	time.Sleep(4500 * time.Millisecond)
-+
-+	// 再次查询 SQLite，断言任务状态更新为 'success'
-+	err = db.QueryRow("SELECT status FROM settle_tasks WHERE lock_id = ?", "lock-heal-123").Scan(&status)
-+	if err != nil {
-+		t.Fatalf("Failed to query task status again: %v", err)
-+	}
-+
-+	if status != "success" {
-+		t.Errorf("Expected task status to heal to 'success', got %q", status)
-+	}
-+
-+	mu.Lock()
-+	successReceived := settleSuccessReceived
-+	mu.Unlock()
-+
-+	if !successReceived {
-+		t.Error("Mock Bridge did not receive a successful settle request")
-+	}
-+
-+	if receivedSecret != "test-secret" {
-+		t.Errorf("Expected secret 'test-secret', got %q", receivedSecret)
- 	}
- }
-diff --git a/gateway/internal/proxy/reverse.go b/gateway/internal/proxy/reverse.go
-index 648621b..ed3702d 100644
---- a/gateway/internal/proxy/reverse.go
-+++ b/gateway/internal/proxy/reverse.go
-@@ -1,39 +1,35 @@
- package proxy
- 
- import (
--	"bytes"
--	"encoding/json"
--	"fmt"
--	"io"
- 	"log"
- 	"net/http"
- 	"net/http/httputil"
- 	"net/url"
- 	"os"
--	"time"
- 
- 	"gateway/internal/middleware"
-+	"gateway/internal/queue"
- )
- 
- // ReverseProxyWrapper 封装了反向代理的逻辑
- type ReverseProxyWrapper struct {
- 	proxy          *httputil.ReverseProxy
- 	aaBridgeURL    string
- 	agentOwner     string
- 	escrowAddress  string
- 	internalSecret string
--	Client         *http.Client // 复用 HTTP Client，避免并发端口耗尽
-+	QueueManager   *queue.QueueManager
- }
- 
- // NewReverseProxy 构造反向代理实例
--func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string) (*ReverseProxyWrapper, error) {
-+func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string, queueMgr *queue.QueueManager) (*ReverseProxyWrapper, error) {
- 	url, err := url.Parse(targetURL)
- 	if err != nil {
- 		return nil, err
- 	}
- 
- 	// 默认值
- 	agentOwner := os.Getenv("AGENT_OWNER")
- 	if agentOwner == "" {
- 		agentOwner = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" // Anvil 默认第一个账户
- 	}
-@@ -41,112 +37,43 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
- 	escrowAddress := os.Getenv("ESCROW_ADDRESS")
- 	if escrowAddress == "" {
- 		escrowAddress = "0x5FbDB2315678afecb367f032d93F642f64180aa3" // 默认合约 Mock 地址
- 	}
- 
- 	wrapper := &ReverseProxyWrapper{
- 		aaBridgeURL:    aaBridgeURL,
- 		agentOwner:     agentOwner,
- 		escrowAddress:  escrowAddress,
- 		internalSecret: internalSecret,
--		Client: &http.Client{
--			Timeout: 10 * time.Second,
--		},
-+		QueueManager:   queueMgr,
- 	}
- 
- 	proxy := httputil.NewSingleHostReverseProxy(url)
- 
- 	// 劫持响应
- 	proxy.ModifyResponse = func(res *http.Response) error {
- 		proof := res.Header.Get("X-Agent-Proof")
- 		if proof != "" {
- 			// 提取 lockId
- 			ctx := res.Request.Context()
- 			lockID := middleware.GetLockID(ctx)
- 
- 			if lockID != "" {
--				log.Printf("[Proxy] Intercepted X-Agent-Proof. Triggering async settle for lockId: %s", lockID)
--				go wrapper.settle(lockID, proof)
-+				log.Printf("[Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: %s", lockID)
-+				if err := wrapper.QueueManager.Enqueue(lockID, proof, wrapper.agentOwner, wrapper.escrowAddress); err != nil {
-+					log.Printf("[Proxy] Enqueue failed for lockId %s: %v", lockID, err)
-+				}
- 			} else {
- 				log.Printf("[Proxy] Intercepted X-Agent-Proof but lockId is missing in request context.")
- 			}
- 		}
- 		return nil
- 	}
- 
- 	wrapper.proxy = proxy
- 	return wrapper, nil
- }
- 
- // ServeHTTP 转发请求
- func (w *ReverseProxyWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
- 	w.proxy.ServeHTTP(rw, req)
- }
--
--func (w *ReverseProxyWrapper) settle(lockID, proof string) {
--	// 1. Panic 安全屏障，决不引发主网关进程崩溃
--	defer func() {
--		if r := recover(); r != nil {
--			log.Printf("[Proxy Settle] Recovered from panic: %v", r)
--		}
--	}()
--
--	bodyMap := map[string]string{
--		"lockId":        lockID,
--		"proof":         proof,
--		"agentOwner":    w.agentOwner,
--		"escrowAddress": w.escrowAddress,
--	}
--	bodyBytes, err := json.Marshal(bodyMap)
--	if err != nil {
--		log.Printf("[Proxy Settle] Error marshaling settle body: %v", err)
--		return
--	}
--
--	maxRetries := 3
--	var lastErr error
--	var resp *http.Response
--
--	// 2. 退避重试机制
--	for attempt := 1; attempt <= maxRetries; attempt++ {
--		req, err := http.NewRequest("POST", w.aaBridgeURL, bytes.NewBuffer(bodyBytes))
--		if err != nil {
--			log.Printf("[Proxy Settle] Error creating settle request (attempt %d/%d): %v", attempt, maxRetries, err)
--			return
--		}
--		req.Header.Set("Content-Type", "application/json")
--		if w.internalSecret != "" {
--			req.Header.Set("X-Internal-Secret", w.internalSecret)
--		}
--
--		// 3. 复用结构体自带的 Client 进行网络调用
--		resp, err = w.Client.Do(req)
--		if err != nil {
--			lastErr = err
--			log.Printf("[Proxy Settle] Connection failed (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, err)
--			if attempt < maxRetries {
--				time.Sleep(1 * time.Second)
--			}
--			continue
--		}
--
--		if resp.StatusCode != http.StatusOK {
--			respBody, _ := io.ReadAll(resp.Body)
--			resp.Body.Close()
--			lastErr = fmt.Errorf("HTTP status %s: %s", resp.Status, string(respBody))
--			log.Printf("[Proxy Settle] Bridge returned non-200 (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, lastErr)
--			if attempt < maxRetries {
--				time.Sleep(1 * time.Second)
--			}
--			continue
--		}
--
--		// 成功响应
--		respBody, _ := io.ReadAll(resp.Body)
--		resp.Body.Close()
--		log.Printf("[Proxy Settle] AA Bridge response for lockId %s: Status: %s, Body: %s", lockID, resp.Status, string(respBody))
--		return
--	}
--
--	// 3次重试后依然失败，记录致命报警日志
--	log.Printf("[Proxy Settle] [CRITICAL ERROR] Failed to settle payment for lockId %s after %d attempts. Last error: %v", lockID, maxRetries, lastErr)
--}
-diff --git a/gateway/internal/queue/sqlite_queue.go b/gateway/internal/queue/sqlite_queue.go
+diff --git a/playground.html b/playground.html
 new file mode 100644
-index 0000000..3e1eb58
+index 0000000..9938552
 --- /dev/null
-+++ b/gateway/internal/queue/sqlite_queue.go
-@@ -0,0 +1,284 @@
-+package queue
++++ b/playground.html
+@@ -0,0 +1,1431 @@
++<!DOCTYPE html>
++<html lang="zh">
++<head>
++  <meta charset="UTF-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1.0">
++  <title>AgentPay 协议自愈沙盒调试面板</title>
++  <!-- Google Fonts: Outfit -->
++  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
++  <style>
++    /* CSS 设计系统：暗黑霓虹与毛玻璃美学 */
++    :root {
++      --bg-primary: #0b0f19;
++      --panel-bg: rgba(15, 23, 42, 0.65);
++      --border-color: rgba(255, 255, 255, 0.08);
++      --border-glow: rgba(99, 102, 241, 0.15);
++      --neon-purple: #8b5cf6;
++      --neon-indigo: #6366f1;
++      --neon-emerald: #10b981;
++      --neon-amber: #f59e0b;
++      --neon-rose: #ef4444;
++      --text-primary: #f8fafc;
++      --text-secondary: #94a3b8;
++      --text-muted: #64748b;
++      --font-main: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
++    }
 +
-+import (
-+	"bytes"
-+	"context"
-+	"database/sql"
-+	"encoding/json"
-+	"fmt"
-+	"io"
-+	"log"
-+	"net/http"
-+	"sync"
-+	"time"
++    * {
++      box-sizing: border-box;
++      margin: 0;
++      padding: 0;
++    }
 +
-+	_ "modernc.org/sqlite"
-+)
++    body {
++      background-color: var(--bg-primary);
++      font-family: var(--font-main);
++      color: var(--text-primary);
++      min-height: 100vh;
++      overflow-x: hidden;
++      position: relative;
++      padding: 2rem;
++    }
 +
-+type SettleTask struct {
-+	ID            int64
-+	LockID        string
-+	Proof         string
-+	AgentOwner    string
-+	EscrowAddress string
-+	RetryCount    int
-+}
++    /* 炫酷的背景霓虹光晕 */
++    body::before {
++      content: '';
++      position: absolute;
++      width: 600px;
++      height: 600px;
++      top: -150px;
++      left: -100px;
++      background: radial-gradient(circle, rgba(139, 92, 246, 0.18) 0%, rgba(99, 102, 241, 0.05) 50%, rgba(11, 15, 25, 0) 70%);
++      pointer-events: none;
++      z-index: 0;
++    }
 +
-+type QueueManager struct {
-+	db             *sql.DB
-+	bridgeURL      string
-+	internalSecret string
-+	mu             sync.Mutex // SQLite 互斥锁，确保并发写安全
-+	client         *http.Client
-+	wg             sync.WaitGroup // 追踪协程以实现优雅退出
-+}
++    body::after {
++      content: '';
++      position: absolute;
++      width: 700px;
++      height: 700px;
++      bottom: -200px;
++      right: -100px;
++      background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, rgba(139, 92, 246, 0.04) 60%, rgba(11, 15, 25, 0) 80%);
++      pointer-events: none;
++      z-index: 0;
++    }
 +
-+// NewQueueManager 构造函数
-+func NewQueueManager(dbPath, bridgeURL, secret string) (*QueueManager, error) {
-+	db, err := sql.Open("sqlite", dbPath)
-+	if err != nil {
-+		return nil, fmt.Errorf("failed to open sqlite db: %w", err)
-+	}
++    .app-container {
++      position: relative;
++      z-index: 1;
++      max-width: 1400px;
++      margin: 0 auto;
++      display: flex;
++      flex-direction: column;
++      gap: 1.5rem;
++    }
 +
-+	// 限制最大打开连接数为 1，彻底杜绝并发文件锁死
-+	db.SetMaxOpenConns(1)
++    /* 顶部大标题 */
++    header {
++      display: flex;
++      justify-content: space-between;
++      align-items: center;
++      padding: 1.5rem;
++      border-radius: 16px;
++      background: var(--panel-bg);
++      backdrop-filter: blur(20px) saturate(180%);
++      -webkit-backdrop-filter: blur(20px) saturate(180%);
++      border: 1px solid var(--border-color);
++      box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
++    }
 +
-+	// 配置性能优化与忙碌重试
-+	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-+		db.Close()
-+		return nil, fmt.Errorf("failed to set journal_mode WAL: %w", err)
-+	}
-+	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
-+		db.Close()
-+		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
-+	}
++    header h1 {
++      font-size: 1.8rem;
++      font-weight: 800;
++      background: linear-gradient(135deg, #fff 0%, var(--neon-indigo) 50%, var(--neon-purple) 100%);
++      -webkit-background-clip: text;
++      -webkit-text-fill-color: transparent;
++      letter-spacing: -0.5px;
++      display: flex;
++      align-items: center;
++      gap: 0.75rem;
++    }
 +
-+	qm := &QueueManager{
-+		db:             db,
-+		bridgeURL:      bridgeURL,
-+		internalSecret: secret,
-+		client: &http.Client{
-+			Timeout: 10 * time.Second,
-+		},
-+	}
++    header h1 svg {
++      width: 32px;
++      height: 32px;
++      stroke: var(--neon-indigo);
++      filter: drop-shadow(0 0 8px var(--neon-indigo));
++    }
 +
-+	if err := qm.initDB(); err != nil {
-+		db.Close()
-+		return nil, err
-+	}
++    .protocol-badge {
++      padding: 0.4rem 1rem;
++      background: rgba(99, 102, 241, 0.15);
++      border: 1px solid rgba(99, 102, 241, 0.3);
++      color: var(--neon-indigo);
++      border-radius: 99px;
++      font-size: 0.85rem;
++      font-weight: 600;
++      letter-spacing: 0.5px;
++      text-transform: uppercase;
++      box-shadow: 0 0 15px rgba(99, 102, 241, 0.1);
++    }
 +
-+	return qm, nil
-+}
++    /* 主三栏网格布局 */
++    .grid-layout {
++      display: grid;
++      grid-template-columns: 1fr 1.2fr 1fr;
++      gap: 1.5rem;
++    }
 +
-+func (qm *QueueManager) initDB() error {
-+	qm.mu.Lock()
-+	defer qm.mu.Unlock()
++    @media (max-width: 1024px) {
++      .grid-layout {
++        grid-template-columns: 1fr;
++      }
++    }
 +
-+	query := `
-+	CREATE TABLE IF NOT EXISTS settle_tasks (
-+		id INTEGER PRIMARY KEY AUTOINCREMENT,
-+		lock_id TEXT UNIQUE NOT NULL,
-+		proof TEXT NOT NULL,
-+		agent_owner TEXT NOT NULL,
-+		escrow_address TEXT NOT NULL,
-+		status TEXT DEFAULT 'pending',
-+		retry_count INTEGER DEFAULT 0,
-+		next_retry_at INTEGER,
-+		created_at INTEGER
-+	);
-+	CREATE INDEX IF NOT EXISTS idx_settle_tasks_status_next_retry ON settle_tasks (status, next_retry_at);
-+	`
-+	_, err := qm.db.Exec(query)
-+	if err != nil {
-+		return fmt.Errorf("failed to initialize table: %w", err)
-+	}
-+	return nil
-+}
++    /* 毛玻璃卡片基类 */
++    .glass-card {
++      background: var(--panel-bg);
++      backdrop-filter: blur(16px) saturate(180%);
++      -webkit-backdrop-filter: blur(16px) saturate(180%);
++      border: 1px solid var(--border-color);
++      border-radius: 20px;
++      padding: 1.75rem;
++      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.25);
++      transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), border-color 0.3s ease, box-shadow 0.3s ease;
++      display: flex;
++      flex-direction: column;
++      gap: 1.5rem;
++    }
 +
-+// Close 关闭数据库，阻塞等待重试协程安全退出
-+func (qm *QueueManager) Close() error {
-+	qm.wg.Wait()
-+	return qm.db.Close()
-+}
++    .glass-card:hover {
++      transform: translateY(-2px);
++      border-color: rgba(99, 102, 241, 0.35);
++      box-shadow: 0 12px 40px 0 rgba(99, 102, 241, 0.15);
++    }
 +
-+// Enqueue 入队
-+func (qm *QueueManager) Enqueue(lockID, proof, agentOwner, escrowAddress string) error {
-+	qm.mu.Lock()
-+	defer qm.mu.Unlock()
++    .panel-title {
++      font-size: 1.2rem;
++      font-weight: 700;
++      color: var(--text-primary);
++      display: flex;
++      align-items: center;
++      gap: 0.5rem;
++      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
++      padding-bottom: 0.75rem;
++    }
 +
-+	now := time.Now().Unix()
-+	query := `
-+	INSERT OR IGNORE INTO settle_tasks (lock_id, proof, agent_owner, escrow_address, status, retry_count, next_retry_at, created_at)
-+	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
-+	`
-+	_, err := qm.db.Exec(query, lockID, proof, agentOwner, escrowAddress, now, now)
-+	if err != nil {
-+		log.Printf("[Queue] Failed to enqueue lockId %s: %v", lockID, err)
-+		return err
-+	}
-+	log.Printf("[Queue] Successfully enqueued lockId %s", lockID)
-+	return nil
-+}
++    .panel-title svg {
++      width: 20px;
++      height: 20px;
++      color: var(--neon-indigo);
++    }
 +
-+// StartWorker 启动后台 Worker 协程
-+func (qm *QueueManager) StartWorker(ctx context.Context) {
-+	qm.wg.Add(1)
-+	go func() {
-+		defer qm.wg.Done()
-+		ticker := time.NewTicker(2 * time.Second)
-+		defer ticker.Stop()
-+		for {
-+			select {
-+			case <-ctx.Done():
-+				log.Println("[Queue Worker] Stopping worker...")
-+				return
-+			case <-ticker.C:
-+				qm.processTasks(ctx)
-+			}
-+		}
-+	}()
-+}
++    /* 左栏：控制面板样式 */
++    .mode-selector {
++      display: flex;
++      background: rgba(0, 0, 0, 0.4);
++      padding: 4px;
++      border-radius: 99px;
++      border: 1px solid var(--border-color);
++    }
 +
-+func (qm *QueueManager) processTasks(ctx context.Context) {
-+	tasks, err := qm.getPendingTasks()
-+	if err != nil {
-+		log.Printf("[Queue Worker] Fetch pending tasks failed: %v", err)
-+		return
-+	}
++    .mode-btn {
++      flex: 1;
++      padding: 0.6rem;
++      border: none;
++      background: transparent;
++      color: var(--text-secondary);
++      border-radius: 99px;
++      font-size: 0.9rem;
++      font-weight: 600;
++      cursor: pointer;
++      transition: all 0.2s ease;
++      text-align: center;
++    }
 +
-+	for _, task := range tasks {
-+		select {
-+		case <-ctx.Done():
-+			return
-+		default:
-+		}
-+		qm.processSingleTask(ctx, task)
-+	}
-+}
++    .mode-btn.active {
++      background: linear-gradient(135deg, var(--neon-indigo), var(--neon-purple));
++      color: #fff;
++      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
++    }
 +
-+func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
-+	qm.mu.Lock()
-+	defer qm.mu.Unlock()
++    .health-section {
++      background: rgba(0, 0, 0, 0.2);
++      border-radius: 12px;
++      padding: 1rem;
++      border: 1px solid rgba(255, 255, 255, 0.03);
++      display: flex;
++      flex-direction: column;
++      gap: 0.75rem;
++    }
 +
-+	now := time.Now().Unix()
-+	query := `
-+	SELECT id, lock_id, proof, agent_owner, escrow_address, retry_count
-+	FROM settle_tasks
-+	WHERE status = 'pending' AND next_retry_at <= ?
-+	`
-+	rows, err := qm.db.Query(query, now)
-+	if err != nil {
-+		return nil, err
-+	}
-+	defer rows.Close()
++    .health-row {
++      display: flex;
++      justify-content: space-between;
++      align-items: center;
++      font-size: 0.9rem;
++    }
 +
-+	var tasks []SettleTask
-+	for rows.Next() {
-+		var t SettleTask
-+		if err := rows.Scan(&t.ID, &t.LockID, &t.Proof, &t.AgentOwner, &t.EscrowAddress, &t.RetryCount); err != nil {
-+			return nil, err
-+		}
-+		tasks = append(tasks, t)
-+	}
-+	return tasks, nil
-+}
++    .health-label {
++      color: var(--text-secondary);
++      display: flex;
++      align-items: center;
++      gap: 0.5rem;
++    }
 +
-+func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) {
-+	bodyMap := map[string]string{
-+		"lockId":        task.LockID,
-+		"proof":         task.Proof,
-+		"agentOwner":    task.AgentOwner,
-+		"escrowAddress": task.EscrowAddress,
-+	}
-+	bodyBytes, err := json.Marshal(bodyMap)
-+	if err != nil {
-+		log.Printf("[Queue Worker] JSON marshal failed for lockId %s: %v", task.LockID, err)
-+		return
-+	}
++    .health-status {
++      display: flex;
++      align-items: center;
++      gap: 0.4rem;
++      font-weight: 600;
++      text-transform: uppercase;
++      font-size: 0.8rem;
++    }
 +
-+	req, err := http.NewRequestWithContext(ctx, "POST", qm.bridgeURL, bytes.NewBuffer(bodyBytes))
-+	if err != nil {
-+		log.Printf("[Queue Worker] Create request failed for lockId %s: %v", task.LockID, err)
-+		return
-+	}
-+	req.Header.Set("Content-Type", "application/json")
-+	if qm.internalSecret != "" {
-+		req.Header.Set("X-Internal-Secret", qm.internalSecret)
-+	}
++    .indicator-dot {
++      width: 8px;
++      height: 8px;
++      border-radius: 50%;
++      background-color: var(--text-muted);
++      transition: all 0.3s ease;
++    }
 +
-+	resp, err := qm.client.Do(req)
-+	if err != nil {
-+		select {
-+		case <-ctx.Done():
-+			// 避免在 context 取消时报错或继续写入已关闭的 DB
-+			return
-+		default:
-+		}
-+		log.Printf("[Queue Worker] Connection failed for lockId %s: %v", task.LockID, err)
-+		qm.handleFailure(ctx, task, err)
-+		return
-+	}
-+	defer resp.Body.Close()
++    .indicator-dot.green {
++      background-color: var(--neon-emerald);
++      box-shadow: 0 0 10px var(--neon-emerald), 0 0 20px var(--neon-emerald);
++    }
 +
-+	if resp.StatusCode != http.StatusOK {
-+		respBody, _ := io.ReadAll(resp.Body)
-+		err = fmt.Errorf("HTTP status %s: %s", resp.Status, string(respBody))
-+		log.Printf("[Queue Worker] Bridge returned non-200 for lockId %s: %v", task.LockID, err)
-+		qm.handleFailure(ctx, task, err)
-+		return
-+	}
++    .indicator-dot.red {
++      background-color: var(--neon-rose);
++      box-shadow: 0 0 10px var(--neon-rose), 0 0 20px var(--neon-rose);
++    }
 +
-+	// 成功
-+	qm.handleSuccess(ctx, task)
-+}
++    .indicator-dot.amber {
++      background-color: var(--neon-amber);
++      box-shadow: 0 0 10px var(--neon-amber), 0 0 20px var(--neon-amber);
++      animation: pulse 1.5s infinite alternate;
++    }
 +
-+func (qm *QueueManager) handleSuccess(ctx context.Context, task SettleTask) {
-+	select {
-+	case <-ctx.Done():
-+		return
-+	default:
-+	}
++    @keyframes pulse {
++      0% { opacity: 0.5; }
++      100% { opacity: 1; }
++    }
 +
-+	qm.mu.Lock()
-+	defer qm.mu.Unlock()
++    .form-group {
++      display: flex;
++      flex-direction: column;
++      gap: 0.5rem;
++    }
 +
-+	query := `UPDATE settle_tasks SET status = 'success' WHERE id = ?`
-+	_, err := qm.db.Exec(query, task.ID)
-+	if err != nil {
-+		log.Printf("[Queue Worker] Failed to update task %d success status: %v", task.ID, err)
-+		return
-+	}
-+	log.Printf("[Queue Worker] Successfully settled payment for lockId %s", task.LockID)
-+}
++    .form-group label {
++      font-size: 0.85rem;
++      font-weight: 600;
++      color: var(--text-secondary);
++      letter-spacing: 0.5px;
++    }
 +
-+func (qm *QueueManager) handleFailure(ctx context.Context, task SettleTask, lastErr error) {
-+	select {
-+	case <-ctx.Done():
-+		return
-+	default:
-+	}
++    .form-control {
++      background: rgba(0, 0, 0, 0.35);
++      border: 1px solid var(--border-color);
++      color: var(--text-primary);
++      padding: 0.75rem 1rem;
++      border-radius: 12px;
++      font-family: var(--font-main);
++      font-size: 0.95rem;
++      transition: all 0.2s ease;
++    }
 +
-+	qm.mu.Lock()
-+	defer qm.mu.Unlock()
++    .form-control:focus {
++      outline: none;
++      border-color: var(--neon-indigo);
++      box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
++    }
 +
-+	newRetryCount := task.RetryCount + 1
-+	if newRetryCount >= 5 {
-+		query := `UPDATE settle_tasks SET status = 'failed', retry_count = ? WHERE id = ?`
-+		_, err := qm.db.Exec(query, newRetryCount, task.ID)
-+		if err != nil {
-+			log.Printf("[Queue Worker] Failed to update task %d failed status: %v", task.ID, err)
-+		}
-+		log.Printf("[Queue Worker] [CRITICAL ERROR] Failed to settle payment for lockId %s after %d attempts. Last error: %v", task.LockID, newRetryCount, lastErr)
-+	} else {
-+		// 指数级退避
-+		delay := time.Duration(1 << newRetryCount) * time.Second
-+		nextRetryAt := time.Now().Add(delay).Unix()
++    .btn-group {
++      display: flex;
++      flex-direction: column;
++      gap: 0.75rem;
++    }
 +
-+		query := `UPDATE settle_tasks SET retry_count = ?, next_retry_at = ? WHERE id = ?`
-+		_, err := qm.db.Exec(query, newRetryCount, nextRetryAt, task.ID)
-+		if err != nil {
-+			log.Printf("[Queue Worker] Failed to update task %d retry status: %v", task.ID, err)
-+		}
-+		log.Printf("[Queue Worker] Settle failed for lockId %s, scheduling retry %d in %v", task.LockID, newRetryCount, delay)
-+	}
-+}
++    .action-btn {
++      width: 100%;
++      padding: 0.9rem;
++      border: none;
++      border-radius: 12px;
++      font-family: var(--font-main);
++      font-size: 0.95rem;
++      font-weight: 700;
++      cursor: pointer;
++      transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
++      display: flex;
++      justify-content: center;
++      align-items: center;
++      gap: 0.5rem;
++    }
++
++    .btn-primary {
++      background: linear-gradient(135deg, var(--neon-indigo), var(--neon-purple));
++      color: #fff;
++      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.25);
++    }
++
++    .btn-primary:hover {
++      filter: brightness(1.1);
++      box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
++      transform: translateY(-1px);
++    }
++
++    .btn-secondary {
++      background: rgba(255, 255, 255, 0.05);
++      border: 1px solid var(--border-color);
++      color: var(--text-primary);
++    }
++
++    .btn-secondary:hover {
++      background: rgba(255, 255, 255, 0.08);
++      border-color: rgba(255, 255, 255, 0.15);
++      transform: translateY(-1px);
++    }
++
++    /* 中栏：数据面板样式 */
++    .ledger-cards {
++      display: grid;
++      grid-template-columns: 1fr;
++      gap: 1rem;
++    }
++
++    .ledger-card {
++      background: rgba(255, 255, 255, 0.02);
++      border: 1px solid rgba(255, 255, 255, 0.05);
++      border-radius: 14px;
++      padding: 1rem;
++      display: flex;
++      flex-direction: column;
++      gap: 0.5rem;
++    }
++
++    .ledger-header {
++      display: flex;
++      justify-content: space-between;
++      align-items: center;
++      font-size: 0.85rem;
++      color: var(--text-muted);
++      font-weight: 600;
++    }
++
++    .ledger-channel-id {
++      color: var(--neon-indigo);
++      font-weight: 700;
++    }
++
++    .ledger-value-grid {
++      display: grid;
++      grid-template-columns: 1fr 1fr;
++      gap: 0.5rem;
++    }
++
++    .ledger-value-box {
++      background: rgba(0, 0, 0, 0.2);
++      border-radius: 8px;
++      padding: 0.5rem;
++      display: flex;
++      flex-direction: column;
++    }
++
++    .ledger-value-box span:first-child {
++      font-size: 0.75rem;
++      color: var(--text-secondary);
++    }
++
++    .ledger-value-box span:last-child {
++      font-size: 1.1rem;
++      font-weight: 700;
++      color: var(--text-primary);
++    }
++
++    .queue-monitor-container {
++      display: flex;
++      flex-direction: column;
++      gap: 0.75rem;
++      overflow: hidden;
++    }
++
++    .table-wrapper {
++      overflow-x: auto;
++      background: rgba(0, 0, 0, 0.25);
++      border-radius: 12px;
++      border: 1px solid var(--border-color);
++    }
++
++    table {
++      width: 100%;
++      border-collapse: collapse;
++      font-size: 0.85rem;
++      text-align: left;
++    }
++
++    th, td {
++      padding: 0.75rem 1rem;
++      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
++    }
++
++    th {
++      font-weight: 600;
++      color: var(--text-secondary);
++      background: rgba(0, 0, 0, 0.4);
++    }
++
++    tr:last-child td {
++      border-bottom: none;
++    }
++
++    tr:hover td {
++      background: rgba(255, 255, 255, 0.02);
++    }
++
++    .badge-status {
++      display: inline-flex;
++      align-items: center;
++      gap: 0.35rem;
++      padding: 0.2rem 0.5rem;
++      border-radius: 99px;
++      font-size: 0.75rem;
++      font-weight: 600;
++    }
++
++    .badge-status.pending {
++      background: rgba(245, 158, 11, 0.15);
++      border: 1px solid rgba(245, 158, 11, 0.3);
++      color: var(--neon-amber);
++    }
++
++    .badge-status.pending .dot {
++      background-color: var(--neon-amber);
++      box-shadow: 0 0 6px var(--neon-amber);
++      animation: pulse 1s infinite alternate;
++    }
++
++    .badge-status.success {
++      background: rgba(16, 185, 129, 0.15);
++      border: 1px solid rgba(16, 185, 129, 0.3);
++      color: var(--neon-emerald);
++    }
++
++    .badge-status.success .dot {
++      background-color: var(--neon-emerald);
++      box-shadow: 0 0 6px var(--neon-emerald);
++    }
++
++    .badge-status.failed {
++      background: rgba(239, 68, 68, 0.15);
++      border: 1px solid rgba(239, 68, 68, 0.3);
++      color: var(--neon-rose);
++    }
++
++    .badge-status.failed .dot {
++      background-color: var(--neon-rose);
++      box-shadow: 0 0 6px var(--neon-rose);
++      animation: pulse 1s infinite alternate;
++    }
++
++    .badge-status .dot {
++      width: 6px;
++      height: 6px;
++      border-radius: 50%;
++    }
++
++    /* 右栏：时序图与终端日志 */
++    .timeline-container {
++      display: flex;
++      flex-direction: column;
++      gap: 1.2rem;
++      position: relative;
++      padding-left: 1.5rem;
++    }
++
++    /* 连接垂直虚线 */
++    .timeline-container::before {
++      content: '';
++      position: absolute;
++      top: 10px;
++      bottom: 10px;
++      left: 6px;
++      width: 2px;
++      background: linear-gradient(180deg, var(--border-color) 0%, rgba(99, 102, 241, 0.1) 100%);
++      z-index: 0;
++    }
++
++    .timeline-node {
++      position: relative;
++      background: rgba(255, 255, 255, 0.015);
++      border: 1px solid rgba(255, 255, 255, 0.04);
++      border-radius: 12px;
++      padding: 0.85rem 1rem;
++      z-index: 1;
++      display: flex;
++      align-items: center;
++      gap: 1rem;
++      transition: all 0.3s ease;
++    }
++
++    .timeline-indicator {
++      position: absolute;
++      left: -1.45rem;
++      width: 12px;
++      height: 12px;
++      border-radius: 50%;
++      background-color: var(--text-muted);
++      border: 2px solid var(--bg-primary);
++      transition: all 0.3s ease;
++      box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
++    }
++
++    .timeline-node.active {
++      background: rgba(99, 102, 241, 0.06);
++      border-color: rgba(99, 102, 241, 0.25);
++    }
++
++    .timeline-node.active .timeline-indicator {
++      background-color: var(--neon-indigo);
++      box-shadow: 0 0 10px var(--neon-indigo), 0 0 20px var(--neon-indigo);
++    }
++
++    .timeline-node.success {
++      background: rgba(16, 185, 129, 0.06);
++      border-color: rgba(16, 185, 129, 0.25);
++    }
++
++    .timeline-node.success .timeline-indicator {
++      background-color: var(--neon-emerald);
++      box-shadow: 0 0 10px var(--neon-emerald), 0 0 20px var(--neon-emerald);
++    }
++
++    .timeline-node.warning {
++      background: rgba(245, 158, 11, 0.06);
++      border-color: rgba(245, 158, 11, 0.25);
++    }
++
++    .timeline-node.warning .timeline-indicator {
++      background-color: var(--neon-amber);
++      box-shadow: 0 0 10px var(--neon-amber), 0 0 20px var(--neon-amber);
++    }
++
++    .timeline-node-content {
++      display: flex;
++      flex-direction: column;
++    }
++
++    .timeline-step {
++      font-size: 0.75rem;
++      font-weight: 700;
++      color: var(--text-muted);
++      text-transform: uppercase;
++      letter-spacing: 0.5px;
++    }
++
++    .timeline-title {
++      font-size: 0.95rem;
++      font-weight: 600;
++      color: var(--text-primary);
++    }
++
++    .timeline-desc {
++      font-size: 0.8rem;
++      color: var(--text-secondary);
++      margin-top: 0.15rem;
++    }
++
++    /* 终端终端日志 */
++    .terminal-container {
++      display: flex;
++      flex-direction: column;
++      border-radius: 16px;
++      background: #05070c;
++      border: 1px solid rgba(255, 255, 255, 0.06);
++      overflow: hidden;
++      box-shadow: inset 0 2px 8px rgba(0,0,0,0.8);
++    }
++
++    .terminal-header {
++      background: rgba(255, 255, 255, 0.03);
++      padding: 0.6rem 1rem;
++      display: flex;
++      justify-content: space-between;
++      align-items: center;
++      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
++    }
++
++    .terminal-title {
++      font-size: 0.75rem;
++      font-weight: 700;
++      color: var(--text-muted);
++      letter-spacing: 1px;
++      text-transform: uppercase;
++      display: flex;
++      align-items: center;
++      gap: 0.5rem;
++    }
++
++    .terminal-title::before {
++      content: '';
++      display: inline-block;
++      width: 8px;
++      height: 8px;
++      border-radius: 50%;
++      background: var(--neon-purple);
++      box-shadow: 0 0 5px var(--neon-purple);
++    }
++
++    .terminal-clear-btn {
++      background: transparent;
++      border: none;
++      color: var(--text-secondary);
++      font-size: 0.75rem;
++      font-family: var(--font-main);
++      cursor: pointer;
++      transition: color 0.2s ease;
++      font-weight: 600;
++    }
++
++    .terminal-clear-btn:hover {
++      color: #fff;
++    }
++
++    .terminal-console {
++      height: 200px;
++      overflow-y: auto;
++      padding: 0.85rem 1rem;
++      font-family: Consolas, "Liberation Mono", Menlo, Courier, monospace;
++      font-size: 0.8rem;
++      line-height: 1.4;
++      display: flex;
++      flex-direction: column;
++      gap: 0.4rem;
++      scroll-behavior: smooth;
++    }
++
++    .log-entry {
++      word-break: break-all;
++    }
++
++    .log-time {
++      color: var(--text-muted);
++      margin-right: 0.5rem;
++    }
++
++    .log-level {
++      font-weight: 700;
++      margin-right: 0.5rem;
++    }
++
++    .log-level.info { color: #ffffff; }
++    .log-level.success { color: var(--neon-emerald); }
++    .log-level.warn { color: var(--neon-amber); }
++    .log-level.sign { color: var(--neon-purple); }
++    .log-level.error { color: var(--neon-rose); }
++    .log-msg { color: #e2e8f0; }
++
++    /* SQLite 数据库监视器空状态 */
++    .empty-state {
++      padding: 1.5rem;
++      text-align: center;
++      color: var(--text-muted);
++      font-size: 0.85rem;
++      font-style: italic;
++    }
++
++    /* 漂亮的滚动条 */
++    ::-webkit-scrollbar {
++      width: 6px;
++      height: 6px;
++    }
++    ::-webkit-scrollbar-track {
++      background: rgba(0, 0, 0, 0.1);
++    }
++    ::-webkit-scrollbar-thumb {
++      background: rgba(255, 255, 255, 0.1);
++      border-radius: 99px;
++    }
++    ::-webkit-scrollbar-thumb:hover {
++      background: rgba(255, 255, 255, 0.25);
++    }
++  </style>
++</head>
++<body>
++
++  <div class="app-container">
++    <header>
++      <h1>
++        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
++        AgentPay Protocol Playground
++      </h1>
++      <span class="protocol-badge">Double-Track Self-Healing</span>
++    </header>
++
++    <div class="grid-layout">
++      <!-- 1. 左侧控制面板 -->
++      <section class="glass-card">
++        <h2 class="panel-title">
++          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
++          控制台控制面板
++        </h2>
++
++        <!-- 模式切换 -->
++        <div class="form-group">
++          <label>调试运行模式</label>
++          <div class="mode-selector">
++            <button class="mode-btn active" id="btn-mode-mock" onclick="switchMode('mock')">Mock 仿真演示模式</button>
++            <button class="mode-btn" id="btn-mode-direct" onclick="switchMode('direct')">本地直连调试模式</button>
++          </div>
++        </div>
++
++        <!-- 网关红绿灯 -->
++        <div class="health-section">
++          <div class="health-row">
++            <span class="health-label">Gateway (8080)</span>
++            <div class="health-status">
++              <span class="indicator-dot" id="dot-gateway"></span>
++              <span id="text-gateway">OFFLINE</span>
++            </div>
++          </div>
++          <div class="health-row">
++            <span class="health-label">AA Bridge (3001)</span>
++            <div class="health-status">
++              <span class="indicator-dot" id="dot-bridge"></span>
++              <span id="text-bridge">OFFLINE</span>
++            </div>
++          </div>
++        </div>
++
++        <!-- 输入表单 -->
++        <div class="form-group">
++          <label for="input-agent-id">Agent ID</label>
++          <input type="number" id="input-agent-id" class="form-control" value="888" min="0">
++        </div>
++        <div class="form-group">
++          <label for="input-data">测试数据 (Input)</label>
++          <input type="text" id="input-data" class="form-control" value="Hello, AgentPay!">
++        </div>
++        <div class="form-group">
++          <label for="input-max-price">最大限制额度 (Max Price)</label>
++          <input type="number" id="input-max-price" class="form-control" value="5000">
++        </div>
++
++        <!-- 动作按钮 -->
++        <div class="btn-group">
++          <button class="action-btn btn-primary" onclick="triggerSingleRequest()">
++            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
++            发送单次请求 (Execute)
++          </button>
++          <button class="action-btn btn-secondary" onclick="triggerConcurrentRequest()">
++            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
++            并发双击请求测试 (Promise.all)
++          </button>
++        </div>
++      </section>
++
++      <!-- 2. 中间数据面板 -->
++      <section class="glass-card">
++        <h2 class="panel-title">
++          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
++          监控调度中心
++        </h2>
++
++        <!-- 通道账本 -->
++        <div class="form-group">
++          <label>通道状态缓存 (Local Channels)</label>
++          <div class="ledger-cards" id="ledger-container">
++            <!-- 动态生成 -->
++            <div class="empty-state">无通道缓存记录</div>
++          </div>
++        </div>
++
++        <!-- SQLite 任务列表 -->
++        <div class="queue-monitor-container">
++          <label>网关任务流水线 (SQLite Queue Monitor)</label>
++          <div class="table-wrapper">
++            <table>
++              <thead>
++                <tr>
++                  <th>Lock ID</th>
++                  <th>状态</th>
++                  <th>重试</th>
++                  <th>更新时间</th>
++                </tr>
++              </thead>
++              <tbody id="queue-tbody">
++                <tr>
++                  <td colspan="4" class="empty-state">暂无任务数据 (需在直连模式下获取)</td>
++                </tr>
++              </tbody>
++            </table>
++          </div>
++        </div>
++      </section>
++
++      <!-- 3. 右侧追踪面板 -->
++      <section class="glass-card">
++        <h2 class="panel-title">
++          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
++          追踪与自愈时序
++        </h2>
++
++        <!-- 垂直时序图 -->
++        <div class="timeline-container">
++          <div class="timeline-node" id="node-step1">
++            <div class="timeline-indicator"></div>
++            <div class="timeline-node-content">
++              <span class="timeline-step">Step 1</span>
++              <span class="timeline-title">Send Request (首发尝试)</span>
++              <span class="timeline-desc" id="desc-step1">发起首次 API 调用，等待响应</span>
++            </div>
++          </div>
++          <div class="timeline-node" id="node-step2">
++            <div class="timeline-indicator"></div>
++            <div class="timeline-node-content">
++              <span class="timeline-step">Step 2</span>
++              <span class="timeline-title">Intercept 402 (拦截挑战)</span>
++              <span class="timeline-desc" id="desc-step2">捕获网关返回的 HTTP 402 状态码</span>
++            </div>
++          </div>
++          <div class="timeline-node" id="node-step3">
++            <div class="timeline-indicator"></div>
++            <div class="timeline-node-content">
++              <span class="timeline-step">Step 3</span>
++              <span class="timeline-title">Generate Signature (生成签名)</span>
++              <span class="timeline-desc" id="desc-step3">使用私钥对通道累积额度进行结构化签名</span>
++            </div>
++          </div>
++          <div class="timeline-node" id="node-step4">
++            <div class="timeline-indicator"></div>
++            <div class="timeline-node-content">
++              <span class="timeline-step">Step 4</span>
++              <span class="timeline-title">Successful Settle (协议自愈)</span>
++              <span class="timeline-desc" id="desc-step4">携带二次验证凭证重试，完成最终交付</span>
++            </div>
++          </div>
++        </div>
++
++        <!-- 终端日志 -->
++        <div class="terminal-container">
++          <div class="terminal-header">
++            <div class="terminal-title">时序终端日志 (Terminal Log)</div>
++            <button class="terminal-clear-btn" onclick="clearLogs()">Clear</button>
++          </div>
++          <div class="terminal-console" id="console-output">
++            <!-- 日志条目 -->
++          </div>
++        </div>
++      </section>
++    </div>
++  </div>
++
++  <script>
++    // 1. 全局状态存储 (Single State Store)
++    const state = {
++      mode: 'mock', // 'mock' | 'direct'
++      agentId: 888,
++      input: 'Hello, AgentPay!',
++      maxPrice: 5000,
++      gatewayHealth: 'offline',
++      bridgeHealth: 'offline',
++      // 本地缓存的通道数据结构： { agentId: { id, confirmedSpend, accumulatedSpend, lastPrice } }
++      channels: {
++        888: { id: 'channel-888', confirmedSpend: 0, accumulatedSpend: 0, lastPrice: 0 }
++      }
++    };
++
++    // 全局通道锁容器：按 agentId 进行 Promise 链式排队控制
++    const channelLocks = new Map();
++
++    // 2. 初始化加载
++    window.addEventListener('DOMContentLoaded', () => {
++      syncUIFromState();
++      addLog('INFO', '沙盒调试面板加载成功，准备就绪。');
++      addLog('INFO', '当前处于 Mock 仿真模式下，无需启动后端服务即可运行。');
++
++      // 启动直连模式下的 OPTIONS 探测与 SQLite 轮询
++      setInterval(healthCheck, 3000);
++      setInterval(pollSQLiteQueue, 2000);
++    });
++
++    // 3. UI 同步更新
++    function syncUIFromState() {
++      // 模式按钮状态
++      const btnMock = document.getElementById('btn-mode-mock');
++      const btnDirect = document.getElementById('btn-mode-direct');
++      if (state.mode === 'mock') {
++        btnMock.classList.add('active');
++        btnDirect.classList.remove('active');
++      } else {
++        btnDirect.classList.add('active');
++        btnMock.classList.remove('active');
++      }
++
++      // 同步输入框的值
++      document.getElementById('input-agent-id').value = state.agentId;
++      document.getElementById('input-data').value = state.input;
++      document.getElementById('input-max-price').value = state.maxPrice;
++
++      // 渲染通道账本列表
++      renderChannels();
++    }
++
++    function switchMode(newMode) {
++      if (state.mode === newMode) return;
++      state.mode = newMode;
++      syncUIFromState();
++      addLog('INFO', `切换至 [${newMode === 'mock' ? 'Mock 仿真演示模式' : '本地直连调试模式'}]`);
++      
++      if (newMode === 'direct') {
++        addLog('WARN', '直连模式需保证 Go Gateway (:8080) 与 Fastify Bridge (:3001) 已在本地启动！');
++        healthCheck();
++        pollSQLiteQueue();
++      } else {
++        // 重置红绿灯
++        setHealthStatus('gateway', 'offline');
++        setHealthStatus('bridge', 'offline');
++        // 重置 SQLite 监视器状态提示
++        document.getElementById('queue-tbody').innerHTML = `
++          <tr>
++            <td colspan="4" class="empty-state">暂无任务数据 (需在直连模式下获取)</td>
++          </tr>
++        `;
++      }
++    }
++
++    // 4. 读取表单状态输入
++    function readInputs() {
++      state.agentId = parseInt(document.getElementById('input-agent-id').value) || 0;
++      state.input = document.getElementById('input-data').value || 'Hello';
++      state.maxPrice = parseInt(document.getElementById('input-max-price').value) || 5000;
++    }
++
++    // 5. 渲染本地通道面板
++    function renderChannels() {
++      const container = document.getElementById('ledger-container');
++      container.innerHTML = '';
++      
++      const channelKeys = Object.keys(state.channels);
++      if (channelKeys.length === 0) {
++        container.innerHTML = '<div class="empty-state">无通道缓存记录</div>';
++        return;
++      }
++
++      channelKeys.forEach(agentId => {
++        const chan = state.channels[agentId];
++        const card = document.createElement('div');
++        card.className = 'ledger-card';
++        card.innerHTML = `
++          <div class="ledger-header">
++            <span>Agent: <strong>${agentId}</strong></span>
++            <span class="ledger-channel-id">${chan.id}</span>
++          </div>
++          <div class="ledger-value-grid">
++            <div class="ledger-value-box">
++              <span>已确认 (confirmed)</span>
++              <span>${chan.confirmedSpend} USDC</span>
++            </div>
++            <div class="ledger-value-box">
++              <span>累计发生 (accumulated)</span>
++              <span>${chan.accumulatedSpend} USDC</span>
++            </div>
++          </div>
++        `;
++        container.appendChild(card);
++      });
++    }
++
++    // 6. 红绿灯状态灯显示控制
++    function setHealthStatus(service, status) {
++      const dot = document.getElementById(`dot-${service}`);
++      const text = document.getElementById(`text-${service}`);
++      
++      dot.className = 'indicator-dot';
++      if (status === 'online') {
++        dot.classList.add('green');
++        text.innerText = 'ONLINE';
++        text.style.color = 'var(--neon-emerald)';
++      } else if (status === 'testing') {
++        dot.classList.add('amber');
++        text.innerText = 'CHECKING';
++        text.style.color = 'var(--neon-amber)';
++      } else {
++        dot.classList.add('red');
++        text.innerText = 'OFFLINE';
++        text.style.color = 'var(--neon-rose)';
++      }
++    }
++
++    // 7. 时序状态重置与控制
++    function resetTimeline() {
++      ['step1', 'step2', 'step3', 'step4'].forEach(step => {
++        const node = document.getElementById(`node-${step}`);
++        node.className = 'timeline-node';
++      });
++      document.getElementById('desc-step1').innerText = '发起首次 API 调用，等待响应';
++      document.getElementById('desc-step2').innerText = '捕获网关返回的 HTTP 402 状态码';
++      document.getElementById('desc-step3').innerText = '使用私钥对通道累积额度进行结构化签名';
++      document.getElementById('desc-step4').innerText = '携带二次验证凭证重试，完成最终交付';
++    }
++
++    function setTimelineState(step, type, descText) {
++      const node = document.getElementById(`node-${step}`);
++      node.className = `timeline-node ${type}`;
++      if (descText) {
++        document.getElementById(`desc-${step}`).innerText = descText;
++      }
++    }
++
++    // 8. 终端日志彩色输出
++    function addLog(level, message) {
++      const consoleEl = document.getElementById('console-output');
++      const entry = document.createElement('div');
++      entry.className = 'log-entry';
++      
++      const timeStr = new Date().toLocaleTimeString();
++      entry.innerHTML = `
++        <span class="log-time">[${timeStr}]</span>
++        <span class="log-level ${level.toLowerCase()}">[${level}]</span>
++        <span class="log-msg">${message}</span>
++      `;
++      consoleEl.appendChild(entry);
++      consoleEl.scrollTop = consoleEl.scrollHeight;
++    }
++
++    function clearLogs() {
++      document.getElementById('console-output').innerHTML = '';
++    }
++
++    // 9. OPTIONS 健康状态检测
++    async function healthCheck() {
++      if (state.mode !== 'direct') return;
++
++      // 检测 Gateway 8080
++      try {
++        const res = await fetch('http://127.0.0.1:8080/agent/execute', {
++          method: 'OPTIONS',
++          headers: { 'Origin': window.location.origin }
++        });
++        if (res.ok || res.status === 200) {
++          state.gatewayHealth = 'online';
++        } else {
++          state.gatewayHealth = 'offline';
++        }
++      } catch (e) {
++        state.gatewayHealth = 'offline';
++      }
++      setHealthStatus('gateway', state.gatewayHealth);
++
++      // 检测 AA Bridge 3001
++      try {
++        const res = await fetch('http://127.0.0.1:3001/aa/settle', {
++          method: 'OPTIONS',
++          headers: { 'Origin': window.location.origin }
++        });
++        if (res.ok || res.status === 200) {
++          state.bridgeHealth = 'online';
++        } else {
++          state.bridgeHealth = 'offline';
++        }
++      } catch (e) {
++        state.bridgeHealth = 'offline';
++      }
++      setHealthStatus('bridge', state.bridgeHealth);
++    }
++
++    // 10. 拉取本地 SQLite 队列
++    async function pollSQLiteQueue() {
++      if (state.mode !== 'direct') return;
++
++      try {
++        const res = await fetch('http://127.0.0.1:8080/debug/tasks');
++        if (res.ok) {
++          const tasks = await res.json();
++          renderQueueTable(tasks);
++        }
++      } catch (e) {
++        // 静默失败，不输出日志以免刷屏
++      }
++    }
++
++    function renderQueueTable(tasks) {
++      const tbody = document.getElementById('queue-tbody');
++      if (!tasks || tasks.length === 0) {
++        tbody.innerHTML = `
++          <tr>
++            <td colspan="4" class="empty-state">SQLite 任务队列为空 (运行直连测试以产生任务)</td>
++          </tr>
++        `;
++        return;
++      }
++
++      tbody.innerHTML = '';
++      tasks.forEach(task => {
++        const tr = document.createElement('tr');
++        
++        let statusBadge = '';
++        const status = (task.status || '').toLowerCase();
++        if (status === 'success' || status === 'completed') {
++          statusBadge = '<span class="badge-status success"><span class="dot"></span>Success</span>';
++        } else if (status === 'failed') {
++          statusBadge = '<span class="badge-status failed"><span class="dot"></span>Failed</span>';
++        } else {
++          statusBadge = `<span class="badge-status pending"><span class="dot"></span>${task.status || 'Pending'}</span>`;
++        }
++
++        // 格式化时间
++        let formattedTime = 'N/A';
++        if (task.created_at) {
++          // 如果是毫秒或秒级时间戳
++          const timestamp = task.created_at > 1e11 ? task.created_at : task.created_at * 1000;
++          formattedTime = new Date(timestamp).toLocaleTimeString();
++        }
++
++        tr.innerHTML = `
++          <td><code>${(task.lock_id || '').substring(0, 10)}...</code></td>
++          <td>${statusBadge}</td>
++          <td><code>${task.retry_count ?? 0}</code></td>
++          <td>${formattedTime}</td>
++        `;
++        tbody.appendChild(tr);
++      });
++    }
++
++    // 11. 自愈交互核心执行器 (串行锁保护)
++    function triggerSingleRequest() {
++      readInputs();
++      resetTimeline();
++      addLog('INFO', `---------------- 发起单次请求 ----------------`);
++      executeRequest(state.agentId, state.input, 1);
++    }
++
++    function triggerConcurrentRequest() {
++      readInputs();
++      resetTimeline();
++      addLog('INFO', `---------------- 发起双击并发请求 (Promise.all) ----------------`);
++      addLog('INFO', '正在并发提交请求 #1 和 请求 #2... 验证通道防重入锁自愈！');
++
++      // 并发执行，底层通过相同的 channelLocks 控制顺序
++      Promise.all([
++        executeRequest(state.agentId, state.input, 1),
++        executeRequest(state.agentId, state.input, 2)
++      ]).then(() => {
++        addLog('SUCCESS', '并发测试完成。');
++      }).catch(err => {
++        addLog('ERROR', `并发测试异常终止: ${err.message}`);
++      });
++    }
++
++    // 封装 Promise 排队锁的外壳，确保对同一 agentId 的请求按序串行化执行
++    async function executeRequest(agentId, input, reqIndex) {
++      const currentLock = channelLocks.get(agentId);
++      const isQueued = !!currentLock;
++
++      if (isQueued) {
++        addLog('QUEUE', `[请求 #${reqIndex}] Request queued, waiting for channel lock...`);
++      }
++
++      // 生成一个新的锁通知器
++      let resolveLock;
++      const nextLockPromise = new Promise((resolve) => {
++        resolveLock = resolve;
++      });
++
++      // 无论成功还是失败，都在前锁解决后运行，并最终 resolve 自身的锁通知器
++      const executionPromise = (currentLock || Promise.resolve())
++        .then(async () => {
++          if (isQueued) {
++            addLog('QUEUE', `[请求 #${reqIndex}] Lock released, starting request...`);
++          }
++          return executeRequestInternal(agentId, input, reqIndex);
++        })
++        .catch((err) => {
++          addLog('ERROR', `[请求 #${reqIndex}] 队列中执行失败: ${err.message}`);
++        })
++        .finally(() => {
++          resolveLock();
++        });
++
++      // 将最新锁置入容器
++      channelLocks.set(agentId, nextLockPromise);
++
++      // 执行完毕后，若 Map 中依然是该锁，则自动清理引用
++      nextLockPromise.finally(() => {
++        if (channelLocks.get(agentId) === nextLockPromise) {
++          channelLocks.delete(agentId);
++        }
++      });
++
++      return executionPromise;
++    }
++
++    // 具体的自愈请求核心内部逻辑
++    async function executeRequestInternal(agentId, input, reqIndex) {
++      const maxPrice = state.maxPrice;
++
++      addLog('INFO', `[请求 #${reqIndex}] 开始执行自愈协商流程，通道 Agent ID: ${agentId}`);
++
++      // 阶段 1: 首次发起尝试
++      setTimelineState('step1', 'active', `[请求 #${reqIndex}] 正在发起首次 POST 尝试`);
++      
++      // 获取当前通道状态
++      let chan = state.channels[agentId];
++      if (!chan) {
++        chan = { id: `channel-${agentId}`, confirmedSpend: 0, accumulatedSpend: 0, lastPrice: 0 };
++        state.channels[agentId] = chan;
++      }
++
++      // 组装首发 Authorization
++      let authHeader = '';
++      if (chan.lastPrice > 0) {
++        // 如果本地有记录的 lastPrice，预期已自愈并确认，按正常请求拼接 Authorization
++        chan.accumulatedSpend = chan.confirmedSpend + chan.lastPrice;
++        const fakeSig = `mock-channel-sig-req-${reqIndex}`;
++        authHeader = `Bearer ${chan.id}:${chan.accumulatedSpend}:${fakeSig}`;
++        addLog('INFO', `[请求 #${reqIndex}] 检测到本地已存在通道，主动注入凭证: ${chan.id}, accumulatedSpend: ${chan.accumulatedSpend}`);
++      } else {
++        addLog('INFO', `[请求 #${reqIndex}] 本地无活动通道凭证，发起空授权请求`);
++      }
++
++      // 执行网络层调用 (Mock 或 Direct)
++      try {
++        let response;
++        if (state.mode === 'mock') {
++          response = await mockFetch(agentId, input, authHeader, reqIndex);
++        } else {
++          response = await directFetch(agentId, input, authHeader);
++        }
++
++        // 捕获 402 拦截挑战
++        if (response.status === 402) {
++          setTimelineState('step1', 'success', `[请求 #${reqIndex}] 首次请求返回 402 - 需要自愈`);
++          setTimelineState('step2', 'active', `[请求 #${reqIndex}] 已成功捕获 402 首部参数`);
++          
++          const price = parseInt(response.headers.get('X-402-Price')) || 1000;
++          const escrowAddr = response.headers.get('X-402-Payment-Address') || '0x5FbDB2315678afecb367f032d93F642f64180aa3';
++          const paymentType = response.headers.get('X-402-Payment-Type') || 'channel';
++
++          addLog('WARN', `[请求 #${reqIndex}] 收到 HTTP 402. 需要额度: ${price} USDC, 托管账户: ${escrowAddr}`);
++
++          if (price > maxPrice) {
++            setTimelineState('step2', 'warning', `[请求 #${reqIndex}] 超限阻断! 价格 ${price} > 限额 ${maxPrice}`);
++            addLog('ERROR', `[请求 #${reqIndex}] 请求因价格超出限制被拦截！自愈流程被强行阻断。`);
++            throw new Error(`Price limit exceeded: price is ${price}, limit is ${maxPrice}`);
++          }
++
++          // 阶段 3: 签名额度
++          setTimelineState('step2', 'success');
++          setTimelineState('step3', 'active', `[请求 #${reqIndex}] 生成 ${price} USDC 的通道状态签名...`);
++          
++          // 延时模拟签名动作
++          await delay(600);
++          
++          // 累加本地额度并生成以太坊格式的伪签名
++          chan.accumulatedSpend = chan.confirmedSpend + price;
++          chan.lastPrice = price;
++          
++          // 模拟生成以太坊格式的伪签名 (130位16进制 + 0x)
++          const randomSig = '0x' + Array.from({length: 130}, () => Math.floor(Math.random()*16).toString(16)).join('');
++          addLog('SIGN', `[请求 #${reqIndex}] 签名计算成功! 通道: ${chan.id}, 目标发生额: ${chan.accumulatedSpend} USDC`);
++          addLog('SIGN', `[请求 #${reqIndex}] 生成伪以太坊签名: ${randomSig.substring(0, 18)}...`);
++
++          setTimelineState('step3', 'success');
++          
++          // 阶段 4: 二次重试并结算
++          setTimelineState('step4', 'active', `[请求 #${reqIndex}] 正在携带签名凭证二次重试`);
++          
++          const secondaryAuth = `Bearer ${chan.id}:${chan.accumulatedSpend}:${randomSig}`;
++          
++          let secondResponse;
++          if (state.mode === 'mock') {
++            secondResponse = await mockFetch(agentId, input, secondaryAuth, reqIndex, true);
++          } else {
++            secondResponse = await directFetch(agentId, input, secondaryAuth);
++          }
++
++          if (secondResponse.status === 200) {
++            // 自愈成功，更新确认额度
++            chan.confirmedSpend = chan.accumulatedSpend;
++            renderChannels();
++            
++            const resultData = await secondResponse.json();
++            setTimelineState('step4', 'success', `[请求 #${reqIndex}] 自愈成功并获取到模型响应`);
++            addLog('SUCCESS', `[请求 #${reqIndex}] 自愈执行完成！答复: ${JSON.stringify(resultData.response || resultData)}`);
++          } else {
++            const errText = await secondResponse.text();
++            setTimelineState('step4', 'warning', `[请求 #${reqIndex}] 失败状态: ${secondResponse.status}`);
++            addLog('ERROR', `[请求 #${reqIndex}] 二次请求失败，错误代码: ${secondResponse.status}, 信息: ${errText}`);
++          }
++        } 
++        // 首发即 200 成功 (比如已有通道凭证直接扣款成功，或者在并发测试中，第二请求排队完成后直接扣款成功)
++        else if (response.status === 200) {
++          setTimelineState('step1', 'success', `[请求 #${reqIndex}] 首次请求即通过已有的有效凭证直通`);
++          
++          // 并发场景下，若是直接扣款成功，则同步更新确认额度
++          if (chan.accumulatedSpend > chan.confirmedSpend) {
++            chan.confirmedSpend = chan.accumulatedSpend;
++            renderChannels();
++          }
++
++          const resultData = await response.json();
++          addLog('SUCCESS', `[请求 #${reqIndex}] 请求直通完成！答复: ${JSON.stringify(resultData.response || resultData)}`);
++          
++          // 时序图直接全部变亮，展现“直通”效率
++          setTimelineState('step2', 'success', `[请求 #${reqIndex}] 无需拦截`);
++          setTimelineState('step3', 'success', `[请求 #${reqIndex}] 无需签名`);
++          setTimelineState('step4', 'success', `[请求 #${reqIndex}] 状态结算成功`);
++        } else {
++          const errText = await response.text();
++          setTimelineState('step1', 'warning', `[请求 #${reqIndex}] 请求出错: ${response.status}`);
++          addLog('ERROR', `[请求 #${reqIndex}] 请求非预期失败，状态: ${response.status}, 详情: ${errText}`);
++        }
++      } catch (err) {
++        addLog('ERROR', `[请求 #${reqIndex}] 任务发生异常阻断: ${err.message}`);
++        throw err;
++      }
++    }
++
++    // 12. 纯前端 Mock Fetch 仿真逻辑
++    let mockChannelConfirmedSpend = 0; // 模拟后端的已记录额度
++    async function mockFetch(agentId, input, authHeader, reqIndex, isRetry = false) {
++      await delay(800); // 模拟网络延迟
++
++      if (!authHeader) {
++        // 无授权头，模拟抛出 402
++        return {
++          status: 402,
++          headers: {
++            get: (key) => {
++              const headersMap = {
++                'X-402-Payment-Type': 'channel',
++                'X-402-Price': '1000',
++                'X-402-Currency': 'USDC',
++                'X-402-Chain': 'base-sepolia',
++                'X-402-Payment-Address': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
++                'X-402-Version': '1'
++              };
++              return headersMap[key] || '';
++            }
++          }
++        };
++      }
++
++      // 解析 Authorization 头部
++      const parts = authHeader.replace('Bearer ', '').split(':');
++      if (parts.length === 3) {
++        const channelId = parts[0];
++        const currentSpend = parseInt(parts[1]) || 0;
++        const signature = parts[2];
++
++        // 计算当前额度增量是否大于等于 1000 (自愈协商额度)
++        const increment = currentSpend - mockChannelConfirmedSpend;
++
++        if (increment >= 1000) {
++          mockChannelConfirmedSpend = currentSpend;
++          return {
++            status: 200,
++            json: async () => ({
++              response: `[Mock AI] 自愈握手完成。通道 ${channelId} 发生额累计为 ${currentSpend} USDC。已成功处理输入: "${input}"`
++            })
++          };
++        } else if (increment >= 0) {
++          // 并发场景下，虽然没有本次额度增加，但若是重复扣除已确认的累计额度，视为有效
++          return {
++            status: 200,
++            json: async () => ({
++              response: `[Mock AI] 凭证直通扣款成功。通道 ${channelId} 额度一致 (${currentSpend} USDC)。处理输入: "${input}"`
++            })
++          };
++        }
++      }
++
++      // 回退 402
++      return {
++        status: 402,
++        headers: {
++          get: (key) => {
++            const headersMap = {
++              'X-402-Payment-Type': 'channel',
++              'X-402-Price': '1000',
++              'X-402-Payment-Address': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
++            };
++            return headersMap[key] || '';
++          }
++        }
++      };
++    }
++
++    // 13. 真实网络直连 Fetch
++    async function directFetch(agentId, input, authHeader) {
++      const headers = { 'Content-Type': 'application/json' };
++      if (authHeader) {
++        headers['Authorization'] = authHeader;
++      }
++
++      return fetch('http://127.0.0.1:8080/agent/execute', {
++        method: 'POST',
++        headers,
++        body: JSON.stringify({ agentId, input })
++      });
++    }
++
++    // 辅助延时函数
++    function delay(ms) {
++      return new Promise(resolve => setTimeout(resolve, ms));
++    }
++  </script>
++</body>
++</html>
