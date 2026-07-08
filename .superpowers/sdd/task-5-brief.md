@@ -1,57 +1,55 @@
-# Task 5 Brief: Go 支付网关开发 (X-402 拦截与代理代理)
+# Task 5 Brief: 客户端 SDK 与 AA Bridge 批量结算适配
 
 ## 目标
-在 `gateway/` 目录下使用 Go 语言开发一个高性能 X-402 支付网关。网关负责对未付款调用拦截并返回 `HTTP 402` 支付配置挑战头；对授权调用则反向代理转发给内部的 Eliza Agent，并在收到推理输出与 `X-Agent-Proof` 后，异步通知 AA Bridge 发起链上结算，以保证推理结果的高速原子释放与延迟静默结算。
+完成 TypeScript 客户端 SDK 状态通道自愈累加签名，以及 AA Bridge 的动态 TBA 收款反查与自动部署上链结算。在集成测试中跑通「402 通道协商 -> SDK 累加签名 -> Gateway SQLite 异步入队 -> AA Bridge TBA 反查自动部署 -> PaymentEscrow 链上批量结算」的全链路模拟。
 
 ## 涉及文件
-- 新增: `gateway/go.mod`
-- 新增: `gateway/cmd/gateway/main.go`
-- 新增: `gateway/internal/middleware/x402.go`
-- 新增: `gateway/internal/proxy/reverse.go`
-- 新增: `gateway/internal/middleware/x402_test.go`
+- 修改: `sdk/src/client.ts`
+- 修改: `aa-bridge/src/index.ts`
+- 修改: `sdk/test/e2e.test.ts`
 
 ## 全局约束
-- 端口分配：Go Gateway 监听在 `0.0.0.0:8080`
-- 下游配置：Eliza Agent 监听在 `127.0.0.1:3002`，AA Bridge 监听在 `127.0.0.1:3001`
-- 接口规范：X-402 支付 challenge 响应挑战，HTTP 反向代理
+- 累积签名参数包含 `channelId`，`accumulatedSpend`（bigint），及 `signature`。
+- SDK 本地状态需能够支持同一通道的连续高频调用且 accumulatedSpend 持续累加。
+- 所有单元测试 100% 通过。
 
 ## 需求与步骤
 
-### 1. 初始化 Go Module 与路由配置
-- 在 `gateway/` 初始化项目并拉取 `github.com/go-chi/chi/v5` 等路由与 HTTP 处理包。
+### 1. 修改 TypeScript SDK 状态通道签名累加 (`sdk/src/client.ts`)
+- 在 `AgentPayClient` 内置 Map：
+  `private channels = new Map<number, { id: string; accumulatedSpend: bigint }>();`
+- 修改 `execute(agentId, input)`：
+  - 拦截 402 响应。如果首部 `X-402-Payment-Type` 等于 `channel`：
+    - 提取价格 `price`。
+    - 检查 Map 中是否存在 `agentId` 对应的通道。如果不存在：
+      - 创建并缓存：`id` 设置为 `channel-888`，`accumulatedSpend = 0n`。
+    - 通道累计额递增：`channel.accumulatedSpend += price`。
+    - 对通道 `id` 和 `accumulatedSpend` 构造 EIP-712 签名。在开发/Mock 模式下，直接生成 Mock token：
+      `authorizationHeader = Bearer ${channel.id}:${channel.accumulatedSpend}:mock-channel-sig`。
+    - 携带该 Token 发送二次请求，网关放行并返回 200 推理结果。
 
-### 2. X-402 中间件拦截 (`internal/middleware/x402.go`)
-- 拦截请求：
-  - 检查 HTTP 请求头是否带有 `Authorization: Bearer <token>`。
-  - **未带 Token 拦截**：如果无 Authorization 头，立即返回 `HTTP 402 Payment Required`。
-    - Header 必须注入：
-      - `X-402-Price: 1000` (单次微支付金额，等值 0.001 USDC)
-      - `X-402-Currency: USDC`
-      - `X-402-Chain: base-sepolia`
-      - `X-402-Payment-Address: 0xPaymentEscrowContractAddress` (此处通过环境变量 `ESCROW_ADDRESS` 注入，若未配置，默认回退到一个测试 Mock 合约地址)
-      - `X-402-Version: 1`
-    - Response Body 返回 JSON: `{"error": "payment_required", "message": "micropayment required via x-402 protocol"}`。
-  - **携带 Token 放行**：开发阶段校验 Authorization 是否以 `"Bearer "` 开头，如果格式合规，则解析并放行，将 Token 内容和状态通过 `context` 注入传递给下游 Handler。
+### 2. 修改 AA Bridge `/aa/settle` 路由适配 (`aa-bridge/src/index.ts`)
+- 修改 `POST /aa/settle` 请求接收参数：
+  - 支持接收 `channelId`, `accumulatedAmount` (string/bigint), `signature`, `agentId`。
+- 在结算逻辑中：
+  - 计算专属 TBA 账户地址：调用 Registry 计算 `IERC6551Registry.account(tbaImplementation, salt, chainId, agentNFT, agentId)`。
+  - 检测该 TBA 账户是否部署（若 code.length == 0，调用 `createAccount` 自动部署， Mock 环境下则直接记录/模拟部署）。
+  - 调用 `PaymentEscrow.batchSettle(channelId, accumulatedAmount, signature, computedTBA)` 发起链上批量结算。返回 Mock 交易 hash。
 
-### 3. 反向代理与异步结算挂钩 (`internal/proxy/reverse.go`)
-- 实现一个 HTTP 反向代理处理器，负责将客户端发往 `/agent/execute` 的请求透传给下游 Eliza Agent (`http://127.0.0.1:3002/agent/execute`)。
-- **劫持与拦截 Response**：
-  - 代理拦截下游 Agent 的响应，提取 Response Header 中的 `X-Agent-Proof`（该 Base64 内容含有 TEE 签名证明）。
-  - 如果检测到 `X-Agent-Proof` 头：
-    - 读取客户端请求头中携带的 X-402 支付哈希或 `lockId`（可以在 `Authorization: Bearer <lockId:token>` 格式中携带，或者使用 `X-Payment-Lock-Id` 头传递，此处设计为网关能自动解析这两处之一）。
-    - 网关在将响应 Body 正常写给客户端之后，**异步（使用 goroutine 协程）** 向 AA Bridge (`http://127.0.0.1:3001/aa/settle`) 发起结算请求：
-      - Body: `{ "lockId": "<lockId>", "proof": "<Proof Base64>", "agentOwner": "<Agent的所有权人EOA>" }`
-      - 结算结果需记录日志，即便 AA Bridge 异步结算失败，也绝不能阻塞当前客户端已经接收到的响应。
-
-### 4. 单元与集成测试 (`internal/middleware/x402_test.go`)
-- 使用 `net/http/httptest` 进行网关中间件的单元测试。
-- 用例 1：不带 Token 时，验证网关能返回 HTTP 402 并正确注入 X-402-Price、X-402-Payment-Address 等所有首部字段。
-- 用例 2：携带 `Bearer mock-token` 时，验证网关能够正常放行，并转发到 mock 的 Agent 服务器上。
-- 用例 3：模拟反向代理流程，拦截 mock Agent 响应的 `X-Agent-Proof`，验证能否触发异步协程发送 Settle 请求。
+### 3. 修改 SDK 端到端集成测试 (`sdk/test/e2e.test.ts`)
+- 更新测试中的 Mock Gateway、Mock Bridge 以及测试用例：
+  - 在 `Mock Gateway` 中，对传入的 `Authorization: Bearer <channelId>:<accumulatedSpend>:<sig>` 进行拦截解析。如果 `accumulatedSpend` 正确且签名有效，将其 Enqueue 入库并立即给客户端返回 200。
+  - 后台 Worker 触发 POST 调用 `Mock Bridge` 的 `/aa/settle` 进行批量结算。
+  - 在测试中调用 `client.execute()` 两次。
+  - 断言第一次触发 402 并自愈；断言第二次调用直接携带了累加了 2 倍价格的 `accumulatedSpend` 通道头部；断言 Mock Bridge 收到的最终结算累计金额确为 2 倍价格。
 
 ## 验证与测试命令
-在 `gateway` 目录下执行：
+在 `sdk` 目录下执行：
 ```bash
-go test ./...
+npm run test
 ```
-要求：测试通过。
+在 `aa-bridge` 目录下执行：
+```bash
+npm run test
+```
+要求：所有测试编译无误并 100% 通过。

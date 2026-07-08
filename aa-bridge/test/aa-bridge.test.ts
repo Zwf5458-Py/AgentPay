@@ -142,6 +142,50 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
     expect(body).toHaveProperty('balance');
   });
 
+  it('should settle state channel successfully in DEV_MODE', async () => {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/aa/settle',
+      headers: {
+        'x-internal-secret': 'test-secret'
+      },
+      payload: {
+        channelId: 'channel-888',
+        accumulatedAmount: '2000',
+        signature: 'mock-channel-sig',
+        agentId: 888,
+        escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.success).toBe(true);
+    expect(body.txHash).toBe('0x7777777777777777777777777777777777777777777777777777777777777777');
+    expect(body.mocked).toBe(true);
+    expect(body.computedTBA).toBe('0x4444444444444444444444444444444444444444');
+  });
+
+  it('should return 400 for state channel settle with missing params', async () => {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/aa/settle',
+      headers: {
+        'x-internal-secret': 'test-secret'
+      },
+      payload: {
+        channelId: 'channel-888',
+        signature: 'mock-channel-sig',
+        agentId: 888
+        // missing accumulatedAmount
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = JSON.parse(response.body);
+    expect(body.error).toContain('Missing channelId, accumulatedAmount, signature, or agentId');
+  });
+
   describe('Non-DEV_MODE / Production scenarios', () => {
     const originalDevMode = process.env.DEV_MODE;
     const originalProjectId = process.env.ZERODEV_PROJECT_ID;

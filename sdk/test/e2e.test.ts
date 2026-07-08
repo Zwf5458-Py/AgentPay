@@ -10,6 +10,7 @@ let gatewayRequestCount = 0;
 let agentRequestCount = 0;
 let bridgeRequestCount = 0;
 let bridgeLastBody: any = null;
+let mockGatewayChannelSpend = 0n;
 
 const BRIDGE_PORT = 13001;
 const AGENT_PORT = 13002;
@@ -79,38 +80,51 @@ beforeAll(async () => {
   // 3. Mock Gateway (:18080)
   mockGateway = http.createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/agent/execute') {
-      gatewayRequestCount++;
-      const auth = req.headers['authorization'];
+      let reqBody = '';
+      req.on('data', chunk => { reqBody += chunk; });
+      req.on('end', () => {
+        gatewayRequestCount++;
+        const auth = req.headers['authorization'];
+        let parsedBody: any = {};
+        try {
+          parsedBody = JSON.parse(reqBody);
+        } catch (e) {}
+        const agentId = parsedBody.agentId;
 
-      if (!auth || auth !== 'Bearer lock-999:mock-token-signed') {
-        // Return 402
-        res.writeHead(402, {
-          'Content-Type': 'application/json',
-          'X-402-Price': '1000',
-          'X-402-Currency': 'USDC',
-          'X-402-Chain': 'base-sepolia',
-          'X-402-Payment-Address': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
-          'X-402-Version': '1'
-        });
-        res.end(JSON.stringify({ error: 'payment_required' }));
-      } else {
-        // Forward to downstream Agent (Proxy simulator)
-        let reqBody = '';
-        req.on('data', chunk => { reqBody += chunk; });
-        req.on('end', () => {
-          const agentReq = http.request({
-            host: '127.0.0.1',
-            port: AGENT_PORT,
-            path: '/agent/execute',
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-          }, (agentRes) => {
-            let agentBody = '';
-            agentRes.on('data', chunk => { agentBody += chunk; });
-            agentRes.on('end', () => {
-              const proof = agentRes.headers['x-agent-proof'];
-              if (proof) {
-                // Asynchronous settle call to AA Bridge
+        if (agentId === 888) {
+          // 通道模式的校验与处理
+          let isChannelAuthValid = false;
+          let currentSpend = 0n;
+          let signature = '';
+          let channelId = '';
+
+          if (auth && auth.startsWith('Bearer channel-')) {
+            const parts = auth.substring(7).split(':');
+            if (parts.length === 3) {
+              channelId = parts[0];
+              currentSpend = BigInt(parts[1]);
+              signature = parts[2];
+              const increment = currentSpend - mockGatewayChannelSpend;
+              if (increment >= 1000n && signature === 'mock-channel-sig') {
+                isChannelAuthValid = true;
+                mockGatewayChannelSpend = currentSpend;
+              }
+            }
+          }
+
+          if (isChannelAuthValid) {
+            // 转发下游 Eliza Agent
+            const agentReq = http.request({
+              host: '127.0.0.1',
+              port: AGENT_PORT,
+              path: '/agent/execute',
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            }, (agentRes) => {
+              let agentBody = '';
+              agentRes.on('data', chunk => { agentBody += chunk; });
+              agentRes.on('end', () => {
+                // 异步 settle 调用
                 const bridgeReq = http.request({
                   host: '127.0.0.1',
                   port: BRIDGE_PORT,
@@ -122,23 +136,90 @@ beforeAll(async () => {
                   }
                 });
                 bridgeReq.write(JSON.stringify({
-                  lockId: 'lock-999',
-                  proof: proof,
-                  agentOwner: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+                  channelId,
+                  accumulatedAmount: currentSpend.toString(),
+                  signature,
+                  agentId,
                   escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
                 }));
                 bridgeReq.end();
-              }
 
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(agentBody);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(agentBody);
+              });
             });
-          });
+            agentReq.write(reqBody);
+            agentReq.end();
+          } else {
+            // 返回 402 通道协商首部
+            res.writeHead(402, {
+              'Content-Type': 'application/json',
+              'X-402-Payment-Type': 'channel',
+              'X-402-Price': '1000',
+              'X-402-Currency': 'USDC',
+              'X-402-Chain': 'base-sepolia',
+              'X-402-Payment-Address': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+              'X-402-Version': '1'
+            });
+            res.end(JSON.stringify({ error: 'payment_required' }));
+          }
+        } else {
+          // 原有的 lockId 校验与处理
+          if (!auth || auth !== 'Bearer lock-999:mock-token-signed') {
+            // Return 402
+            res.writeHead(402, {
+              'Content-Type': 'application/json',
+              'X-402-Price': '1000',
+              'X-402-Currency': 'USDC',
+              'X-402-Chain': 'base-sepolia',
+              'X-402-Payment-Address': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+              'X-402-Version': '1'
+            });
+            res.end(JSON.stringify({ error: 'payment_required' }));
+          } else {
+            // Forward to downstream Agent (Proxy simulator)
+            const agentReq = http.request({
+              host: '127.0.0.1',
+              port: AGENT_PORT,
+              path: '/agent/execute',
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            }, (agentRes) => {
+              let agentBody = '';
+              agentRes.on('data', chunk => { agentBody += chunk; });
+              agentRes.on('end', () => {
+                const proof = agentRes.headers['x-agent-proof'];
+                if (proof) {
+                  // Asynchronous settle call to AA Bridge
+                  const bridgeReq = http.request({
+                    host: '127.0.0.1',
+                    port: BRIDGE_PORT,
+                    path: '/aa/settle',
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'x-internal-secret': process.env.INTERNAL_SECRET || 'test-secret'
+                    }
+                  });
+                  bridgeReq.write(JSON.stringify({
+                    lockId: 'lock-999',
+                    proof: proof,
+                    agentOwner: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+                    escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
+                  }));
+                  bridgeReq.end();
+                }
 
-          agentReq.write(reqBody);
-          agentReq.end();
-        });
-      }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(agentBody);
+              });
+            });
+
+            agentReq.write(reqBody);
+            agentReq.end();
+          }
+        }
+      });
     } else {
       res.writeHead(404);
       res.end();
@@ -180,6 +261,46 @@ describe('AgentPay SDK E2E Integration Test', () => {
     expect(bridgeRequestCount).toBe(1);  // Bridge settle got triggered once
     expect(bridgeLastBody.lockId).toBe('lock-999');
     expect(bridgeLastBody.proof).toBe('mock-proof-base64');
+  });
+
+  it('should support state channel adaptive spend accumulation over multiple calls', async () => {
+    // 重置全局 Mock 计数器和网关通道额度
+    gatewayRequestCount = 0;
+    agentRequestCount = 0;
+    bridgeRequestCount = 0;
+    bridgeLastBody = null;
+    mockGatewayChannelSpend = 0n;
+
+    const client = new AgentPayClient({
+      gatewayUrl: `http://127.0.0.1:${GATEWAY_PORT}`,
+      env: 'development'
+    });
+
+    // 第一次调用 (agentId 888)
+    const result1 = await client.execute(888, 'Channel Call 1');
+    expect(result1.output).toBe('Processed by AgentPay AI: Channel Call 1');
+
+    // 等待异步网关转发和桥结算完成
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    expect(gatewayRequestCount).toBe(2); // 第一笔会经历 1 次 402 + 1 次重试 (2)
+    expect(agentRequestCount).toBe(1);
+    expect(bridgeRequestCount).toBe(1);
+    expect(bridgeLastBody.channelId).toBe('channel-888');
+    expect(bridgeLastBody.accumulatedAmount).toBe('1000');
+
+    // 第二次调用 (agentId 888)
+    const result2 = await client.execute(888, 'Channel Call 2');
+    expect(result2.output).toBe('Processed by AgentPay AI: Channel Call 2');
+
+    // 等待异步网关转发和桥结算完成
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    expect(gatewayRequestCount).toBe(3); // 第二笔直接带上累计金额 2000 发送 (3)
+    expect(agentRequestCount).toBe(2);
+    expect(bridgeRequestCount).toBe(2);
+    expect(bridgeLastBody.channelId).toBe('channel-888');
+    expect(bridgeLastBody.accumulatedAmount).toBe('2000');
   });
 
   it('should throw an error if the price exceeds max price limit', async () => {

@@ -2,7 +2,7 @@ import fastify from 'fastify';
 import dotenv from 'dotenv';
 import { getSmartAccountAddress, getAccountBalance } from './kernel/account.js';
 import { grantPermission } from './kernel/permissions.js';
-import { createPublicClient, createWalletClient, http, isAddress } from 'viem';
+import { createPublicClient, createWalletClient, http, isAddress, pad, stringToHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 
@@ -130,94 +130,348 @@ server.post('/aa/permission/grant', async (request, reply) => {
 
 // 3. Settle Payment
 server.post('/aa/settle', async (request, reply) => {
-  const { lockId, proof, agentOwner, escrowAddress } = request.body as {
-    lockId: string;
-    proof: string;
-    agentOwner: string;
-    escrowAddress: string;
-  };
+  const body = request.body as any;
 
-  if (!lockId || !proof || !agentOwner || !escrowAddress) {
-    return reply.status(400).send({ error: 'Missing lockId, proof, agentOwner, or escrowAddress' });
-  }
+  if (body && body.channelId !== undefined) {
+    const { channelId, accumulatedAmount, signature, agentId, escrowAddress } = body as {
+      channelId: string;
+      accumulatedAmount: string | bigint;
+      signature: string;
+      agentId: number;
+      escrowAddress?: string;
+    };
 
-  // Input address validation
-  if (!isAddress(agentOwner)) {
-    return reply.status(400).send({ error: 'Invalid agentOwner address format' });
-  }
-  if (!isAddress(escrowAddress)) {
-    return reply.status(400).send({ error: 'Invalid escrowAddress format' });
-  }
-
-  const escrowAbi = [
-    {
-      name: 'releasePayment',
-      type: 'function',
-      stateMutability: 'external',
-      inputs: [
-        { name: 'lockId', type: 'bytes32' },
-        { name: 'proof', type: 'bytes' },
-        { name: 'agentOwner', type: 'address' },
-      ],
-      outputs: [],
-    },
-  ];
-
-  try {
-    const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
-    const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
-
-    if (!privateKey) {
-      throw new Error('PRIVATE_KEY is not configured in environment variables');
+    if (!channelId || accumulatedAmount === undefined || !signature || agentId === undefined) {
+      return reply.status(400).send({ error: 'Missing channelId, accumulatedAmount, signature, or agentId' });
     }
 
-    const account = privateKeyToAccount(privateKey);
-    const publicClient = createPublicClient({
-      chain: baseSepolia,
-      transport: http(rpcUrl),
-    });
+    const resolvedEscrowAddress = escrowAddress || process.env.ESCROW_ADDRESS;
+    if (!resolvedEscrowAddress || !isAddress(resolvedEscrowAddress)) {
+      return reply.status(400).send({ error: 'Invalid or missing escrowAddress' });
+    }
 
-    const walletClient = createWalletClient({
-      account,
-      chain: baseSepolia,
-      transport: http(rpcUrl),
-    });
+    const escrowAbi = [
+      {
+        name: 'tbaImplementation',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ name: '', type: 'address' }],
+      },
+      {
+        name: 'erc6551Registry',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ name: '', type: 'address' }],
+      },
+      {
+        name: 'agentIdentityRegistry',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ name: '', type: 'address' }],
+      },
+      {
+        name: 'batchSettle',
+        type: 'function',
+        stateMutability: 'nonpayable',
+        inputs: [
+          { name: 'channelId', type: 'bytes32' },
+          { name: 'accumulatedAmount', type: 'uint256' },
+          { name: 'signature', type: 'bytes' },
+          { name: 'agentOwner', type: 'address' },
+        ],
+        outputs: [],
+      },
+    ];
 
-    // Simulate on-chain call
-    const { request: txRequest } = await publicClient.simulateContract({
-      account,
-      address: escrowAddress as `0x${string}`,
-      abi: escrowAbi,
-      functionName: 'releasePayment',
-      args: [lockId as `0x${string}`, proof as `0x${string}`, agentOwner as `0x${string}`],
-    });
+    const registryAbi = [
+      {
+        name: 'account',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [
+          { name: 'implementation', type: 'address' },
+          { name: 'salt', type: 'bytes32' },
+          { name: 'chainId', type: 'uint256' },
+          { name: 'tokenContract', type: 'address' },
+          { name: 'tokenId', type: 'uint256' },
+        ],
+        outputs: [{ name: '', type: 'address' }],
+      },
+      {
+        name: 'createAccount',
+        type: 'function',
+        stateMutability: 'nonpayable',
+        inputs: [
+          { name: 'implementation', type: 'address' },
+          { name: 'salt', type: 'bytes32' },
+          { name: 'chainId', type: 'uint256' },
+          { name: 'tokenContract', type: 'address' },
+          { name: 'tokenId', type: 'uint256' },
+        ],
+        outputs: [{ name: '', type: 'address' }],
+      },
+    ];
 
-    // Send transaction
-    const hash = await walletClient.writeContract(txRequest);
-
-    return {
-      success: true,
-      txHash: hash,
-    };
-  } catch (error: any) {
     const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
-    
-    server.log.warn(`Escrow transaction failed/skipped: ${error.message}. DevMode: ${devMode}`);
 
-    // If not in DevMode (Production), DO NOT silently fallback. Propagate the error as HTTP 500.
-    if (!devMode) {
-      return reply.status(500).send({
-        success: false,
-        error: error.message || 'Escrow settlement transaction execution failed',
+    try {
+      const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
+      const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
+
+      if (!privateKey) {
+        throw new Error('PRIVATE_KEY is not configured in environment variables');
+      }
+
+      const account = privateKeyToAccount(privateKey);
+      const publicClient = createPublicClient({
+        chain: baseSepolia,
+        transport: http(rpcUrl),
       });
+
+      const walletClient = createWalletClient({
+        account,
+        chain: baseSepolia,
+        transport: http(rpcUrl),
+      });
+
+      // 1. 获取 TBA 相关的合约地址
+      let tbaImplementationAddress: string;
+      let erc6551RegistryAddress: string;
+      let agentIdentityRegistryAddress: string;
+
+      try {
+        tbaImplementationAddress = await publicClient.readContract({
+          address: resolvedEscrowAddress as `0x${string}`,
+          abi: escrowAbi,
+          functionName: 'tbaImplementation',
+        }) as string;
+        erc6551RegistryAddress = await publicClient.readContract({
+          address: resolvedEscrowAddress as `0x${string}`,
+          abi: escrowAbi,
+          functionName: 'erc6551Registry',
+        }) as string;
+        agentIdentityRegistryAddress = await publicClient.readContract({
+          address: resolvedEscrowAddress as `0x${string}`,
+          abi: escrowAbi,
+          functionName: 'agentIdentityRegistry',
+        }) as string;
+
+        if (devMode) {
+          if (!tbaImplementationAddress) tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
+          if (!erc6551RegistryAddress) erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
+          if (!agentIdentityRegistryAddress) agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+        }
+      } catch (err: any) {
+        if (!devMode) throw err;
+        // Mock 环境下 fallback 地址
+        tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
+        erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
+        agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+      }
+
+      // 2. 计算专属 TBA 账户地址
+      const salt = '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`;
+      const chainId = BigInt(baseSepolia.id);
+
+      let computedTBA: string;
+      try {
+        computedTBA = await publicClient.readContract({
+          address: erc6551RegistryAddress as `0x${string}`,
+          abi: registryAbi,
+          functionName: 'account',
+          args: [
+            tbaImplementationAddress as `0x${string}`,
+            salt,
+            chainId,
+            agentIdentityRegistryAddress as `0x${string}`,
+            BigInt(agentId),
+          ],
+        }) as string;
+
+        if (!computedTBA && devMode) {
+          computedTBA = '0x4444444444444444444444444444444444444444';
+        }
+      } catch (err: any) {
+        if (!devMode) throw err;
+        // Mock 模式下本地生成
+        computedTBA = '0x4444444444444444444444444444444444444444';
+      }
+
+      // 3. 检测该 TBA 账户是否部署
+      let isDeployed = false;
+      if (!devMode) {
+        try {
+          const bytecode = await publicClient.getBytecode({ address: computedTBA as `0x${string}` });
+          isDeployed = bytecode !== undefined && bytecode !== '0x';
+        } catch {
+          isDeployed = false;
+        }
+      }
+
+      // 4. 若未部署，调用 createAccount 自动部署
+      if (!isDeployed && !devMode) {
+        const { request: deployRequest } = await publicClient.simulateContract({
+          account,
+          address: erc6551RegistryAddress as `0x${string}`,
+          abi: registryAbi,
+          functionName: 'createAccount',
+          args: [
+            tbaImplementationAddress as `0x${string}`,
+            salt,
+            chainId,
+            agentIdentityRegistryAddress as `0x${string}`,
+            BigInt(agentId),
+          ],
+        });
+        const deployHash = await walletClient.writeContract(deployRequest);
+        await publicClient.waitForTransactionReceipt({ hash: deployHash });
+      } else if (!isDeployed && devMode) {
+        server.log.info(`Mock environment: Simulated deployment of TBA for agent ${agentId} at address ${computedTBA}`);
+      }
+
+      // 5. 调用 batchSettle
+      const bytes32ChannelId = pad(stringToHex(channelId), { size: 32 });
+
+      if (devMode) {
+        return {
+          success: true,
+          txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
+          mocked: true,
+          computedTBA,
+        };
+      }
+
+      const { request: settleRequest } = await publicClient.simulateContract({
+        account,
+        address: resolvedEscrowAddress as `0x${string}`,
+        abi: escrowAbi,
+        functionName: 'batchSettle',
+        args: [
+          bytes32ChannelId,
+          BigInt(accumulatedAmount),
+          signature as `0x${string}`,
+          computedTBA as `0x${string}`,
+        ],
+      });
+
+      const hash = await walletClient.writeContract(settleRequest);
+
+      return {
+        success: true,
+        txHash: hash,
+        computedTBA,
+      };
+    } catch (error: any) {
+      server.log.warn(`Channel Settle transaction failed/skipped: ${error.message}. DevMode: ${devMode}`);
+
+      if (!devMode) {
+        return reply.status(500).send({
+          success: false,
+          error: error.message || 'Channel settlement transaction execution failed',
+        });
+      }
+
+      return {
+        success: true,
+        txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
+        mocked: true,
+        computedTBA: '0x4444444444444444444444444444444444444444',
+      };
+    }
+  } else {
+    // 走原有的 lockId 结算逻辑 (即原来的 releasePayment 逻辑)
+    const { lockId, proof, agentOwner, escrowAddress } = request.body as {
+      lockId: string;
+      proof: string;
+      agentOwner: string;
+      escrowAddress: string;
+    };
+
+    if (!lockId || !proof || !agentOwner || !escrowAddress) {
+      return reply.status(400).send({ error: 'Missing lockId, proof, agentOwner, or escrowAddress' });
     }
 
-    // Safe mock fallback hash ONLY when in DevMode
-    return {
-      success: true,
-      txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
-      mocked: true,
-    };
+    // Input address validation
+    if (!isAddress(agentOwner)) {
+      return reply.status(400).send({ error: 'Invalid agentOwner address format' });
+    }
+    if (!isAddress(escrowAddress)) {
+      return reply.status(400).send({ error: 'Invalid escrowAddress format' });
+    }
+
+    const escrowAbi = [
+      {
+        name: 'releasePayment',
+        type: 'function',
+        stateMutability: 'external',
+        inputs: [
+          { name: 'lockId', type: 'bytes32' },
+          { name: 'proof', type: 'bytes' },
+          { name: 'agentOwner', type: 'address' },
+        ],
+        outputs: [],
+      },
+    ];
+
+    try {
+      const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
+      const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
+
+      if (!privateKey) {
+        throw new Error('PRIVATE_KEY is not configured in environment variables');
+      }
+
+      const account = privateKeyToAccount(privateKey);
+      const publicClient = createPublicClient({
+        chain: baseSepolia,
+        transport: http(rpcUrl),
+      });
+
+      const walletClient = createWalletClient({
+        account,
+        chain: baseSepolia,
+        transport: http(rpcUrl),
+      });
+
+      // Simulate on-chain call
+      const { request: txRequest } = await publicClient.simulateContract({
+        account,
+        address: escrowAddress as `0x${string}`,
+        abi: escrowAbi,
+        functionName: 'releasePayment',
+        args: [lockId as `0x${string}`, proof as `0x${string}`, agentOwner as `0x${string}`],
+      });
+
+      // Send transaction
+      const hash = await walletClient.writeContract(txRequest);
+
+      return {
+        success: true,
+        txHash: hash,
+      };
+    } catch (error: any) {
+      const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
+      
+      server.log.warn(`Escrow transaction failed/skipped: ${error.message}. DevMode: ${devMode}`);
+
+      // If not in DevMode (Production), DO NOT silently fallback. Propagate the error as HTTP 500.
+      if (!devMode) {
+        return reply.status(500).send({
+          success: false,
+          error: error.message || 'Escrow settlement transaction execution failed',
+        });
+      }
+
+      // Safe mock fallback hash ONLY when in DevMode
+      return {
+        success: true,
+        txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
+        mocked: true,
+      };
+    }
   }
 });
 
