@@ -1,18 +1,14 @@
 package proxy
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"time"
 
 	"gateway/internal/middleware"
+	"gateway/internal/queue"
 )
 
 // ReverseProxyWrapper 封装了反向代理的逻辑
@@ -22,11 +18,11 @@ type ReverseProxyWrapper struct {
 	agentOwner     string
 	escrowAddress  string
 	internalSecret string
-	Client         *http.Client // 复用 HTTP Client，避免并发端口耗尽
+	QueueManager   *queue.QueueManager
 }
 
 // NewReverseProxy 构造反向代理实例
-func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string) (*ReverseProxyWrapper, error) {
+func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string, queueMgr *queue.QueueManager) (*ReverseProxyWrapper, error) {
 	url, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, err
@@ -48,9 +44,7 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 		agentOwner:     agentOwner,
 		escrowAddress:  escrowAddress,
 		internalSecret: internalSecret,
-		Client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		QueueManager:   queueMgr,
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
@@ -64,8 +58,10 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 			lockID := middleware.GetLockID(ctx)
 
 			if lockID != "" {
-				log.Printf("[Proxy] Intercepted X-Agent-Proof. Triggering async settle for lockId: %s", lockID)
-				go wrapper.settle(lockID, proof)
+				log.Printf("[Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: %s", lockID)
+				if err := wrapper.QueueManager.Enqueue(lockID, proof, wrapper.agentOwner, wrapper.escrowAddress); err != nil {
+					log.Printf("[Proxy] Enqueue failed for lockId %s: %v", lockID, err)
+				}
 			} else {
 				log.Printf("[Proxy] Intercepted X-Agent-Proof but lockId is missing in request context.")
 			}
@@ -80,73 +76,4 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 // ServeHTTP 转发请求
 func (w *ReverseProxyWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	w.proxy.ServeHTTP(rw, req)
-}
-
-func (w *ReverseProxyWrapper) settle(lockID, proof string) {
-	// 1. Panic 安全屏障，决不引发主网关进程崩溃
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("[Proxy Settle] Recovered from panic: %v", r)
-		}
-	}()
-
-	bodyMap := map[string]string{
-		"lockId":        lockID,
-		"proof":         proof,
-		"agentOwner":    w.agentOwner,
-		"escrowAddress": w.escrowAddress,
-	}
-	bodyBytes, err := json.Marshal(bodyMap)
-	if err != nil {
-		log.Printf("[Proxy Settle] Error marshaling settle body: %v", err)
-		return
-	}
-
-	maxRetries := 3
-	var lastErr error
-	var resp *http.Response
-
-	// 2. 退避重试机制
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest("POST", w.aaBridgeURL, bytes.NewBuffer(bodyBytes))
-		if err != nil {
-			log.Printf("[Proxy Settle] Error creating settle request (attempt %d/%d): %v", attempt, maxRetries, err)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if w.internalSecret != "" {
-			req.Header.Set("X-Internal-Secret", w.internalSecret)
-		}
-
-		// 3. 复用结构体自带的 Client 进行网络调用
-		resp, err = w.Client.Do(req)
-		if err != nil {
-			lastErr = err
-			log.Printf("[Proxy Settle] Connection failed (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, err)
-			if attempt < maxRetries {
-				time.Sleep(1 * time.Second)
-			}
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			respBody, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			lastErr = fmt.Errorf("HTTP status %s: %s", resp.Status, string(respBody))
-			log.Printf("[Proxy Settle] Bridge returned non-200 (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, lastErr)
-			if attempt < maxRetries {
-				time.Sleep(1 * time.Second)
-			}
-			continue
-		}
-
-		// 成功响应
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		log.Printf("[Proxy Settle] AA Bridge response for lockId %s: Status: %s, Body: %s", lockID, resp.Status, string(respBody))
-		return
-	}
-
-	// 3次重试后依然失败，记录致命报警日志
-	log.Printf("[Proxy Settle] [CRITICAL ERROR] Failed to settle payment for lockId %s after %d attempts. Last error: %v", lockID, maxRetries, lastErr)
 }

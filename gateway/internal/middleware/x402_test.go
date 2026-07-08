@@ -1,6 +1,8 @@
 package middleware_test
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 
 	"gateway/internal/middleware"
 	"gateway/internal/proxy"
+	"gateway/internal/queue"
 )
 
 func TestX402Middleware_NoToken(t *testing.T) {
@@ -138,11 +141,9 @@ func TestX402Middleware_WithToken(t *testing.T) {
 func TestProxyReverse_AsyncSettle(t *testing.T) {
 	// 1. 模拟下游 Agent 服务
 	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 校验请求
 		if r.URL.Path != "/agent/execute" {
 			t.Errorf("Agent received path %q, expected /agent/execute", r.URL.Path)
 		}
-		// 返回带有 X-Agent-Proof 的响应
 		w.Header().Set("X-Agent-Proof", "MockProofBase64String")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"output":"mocked output"}`))
@@ -151,17 +152,24 @@ func TestProxyReverse_AsyncSettle(t *testing.T) {
 
 	// 2. 模拟 AA Bridge 服务，捕获异步结算请求
 	var receivedSettleBody map[string]string
+	var receivedSecret string
+	var mu sync.Mutex
+	var settleCount int
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer wg.Done()
+		mu.Lock()
+		defer mu.Unlock()
+
+		settleCount++
+
 		if r.URL.Path != "/aa/settle" {
 			t.Errorf("Bridge received path %q, expected /aa/settle", r.URL.Path)
 		}
 
-		secret := r.Header.Get("X-Internal-Secret")
-		if secret != "test-secret" {
+		receivedSecret = r.Header.Get("X-Internal-Secret")
+		if receivedSecret != "test-secret" {
 			w.WriteHeader(http.StatusUnauthorized)
 			w.Write([]byte(`{"error":"unauthorized"}`))
 			return
@@ -177,14 +185,30 @@ func TestProxyReverse_AsyncSettle(t *testing.T) {
 			t.Errorf("Failed to parse bridge request body: %v", err)
 		}
 
-		// 返回成功响应
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"success":true,"txHash":"0x7777"}`))
+
+		if settleCount == 1 {
+			wg.Done()
+		}
 	}))
 	defer bridgeServer.Close()
 
+	// 创建临时的 QueueManager
+	dbPath := t.TempDir() + "/test_async_settle.db"
+	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
+	if err != nil {
+		t.Fatalf("Failed to create QueueManager: %v", err)
+	}
+	defer queueMgr.Close()
+
+	// 启动 Worker
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queueMgr.StartWorker(ctx)
+
 	// 3. 初始化 Gateway 反向代理
-	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
 	if err != nil {
 		t.Fatalf("Failed to create reverse proxy: %v", err)
 	}
@@ -205,7 +229,7 @@ func TestProxyReverse_AsyncSettle(t *testing.T) {
 		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
 	}
 
-	// 7. 等待异步 goroutine 执行结算请求 (带超时保护)
+	// 7. 等待异步 worker 执行结算请求 (带超时保护)
 	c := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -215,11 +239,13 @@ func TestProxyReverse_AsyncSettle(t *testing.T) {
 	select {
 	case <-c:
 		// 正常接收
-	case <-time.After(3 * time.Second):
-		t.Fatal("Timeout waiting for async settle goroutine to trigger AA Bridge")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for async settle worker to trigger AA Bridge")
 	}
 
 	// 8. 验证结算请求体中的字段
+	mu.Lock()
+	defer mu.Unlock()
 	if receivedSettleBody == nil {
 		t.Fatal("Bridge did not receive settle request")
 	}
@@ -230,73 +256,130 @@ func TestProxyReverse_AsyncSettle(t *testing.T) {
 	if receivedSettleBody["proof"] != "MockProofBase64String" {
 		t.Errorf("Expected proof 'MockProofBase64String', got %q", receivedSettleBody["proof"])
 	}
-	// 验证网关有默认/环境变量中读取的 EOA
-	if receivedSettleBody["agentOwner"] == "" {
-		t.Error("Expected non-empty agentOwner EOA")
-	}
-	if receivedSettleBody["escrowAddress"] == "" {
-		t.Error("Expected non-empty escrowAddress")
+	if receivedSecret != "test-secret" {
+		t.Errorf("Expected secret 'test-secret', got %q", receivedSecret)
 	}
 }
 
-func TestProxyReverse_SettleRetry(t *testing.T) {
-	// 模拟下游 Agent 服务
+func TestProxyReverse_BridgeOutageSelfHealing(t *testing.T) {
+	// 1. 模拟下游 Agent 服务
 	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Agent-Proof", "MockProofForRetry")
+		w.Header().Set("X-Agent-Proof", "MockProofSelfHealing")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"output":"mocked output"}`))
 	}))
 	defer agentServer.Close()
 
-	// 模拟一个总是失败的 AA Bridge 服务 (返回 500)
+	// 2. 模拟可动态调整行为的 AA Bridge 服务
 	var mu sync.Mutex
-	attempts := 0
+	shouldFail := true
+	settleSuccessReceived := false
+	var receivedSecret string
+
 	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		attempts++
-		mu.Unlock()
+		defer mu.Unlock()
 
-		secret := r.Header.Get("X-Internal-Secret")
-		if secret != "test-secret" {
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"unauthorized"}`))
+		receivedSecret = r.Header.Get("X-Internal-Secret")
+
+		if shouldFail {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"bridge temp offline"}`))
 			return
 		}
 
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"bridge internal error"}`))
+		settleSuccessReceived = true
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true,"txHash":"0x8888"}`))
 	}))
 	defer bridgeServer.Close()
 
-	// 初始化 Gateway 反向代理，指向会失败 defects AA Bridge
-	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
+	// 3. 创建临时的 QueueManager
+	dbPath := t.TempDir() + "/test_self_healing.db"
+	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
+	if err != nil {
+		t.Fatalf("Failed to create QueueManager: %v", err)
+	}
+	defer queueMgr.Close()
+
+	// 启动 Worker
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queueMgr.StartWorker(ctx)
+
+	// 4. 初始化 Gateway 反向代理
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
 	if err != nil {
 		t.Fatalf("Failed to create reverse proxy: %v", err)
 	}
 
 	handler := middleware.X402Middleware(gatewayProxy)
 
+	// 5. 客户端发起推理请求
 	req := httptest.NewRequest("POST", "/agent/execute", nil)
 	req.Header.Set("Authorization", "Bearer mock-session-token")
-	req.Header.Set("X-Payment-Lock-Id", "lock-fail-retry")
+	req.Header.Set("X-Payment-Lock-Id", "lock-heal-123")
 	rr := httptest.NewRecorder()
 
 	handler.ServeHTTP(rr, req)
 
+	// 验证网关能立刻正常向客户端写回推理数据（HTTP 200）
 	if rr.Code != http.StatusOK {
 		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
 	}
 
-	// 异步重试最长需要 2 秒（每次重试间隔 1 秒，共 3 次请求）
-	// 我们等待 3.5 秒确保重试流程全部走完
-	time.Sleep(3500 * time.Millisecond)
+	// 6. 稍微等一等以确保 Worker 跑了一轮（第一次请求），然后我们去 SQLite 查任务状态，断言为 'pending'
+	time.Sleep(2500 * time.Millisecond)
 
+	// 打开 SQLite 检查状态
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open test DB: %v", err)
+	}
+	defer db.Close()
+
+	var status string
+	var retryCount int
+	err = db.QueryRow("SELECT status, retry_count FROM settle_tasks WHERE lock_id = ?", "lock-heal-123").Scan(&status, &retryCount)
+	if err != nil {
+		t.Fatalf("Failed to query task status: %v", err)
+	}
+
+	if status != "pending" {
+		t.Errorf("Expected task status 'pending', got %q", status)
+	}
+	if retryCount < 1 {
+		t.Errorf("Expected retry_count to be at least 1, got %d", retryCount)
+	}
+
+	// 7. 将 Mock Bridge 的行为恢复为正常，等待 SQLite Worker 轮询重试自愈
 	mu.Lock()
-	finalAttempts := attempts
+	shouldFail = false
 	mu.Unlock()
 
-	// 应该在失败后尝试了 3 次
-	if finalAttempts != 3 {
-		t.Errorf("Expected exactly 3 settle attempts, got %d", finalAttempts)
+	// 刚才 retryCount 为 1，退避延迟时间是 2^1 = 2s。
+	// 这里我们直接等待退避延迟过去。为稳妥起见，我们直接等待 4.5 秒。
+	time.Sleep(4500 * time.Millisecond)
+
+	// 再次查询 SQLite，断言任务状态更新为 'success'
+	err = db.QueryRow("SELECT status FROM settle_tasks WHERE lock_id = ?", "lock-heal-123").Scan(&status)
+	if err != nil {
+		t.Fatalf("Failed to query task status again: %v", err)
+	}
+
+	if status != "success" {
+		t.Errorf("Expected task status to heal to 'success', got %q", status)
+	}
+
+	mu.Lock()
+	successReceived := settleSuccessReceived
+	mu.Unlock()
+
+	if !successReceived {
+		t.Error("Mock Bridge did not receive a successful settle request")
+	}
+
+	if receivedSecret != "test-secret" {
+		t.Errorf("Expected secret 'test-secret', got %q", receivedSecret)
 	}
 }

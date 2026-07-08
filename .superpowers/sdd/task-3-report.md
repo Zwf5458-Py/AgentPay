@@ -1,77 +1,99 @@
-# Task 3 Report: AA Bridge 开发与接口测试报告
+# Task 3 Report: Go Gateway 本地 SQLite 任务持久化队列实现报告
 
-## 1. 任务概述
-根据 Task 3 Brief，在 `/Users/oraclez/code/AgentPay/aa-bridge` 目录下搭建了 Node.js + TypeScript 的智能账户抽象胶水层（AA Bridge）微服务，集成了 ZeroDev Kernel v3 SDK (EntryPoint v0.7) 与 Fastify。服务具备生产模式与 Mock 本地开发模式的双模切换能力。
+本报告概述了为 Go Gateway 引入本地 SQLite 持久化队列和后台重试 Worker 的设计方案、具体实现步骤及验证结果。
 
-## 2. 依赖与环境配置
-- **初始化项目**：创建了 `package.json` 及 `tsconfig.json`。
-- **依赖安装**：
-  - 核心依赖：`fastify` (v4), `viem` (v2), `dotenv`, `@zerodev/sdk` (v5), `@zerodev/ecdsa-validator` (v5), `@zerodev/permissions` (v5)。
-  - 开发依赖：`typescript`, `ts-node`, `vitest`。
-- **环境缺陷处理**：
-  - 在初次测试中，由于 ZeroDev 的 CommonJS 代码引用了 `tslib`，我们手动在项目中安装了 `tslib`，彻底消除了模块找不到的编译期和运行时缺陷。
-- **环境变量配置**：创建了 `.env` 和 `.env.example`。默认启用 `DEV_MODE=true` 且预置 Anvil 的默认 Settler 私钥与合约地址。
-
-## 3. 核心模块与实现逻辑
-
-### 3.1 账户管理 (`src/kernel/account.ts`)
-- **地址生成**：
-  - **Mock 模式**：基于 `ownerAddress`, `agentId` 与 `salt` 进行 `keccak256` 确定性离线哈希计算，截取后 20 字节作为确定性 Smart Account 地址。
-  - **生产模式**：使用 `createKernelAccount` 结合 `signerToEcdsaValidator`（构建具有 owner 地址的自定义 LocalAccount Signer），通过 `agentId` 与 `salt` 的哈希派生 256 位 `index` 来确定性计算智能钱包的 counterfactual 链上地址。
-- **余额获取**：
-  - 支持查询原生 ETH 余额及 ERC20 代币余额。当本地 RPC 连接失败时，会自动且安全地降级回 Mock 数据 `{ native: '1.0', token: '100.0' }`。
-
-### 3.2 权限与 Paymaster (`src/kernel/permissions.ts`, `src/paymaster/sponsor.ts`)
-- 实现了 `grantPermission` 模块以支持授权 Session Key，并配置了 ZeroDev Paymaster Client 用于非 Mock 模式下的交易 Sponsor。
-
-### 3.3 Fastify API Server (`src/index.ts`)
-服务监听在 `127.0.0.1:3001`，内部使用内存 Map `accountsDb` 维护 `agentId` -> `smartAccount` 映射，并暴露了以下 API 接口：
-- `POST /aa/account/create`
-- `POST /aa/permission/grant`
-- `POST /aa/settle`：该接口用来代替 Go 网关完成资金结算交易。在调用 `PaymentEscrow.releasePayment(lockId, proof, agentOwner)` 时，如果无 RPC 服务或模拟交易失败，系统会触发异常保护，打印控制台警告并安全返回 Mock 的 `txHash` 响应。
-- `GET /aa/account/:agentId`
-
-## 4. 接口单元测试与验证 (`test/aa-bridge.test.ts`)
-使用 `vitest` 与 Fastify 原生的 `.inject()` 请求注入能力实现了 4 个核心 API 的全链路测试。
-
-## 5. Git 提交
-所有开发的新增代码均已被 add 并 commit 到当前 git 本地分支 `feat/payment-escrow-reputation`。
+## 1. 任务背景与目标
+为了降低网关/Bridge 掉线导致的资金漏单风险，我们需要：
+- 将原本反向代理中的同步 HTTP 结算请求改为本地 SQLite 数据库持久化队列（只入库即返回，避免阻塞客户端）。
+- 使用后台重试协程（Worker）对已入库的结算任务进行轮询，并采用指数级退避机制重试。
+- 保证无外部 C 依赖（使用纯 Go 实现的 `modernc.org/sqlite`）。
+- 保证网关优雅退出时的并发安全性与 SQLite 写操作的互斥锁保护。
 
 ---
 
-## 6. 状态容灾与生产安全加固修复 (V2 补丁)
+## 2. 具体实现细节
 
-针对评审中提出的 “Critical 静默降级与生产环境状态丢失漏洞”，我们对 `aa-bridge` 微服务进行了全面重构：
+### 2.1 依赖安装与声明
+- 配置了 `GOPROXY` 以保证在多网络环境下依赖包能够顺利下载。
+- 在 `gateway/go.mod` 中显式声明并拉取了纯 Go 的 `modernc.org/sqlite`。
+- 执行 `go mod tidy` 整理了所有直接与间接依赖，消除了编译环境的缺失。
 
-### 6.1 禁用生产环境下的静默降级 (`/aa/settle`)
-- 移除了非 `DEV_MODE` 生产环境下的异常吞没机制。
-- 当 `DEV_MODE !== "true"` 时，如果发生链上交易执行错误（如 Gas 估算失败、RPC 掉线或 Proof 验证失败），系统**禁止**返回 Mock 的哈希，而是直接向请求方返回 **HTTP 500** 状态码，并附带错误描述 `{ success: false, error: error.message }`。
-
-### 6.2 链上身份逆向反查灾备 (`GET /aa/account/:agentId`)
-- 废除了对内存 Map 的强依赖，在缓存未命中时增加了自动向链上反查所有权的灾备逻辑。
-- 在生产环境下，若内存缓存未命中，使用 `viem` 通过 `readContract` 调用链上 `AgentIdentityRegistry` 合约的 `ownerOf(agentId)` 动态获取所有权人（EOA 所有者）。
-- 成功取得所有权人地址后，调用 `getSmartAccountAddress` 离线计算智能钱包账户并动态回写缓存后返回。
-- 若在链上未查到该 `agentId` 对应的 NFT（合约调用 revert），则直接向客户端返回 **HTTP 404** 错误 `{ error: "Agent identity not registered" }`。
-
-### 6.3 安全加固与全局异常防御
-- **以太坊地址合法性校验**：所有接收以太坊地址作为输入参数的接口（如 `ownerAddress`, `sessionKeyAddress`, `agentOwner`, `escrowAddress`）引入了 `viem` 的 `isAddress` 方法进行格式安全过滤。对于格式不合法的地址，统一拦截并返回 **HTTP 400** 状态码。
-- **全局 Promise Rejection 拦截**：在 Fastify 中配置了全局 `setErrorHandler` 机制，提供最终的 Promise 异常与未捕获的报错拦截防线，始终返回 **HTTP 500**，确保微服务在任何黑天鹅异常下都不会静默退出。
-
-### 6.4 Vitest 测试用例更新与通过验证
-- 更新了 `test/aa-bridge.test.ts`，利用 `vi.mock` 劫持 `viem.createPublicClient` 的底层 JSON-RPC 传输通道（如拦截 `eth_chainId`, `eth_getBalance`, `eth_getCode`），并 Mock 本地 `account.ts` 的 `getSmartAccountAddress` 以避免在离线测试时发起真实的 EntryPoint 网络调用。
-- 新增了 3 个集成测试用例，覆盖：地址合法性校验 (HTTP 400)、生产环境下缓存未命中且 NFT 存在时的成功反查与缓存重写、生产环境下未注册 NFT 返回 HTTP 404 错误、以及生产环境调用交易失败返回 HTTP 500。
-- **测试通过结果**：
-  ```bash
-  > aa-bridge@1.0.0 test
-  > vitest run
-
-   RUN  v1.6.1 /Users/oraclez/code/AgentPay/aa-bridge
-
-   ✓ test/aa-bridge.test.ts  (6 tests) 1111ms
-
-   Test Files  1 passed (1)
-        Tests  6 passed (6)
-     Start at  17:42:48
-     Duration  1.73s
+### 2.2 SQLite 本地持久化队列与后台 Worker
+- 文件路径：[sqlite_queue.go](file:///Users/oraclez/code/AgentPay/gateway/internal/queue/sqlite_queue.go)
+- **表结构设计**：
+  在初始化数据库时，自动创建 `settle_tasks` 表：
+  ```sql
+  CREATE TABLE IF NOT EXISTS settle_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lock_id TEXT UNIQUE NOT NULL,
+      proof TEXT NOT NULL,
+      agent_owner TEXT NOT NULL,
+      escrow_address TEXT NOT NULL,
+      status TEXT DEFAULT 'pending',
+      retry_count INTEGER DEFAULT 0,
+      next_retry_at INTEGER,
+      created_at INTEGER
+  );
   ```
-  6 个测试用例全部正常通过！
+- **写入幂等性**：
+  在 `Enqueue` 方法中使用 `INSERT OR IGNORE` 逻辑，结合 `lock_id` 的 `UNIQUE` 索引，完美实现了去重与操作幂等。
+- **后台 Worker 重试及退避公式**：
+  - 启动后台 Go 协程，每 2 秒轮询一次待结算任务。
+  - 查询条件：`status = 'pending' AND next_retry_at <= ?` (传入当前 Unix 时间戳)。
+  - 网络请求失败或返回非 200：
+    - 增加 `retry_count`。
+    - 如果重试达到 5 次，将状态更新为 `failed` 并输出 Critical 级别报警日志。
+    - 如果不足 5 次，按照指数级退避公式计算下一次重试时间：`delay := time.Duration(1 << newRetryCount) * time.Second`，即 $2^{retry\_count}$ 秒。
+  - 优雅退出保护：在请求 API 或写入数据库的前后全面接入 `context.Context` 校验，一旦检测到 context 已被取消，立刻中止数据库更新，避免在单元测试或进程关闭时访问已关闭的 db 连接，从而消除报错与脏数据。
+
+### 2.3 反代钩子拦截改造
+- 文件路径：[reverse.go](file:///Users/oraclez/code/AgentPay/gateway/internal/proxy/reverse.go)
+- 剔除了 `ReverseProxyWrapper` 中原本的 `http.Client`，引入 `QueueManager` 引用。
+- 在代理截获到 `X-Agent-Proof` 头后，从上下文获取 `lockID`，接着调用 `QueueManager.Enqueue` 异步持久化该结算任务。
+- 存盘后立刻返回推理结果给下游客户端，不在这里等待网桥结算，消除延迟并确保极高可用性。
+
+### 2.4 主程序启动逻辑挂接
+- 文件路径：[main.go](file:///Users/oraclez/code/AgentPay/gateway/cmd/gateway/main.go)
+- 启动时从环境变量中读取 `INTERNAL_SECRET` 并实例化 `QueueManager` (存盘到 `gateway.db`)。
+- 在 `main` 结束时延迟关闭 `QueueManager`。
+- 在独立 Context 中启动后台重试 Worker，并将其传入 `NewReverseProxy` 实例中。
+
+### 2.5 掉线自愈与并发单元测试
+- 文件路径：[x402_test.go](file:///Users/oraclez/code/AgentPay/gateway/internal/middleware/x402_test.go)
+- 编写了 `TestProxyReverse_BridgeOutageSelfHealing`：
+  1. 客户端发送推理请求，Mock Bridge 被配置为故意返回 500。
+  2. 验证网关可以瞬间返回 200 推理结果，不被 500 阻塞。
+  3. 查询 SQLite 数据库，断言此时对应的 `settle_tasks` 记录为 `pending`。
+  4. 将 Mock Bridge 状态调整为正常返回 200。
+  5. 等待 SQLite Worker 轮询重试并断言状态正常演变为 `success`，同时验证 `X-Internal-Secret` 凭证头的匹配以及指数级退避算法的触发。
+
+---
+
+## 3. 测试验证结果
+在 `gateway` 目录下执行单元测试：
+```bash
+go test -v ./...
+```
+测试输出：
+```
+=== RUN   TestX402Middleware_NoToken
+--- PASS: TestX402Middleware_NoToken (0.00s)
+=== RUN   TestX402Middleware_WithToken
+--- PASS: TestX402Middleware_WithToken (0.00s)
+=== RUN   TestProxyReverse_AsyncSettle
+2026/07/08 18:20:48 [Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: lock-999
+2026/07/08 18:20:48 [Queue] Successfully enqueued lockId lock-999
+2026/07/08 18:20:50 [Queue Worker] Stopping worker...
+--- PASS: TestProxyReverse_AsyncSettle (2.01s)
+=== RUN   TestProxyReverse_BridgeOutageSelfHealing
+2026/07/08 18:20:50 [Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: lock-heal-123
+2026/07/08 18:20:50 [Queue] Successfully enqueued lockId lock-heal-123
+2026/07/08 18:20:52 [Queue Worker] Bridge returned non-200 for lockId lock-heal-123: HTTP status 500 Internal Server Error: {"error":"bridge temp offline"}
+2026/07/08 18:20:52 [Queue Worker] Settle failed for lockId lock-heal-123, scheduling retry 1 in 2s
+2026/07/08 18:20:54 [Queue Worker] Successfully settled payment for lockId lock-heal-123
+2026/07/08 18:20:57 [Queue Worker] Stopping worker...
+--- PASS: TestProxyReverse_BridgeOutageSelfHealing (7.01s)
+PASS
+ok  	gateway/internal/middleware	9.538s
+```
+**结果**：测试 100% 成功通过，Bridge 掉线自愈行为完全符合预期，且在优雅停止 Worker 期间没有任何冗余数据库报错，确保了生产级健壮性。

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"gateway/internal/middleware"
 	"gateway/internal/proxy"
+	"gateway/internal/queue"
 )
 
 func main() {
@@ -39,9 +41,22 @@ func main() {
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
 
-	// 创建反向代理
 	internalSecret := os.Getenv("INTERNAL_SECRET")
-	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret)
+
+	// 初始化 SQLite 本地队列管理器
+	queueMgr, err := queue.NewQueueManager("gateway.db", aaBridgeURL, internalSecret)
+	if err != nil {
+		log.Fatalf("Failed to initialize queue manager: %v", err)
+	}
+	defer queueMgr.Close()
+
+	// 启动后台重试 Worker
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queueMgr.StartWorker(ctx)
+
+	// 创建反向代理
+	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret, queueMgr)
 	if err != nil {
 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
 	}
