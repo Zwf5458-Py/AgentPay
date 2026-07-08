@@ -62,3 +62,24 @@
   python3 -m http.server 8000
   ```
 - **测试验证**：由于 macOS 宿主机对 Antigravity Chrome 驱动的本地兼容性限制（仅 Linux 支持本地 Chrome 模式），自动化浏览器子代理无法运行，故由主代理进行了代码结构的自检与验证。代码已完美包含纯前端 Mock 自愈调试链路，可在无需真实服务依赖下无错运行。
+
+---
+
+## 6. 排队锁机制 (channelLocks) 加固与 UI 竞争修复
+
+### 6.1 问题根本原因分析
+原版的 `playground.html` 虽在按钮触发区包装了 Promise 链，但在并发测试（点击 `Promise.all` 按钮）时，`executeRequest` 函数没有被内部的 `channelLocks` 控制排队，而是将两个请求直接并发打出。这导致两路请求瞬间同时发起，产生了相同的网络首发状态，破坏了防重入锁自愈设计，从而引发右侧 Timeline 状态的闪烁覆盖，以及直连模式下由于非串行处理导致的状态竞态错误。
+
+### 6.2 修复方案与代码实现
+1. **全局队列锁改版**：
+   - 将 `channelLocks` 改造成 `const channelLocks = new Map()` 结构，可以根据 `agentId` 对不同通道单独加锁。
+2. **锁逻辑下沉封装**：
+   - 将具体的请求逻辑剥离并下沉至业务核心函数 `executeRequestInternal(agentId, input, reqIndex)`。
+   - 重构 `executeRequest(agentId, input, reqIndex)`，使其封装为排队外壳：
+     - 使用 `channelLocks.get(agentId)` 获取前序锁，如果有前序锁正在排队，在日志中打印：`[QUEUE] Request queued, waiting for channel lock...`。
+     - 生成当前请求的新锁 Promise。利用前序 Promise 的 `.then` 链连接下一段逻辑。当前序锁解决后，输出：`[QUEUE] Lock released, starting request...` 并执行 `executeRequestInternal(...)`。
+     - 采用 `.catch(...)` 设计，如果中间某次请求遭遇断网或失败，会安全捕获异常，并且无论如何都会进入 `.finally(...)` 调用 `resolveLock()`，确保后续队列的请求绝对不被永久挂起。
+     - 清理引用设计：通过锁实例的比对，在 `.finally` 块中自动将已释放的锁从 Map 中移除，防止内存泄漏。
+3. **Timeline UI 交互稳定性提升**：
+   - 串行锁的物理固化，使得多请求被完全时序解耦，解决了指示灯数据相互踩踏覆盖的情况，Timeline 时序图的过渡平滑且稳定。
+

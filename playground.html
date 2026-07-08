@@ -887,8 +887,8 @@
       }
     };
 
-    // 并发控制锁：前端并发请求必须顺序执行 (利用 Promise 串行排队防止双击锁)
-    let channelLocks = Promise.resolve();
+    // 全局通道锁容器：按 agentId 进行 Promise 链式排队控制
+    const channelLocks = new Map();
 
     // 2. 初始化加载
     window.addEventListener('DOMContentLoaded', () => {
@@ -1149,9 +1149,7 @@
       readInputs();
       resetTimeline();
       addLog('INFO', `---------------- 发起单次请求 ----------------`);
-      
-      // 放入串行排队锁中执行，防止并发冲突
-      channelLocks = channelLocks.then(() => executeRequest(1));
+      executeRequest(state.agentId, state.input, 1);
     }
 
     function triggerConcurrentRequest() {
@@ -1162,8 +1160,8 @@
 
       // 并发执行，底层通过相同的 channelLocks 控制顺序
       Promise.all([
-        executeRequest(1),
-        executeRequest(2)
+        executeRequest(state.agentId, state.input, 1),
+        executeRequest(state.agentId, state.input, 2)
       ]).then(() => {
         addLog('SUCCESS', '并发测试完成。');
       }).catch(err => {
@@ -1171,13 +1169,54 @@
       });
     }
 
-    // 具体的自愈请求逻辑
-    async function executeRequest(reqIndex) {
-      const agentId = state.agentId;
-      const input = state.input;
+    // 封装 Promise 排队锁的外壳，确保对同一 agentId 的请求按序串行化执行
+    async function executeRequest(agentId, input, reqIndex) {
+      const currentLock = channelLocks.get(agentId);
+      const isQueued = !!currentLock;
+
+      if (isQueued) {
+        addLog('QUEUE', `[请求 #${reqIndex}] Request queued, waiting for channel lock...`);
+      }
+
+      // 生成一个新的锁通知器
+      let resolveLock;
+      const nextLockPromise = new Promise((resolve) => {
+        resolveLock = resolve;
+      });
+
+      // 无论成功还是失败，都在前锁解决后运行，并最终 resolve 自身的锁通知器
+      const executionPromise = (currentLock || Promise.resolve())
+        .then(async () => {
+          if (isQueued) {
+            addLog('QUEUE', `[请求 #${reqIndex}] Lock released, starting request...`);
+          }
+          return executeRequestInternal(agentId, input, reqIndex);
+        })
+        .catch((err) => {
+          addLog('ERROR', `[请求 #${reqIndex}] 队列中执行失败: ${err.message}`);
+        })
+        .finally(() => {
+          resolveLock();
+        });
+
+      // 将最新锁置入容器
+      channelLocks.set(agentId, nextLockPromise);
+
+      // 执行完毕后，若 Map 中依然是该锁，则自动清理引用
+      nextLockPromise.finally(() => {
+        if (channelLocks.get(agentId) === nextLockPromise) {
+          channelLocks.delete(agentId);
+        }
+      });
+
+      return executionPromise;
+    }
+
+    // 具体的自愈请求核心内部逻辑
+    async function executeRequestInternal(agentId, input, reqIndex) {
       const maxPrice = state.maxPrice;
 
-      addLog('INFO', `[请求 #${reqIndex}] 开始排队执行，通道 Agent ID: ${agentId}`);
+      addLog('INFO', `[请求 #${reqIndex}] 开始执行自愈协商流程，通道 Agent ID: ${agentId}`);
 
       // 阶段 1: 首次发起尝试
       setTimelineState('step1', 'active', `[请求 #${reqIndex}] 正在发起首次 POST 尝试`);
@@ -1273,7 +1312,7 @@
         } 
         // 首发即 200 成功 (比如已有通道凭证直接扣款成功，或者在并发测试中，第二请求排队完成后直接扣款成功)
         else if (response.status === 200) {
-          setTimelineState('step1', 'success', `[请求 #${reqIndex}] 首次请求即校验通过 (直通)`);
+          setTimelineState('step1', 'success', `[请求 #${reqIndex}] 首次请求即通过已有的有效凭证直通`);
           
           // 并发场景下，若是直接扣款成功，则同步更新确认额度
           if (chan.accumulatedSpend > chan.confirmedSpend) {
@@ -1295,6 +1334,7 @@
         }
       } catch (err) {
         addLog('ERROR', `[请求 #${reqIndex}] 任务发生异常阻断: ${err.message}`);
+        throw err;
       }
     }
 
