@@ -457,4 +457,119 @@ func TestRateLimitLimiter_CleanupTTL(t *testing.T) {
 	}
 }
 
+func TestCORS_OPTIONS(t *testing.T) {
+	corsMiddleware := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-Secret")
+			w.Header().Set("Access-Control-Expose-Headers", "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof")
+			
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("OPTIONS", "/agent/execute", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	expectedHeaders := map[string]string{
+		"Access-Control-Allow-Origin":  "*",
+		"Access-Control-Allow-Methods": "POST, GET, OPTIONS, PUT, DELETE",
+		"Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Secret",
+		"Access-Control-Expose-Headers": "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof",
+	}
+
+	for key, expectedValue := range expectedHeaders {
+		gotValue := rr.Header().Get(key)
+		if gotValue != expectedValue {
+			t.Errorf("Header %s: expected %q, got %q", key, expectedValue, gotValue)
+		}
+	}
+}
+
+func TestDebugTasks(t *testing.T) {
+	dbPath := t.TempDir() + "/test_debug_tasks.db"
+	queueMgr, err := queue.NewQueueManager(dbPath, "http://mock-bridge/aa/settle", "test-secret")
+	if err != nil {
+		t.Fatalf("Failed to create QueueManager: %v", err)
+	}
+	defer queueMgr.Close()
+
+	err = queueMgr.Enqueue("lock-123", "proof-abc", "owner-xyz", "escrow-123")
+	if err != nil {
+		t.Fatalf("Failed to enqueue task: %v", err)
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tasks, err := queueMgr.GetLatestTasks(10)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(tasks)
+	})
+
+	req := httptest.NewRequest("GET", "/debug/tasks", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Errorf("Expected Content-Type 'application/json', got %q", contentType)
+	}
+
+	var tasks []map[string]interface{}
+	err = json.Unmarshal(rr.Body.Bytes(), &tasks)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if len(tasks) != 1 {
+		t.Fatalf("Expected 1 task, got %d", len(tasks))
+	}
+
+	task := tasks[0]
+	if task["lock_id"] != "lock-123" {
+		t.Errorf("Expected lock_id 'lock-123', got %v", task["lock_id"])
+	}
+	if task["proof"] != "proof-abc" {
+		t.Errorf("Expected proof 'proof-abc', got %v", task["proof"])
+	}
+	if task["agent_owner"] != "owner-xyz" {
+		t.Errorf("Expected agent_owner 'owner-xyz', got %v", task["agent_owner"])
+	}
+	if task["escrow_address"] != "escrow-123" {
+		t.Errorf("Expected escrow_address 'escrow-123', got %v", task["escrow_address"])
+	}
+	if task["status"] != "pending" {
+		t.Errorf("Expected status 'pending', got %v", task["status"])
+	}
+	if task["retry_count"] == nil {
+		t.Errorf("Expected retry_count to not be nil")
+	}
+	if task["created_at"] == nil {
+		t.Errorf("Expected created_at to not be nil")
+	}
+}
+
 

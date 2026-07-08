@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -38,6 +39,9 @@ func main() {
 	log.Printf("AA Bridge Settle URL: %s", aaBridgeURL)
 
 	r := chi.NewRouter()
+
+	// 挂载 CORS 中间件放行跨域及暴露头部
+	r.Use(CORSMiddleware)
 
 	// 基础环境 Context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -77,10 +81,39 @@ func main() {
 		r.Handle("/execute", proxyHandler)
 	})
 
+	// 调试接口：获取最近的 10 个结算任务
+	r.Get("/debug/tasks", func(w http.ResponseWriter, r *http.Request) {
+		tasks, err := queueMgr.GetLatestTasks(10)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(tasks)
+	})
+
 	// 启动服务
 	addr := "0.0.0.0:" + port
 	log.Printf("Server listening on %s", addr)
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("Server exited with error: %v", err)
 	}
+}
+
+// CORSMiddleware 放行跨域及暴露头部
+func CORSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-Secret")
+		// 必须允许前端读取自定义头部
+		w.Header().Set("Access-Control-Expose-Headers", "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof")
+		
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

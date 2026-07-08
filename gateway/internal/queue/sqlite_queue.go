@@ -282,3 +282,46 @@ func (qm *QueueManager) handleFailure(ctx context.Context, task SettleTask, last
 		log.Printf("[Queue Worker] Settle failed for lockId %s, scheduling retry %d in %v", task.LockID, newRetryCount, delay)
 	}
 }
+
+// GetLatestTasks 获取最近的 limit 个结算任务，用互斥锁保护，created_at 读为 int64
+func (qm *QueueManager) GetLatestTasks(limit int) ([]map[string]interface{}, error) {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	query := `
+	SELECT lock_id, proof, agent_owner, escrow_address, status, retry_count, created_at
+	FROM settle_tasks
+	ORDER BY id DESC
+	LIMIT ?
+	`
+	rows, err := qm.db.Query(query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query latest tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []map[string]interface{}
+	for rows.Next() {
+		var lockID, proof, agentOwner, escrowAddress, status string
+		var retryCount int
+		var createdAt int64
+		err := rows.Scan(&lockID, &proof, &agentOwner, &escrowAddress, &status, &retryCount, &createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan task: %w", err)
+		}
+		task := map[string]interface{}{
+			"lock_id":        lockID,
+			"proof":          proof,
+			"agent_owner":    agentOwner,
+			"escrow_address": escrowAddress,
+			"status":         status,
+			"retry_count":    retryCount,
+			"created_at":     createdAt,
+		}
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
+	}
+	return tasks, nil
+}
