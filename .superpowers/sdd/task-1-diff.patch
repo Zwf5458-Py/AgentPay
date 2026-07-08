@@ -1,612 +1,280 @@
-diff --git a/contracts/src/interfaces/IERC6551Registry.sol b/contracts/src/interfaces/IERC6551Registry.sol
-new file mode 100644
-index 0000000..9d045bc
---- /dev/null
-+++ b/contracts/src/interfaces/IERC6551Registry.sol
-@@ -0,0 +1,29 @@
-+// SPDX-License-Identifier: MIT
-+pragma solidity ^0.8.20;
+diff --git a/gateway/cmd/gateway/main.go b/gateway/cmd/gateway/main.go
+index a08814a..b5b1245 100644
+--- a/gateway/cmd/gateway/main.go
++++ b/gateway/cmd/gateway/main.go
+@@ -1,14 +1,15 @@
+ package main
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"log"
+ 	"net/http"
+ 	"os"
+ 	"time"
+ 
+ 	"github.com/go-chi/chi/v5"
+ 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+ 	"golang.org/x/time/rate"
+ 
+ 	"gateway/internal/middleware"
+@@ -32,20 +33,23 @@ func main() {
+ 	if aaBridgeURL == "" {
+ 		aaBridgeURL = "http://127.0.0.1:3001/aa/settle"
+ 	}
+ 
+ 	log.Printf("Starting gateway on port %s", port)
+ 	log.Printf("Eliza Agent URL: %s", elizaAgentURL)
+ 	log.Printf("AA Bridge Settle URL: %s", aaBridgeURL)
+ 
+ 	r := chi.NewRouter()
+ 
++	// 挂载 CORS 中间件放行跨域及暴露头部
++	r.Use(CORSMiddleware)
 +
-+interface IERC6551Registry {
-+    event ERC6551AccountCreated(
-+        address account,
-+        address indexed implementation,
-+        bytes32 salt,
-+        uint256 chainId,
-+        address indexed tokenContract,
-+        uint256 indexed tokenId
-+    );
+ 	// 基础环境 Context
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
+ 
+ 	// 挂载限流中间件在最顶端，每秒充能 5 个，最大容纳 10 个
+ 	limiter := middleware.NewIPRateLimiter(rate.Limit(5), 10)
+ 	// 启动后台 Cleanup 协程，每隔 1 分钟执行一次，清除过期时间达 5 分钟的 IP 记录
+ 	go limiter.StartCleanup(ctx, 1*time.Minute, 5*time.Minute)
+ 	r.Use(middleware.RateLimitMiddleware(limiter))
+ 
+@@ -70,17 +74,46 @@ func main() {
+ 	if err != nil {
+ 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
+ 	}
+ 
+ 	// 路由注册
+ 	r.Route("/agent", func(r chi.Router) {
+ 		r.Use(middleware.X402Middleware)
+ 		r.Handle("/execute", proxyHandler)
+ 	})
+ 
++	// 调试接口：获取最近的 10 个结算任务
++	r.Get("/debug/tasks", func(w http.ResponseWriter, r *http.Request) {
++		tasks, err := queueMgr.GetLatestTasks(10)
++		if err != nil {
++			http.Error(w, err.Error(), http.StatusInternalServerError)
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusOK)
++		json.NewEncoder(w).Encode(tasks)
++	})
 +
-+    function createAccount(
-+        address implementation,
-+        bytes32 salt,
-+        uint256 chainId,
-+        address tokenContract,
-+        uint256 tokenId
-+    ) external returns (address);
+ 	// 启动服务
+ 	addr := "0.0.0.0:" + port
+ 	log.Printf("Server listening on %s", addr)
+ 	if err := http.ListenAndServe(addr, r); err != nil {
+ 		log.Fatalf("Server exited with error: %v", err)
+ 	}
+ }
 +
-+    function account(
-+        address implementation,
-+        bytes32 salt,
-+        uint256 chainId,
-+        address tokenContract,
-+        uint256 tokenId
-+    ) external view returns (address);
++// CORSMiddleware 放行跨域及暴露头部
++func CORSMiddleware(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Access-Control-Allow-Origin", "*")
++		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
++		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-Secret")
++		// 必须允许前端读取自定义头部
++		w.Header().Set("Access-Control-Expose-Headers", "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof")
++		
++		if r.Method == "OPTIONS" {
++			w.WriteHeader(http.StatusOK)
++			return
++		}
++		next.ServeHTTP(w, r)
++	})
 +}
-diff --git a/contracts/src/payment/PaymentEscrow.sol b/contracts/src/payment/PaymentEscrow.sol
-index 9f91612..edb357d 100644
---- a/contracts/src/payment/PaymentEscrow.sol
-+++ b/contracts/src/payment/PaymentEscrow.sol
-@@ -1,15 +1,16 @@
- // SPDX-License-Identifier: MIT
- pragma solidity ^0.8.20;
+diff --git a/gateway/internal/middleware/x402_test.go b/gateway/internal/middleware/x402_test.go
+index e4e33b3..0b41a7d 100644
+--- a/gateway/internal/middleware/x402_test.go
++++ b/gateway/internal/middleware/x402_test.go
+@@ -450,11 +450,126 @@ func TestRateLimitLimiter_CleanupTTL(t *testing.T) {
  
- import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
- import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+ 	// 执行清理，清除过期时间大于 5 分钟的 IP
+ 	limiter.Cleanup(5 * time.Minute)
  
- interface IValidationRegistry {
-     function validateProof(
-         uint256 agentId,
-         string calldata validationType,
-         bytes calldata proof
-     ) external view returns (bool);
+ 	// 断言 map 确实删除了该超期 IP
+ 	if limiter.GetIPsCount() != 0 {
+ 		t.Errorf("Expected IP count to be 0 after cleanup, got %d", limiter.GetIPsCount())
+ 	}
  }
  
- contract PaymentEscrow {
-@@ -19,60 +20,106 @@ contract PaymentEscrow {
++func TestCORS_OPTIONS(t *testing.T) {
++	corsMiddleware := func(next http.Handler) http.Handler {
++		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			w.Header().Set("Access-Control-Allow-Origin", "*")
++			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
++			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-Secret")
++			w.Header().Set("Access-Control-Expose-Headers", "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof")
++			
++			if r.Method == "OPTIONS" {
++				w.WriteHeader(http.StatusOK)
++				return
++			}
++			next.ServeHTTP(w, r)
++		})
++	}
++
++	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusOK)
++	}))
++
++	req := httptest.NewRequest("OPTIONS", "/agent/execute", nil)
++	rr := httptest.NewRecorder()
++
++	handler.ServeHTTP(rr, req)
++
++	if rr.Code != http.StatusOK {
++		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
++	}
++
++	expectedHeaders := map[string]string{
++		"Access-Control-Allow-Origin":  "*",
++		"Access-Control-Allow-Methods": "POST, GET, OPTIONS, PUT, DELETE",
++		"Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Secret",
++		"Access-Control-Expose-Headers": "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof",
++	}
++
++	for key, expectedValue := range expectedHeaders {
++		gotValue := rr.Header().Get(key)
++		if gotValue != expectedValue {
++			t.Errorf("Header %s: expected %q, got %q", key, expectedValue, gotValue)
++		}
++	}
++}
++
++func TestDebugTasks(t *testing.T) {
++	dbPath := t.TempDir() + "/test_debug_tasks.db"
++	queueMgr, err := queue.NewQueueManager(dbPath, "http://mock-bridge/aa/settle", "test-secret")
++	if err != nil {
++		t.Fatalf("Failed to create QueueManager: %v", err)
++	}
++	defer queueMgr.Close()
++
++	err = queueMgr.Enqueue("lock-123", "proof-abc", "owner-xyz", "escrow-123")
++	if err != nil {
++		t.Fatalf("Failed to enqueue task: %v", err)
++	}
++
++	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		tasks, err := queueMgr.GetLatestTasks(10)
++		if err != nil {
++			http.Error(w, err.Error(), http.StatusInternalServerError)
++			return
++		}
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusOK)
++		json.NewEncoder(w).Encode(tasks)
++	})
++
++	req := httptest.NewRequest("GET", "/debug/tasks", nil)
++	rr := httptest.NewRecorder()
++
++	handler.ServeHTTP(rr, req)
++
++	if rr.Code != http.StatusOK {
++		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
++	}
++
++	if contentType := rr.Header().Get("Content-Type"); contentType != "application/json" {
++		t.Errorf("Expected Content-Type 'application/json', got %q", contentType)
++	}
++
++	var tasks []map[string]interface{}
++	err = json.Unmarshal(rr.Body.Bytes(), &tasks)
++	if err != nil {
++		t.Fatalf("Failed to unmarshal response: %v", err)
++	}
++
++	if len(tasks) != 1 {
++		t.Fatalf("Expected 1 task, got %d", len(tasks))
++	}
++
++	task := tasks[0]
++	if task["lock_id"] != "lock-123" {
++		t.Errorf("Expected lock_id 'lock-123', got %v", task["lock_id"])
++	}
++	if task["proof"] != "proof-abc" {
++		t.Errorf("Expected proof 'proof-abc', got %v", task["proof"])
++	}
++	if task["agent_owner"] != "owner-xyz" {
++		t.Errorf("Expected agent_owner 'owner-xyz', got %v", task["agent_owner"])
++	}
++	if task["escrow_address"] != "escrow-123" {
++		t.Errorf("Expected escrow_address 'escrow-123', got %v", task["escrow_address"])
++	}
++	if task["status"] != "pending" {
++		t.Errorf("Expected status 'pending', got %v", task["status"])
++	}
++	if task["retry_count"] == nil {
++		t.Errorf("Expected retry_count to not be nil")
++	}
++	if task["created_at"] == nil {
++		t.Errorf("Expected created_at to not be nil")
++	}
++}
++
  
-     struct PaymentLock {
-         address payer;
-         uint256 agentId;
-         uint256 amount;
-         bytes32 requestHash;
-         uint256 expiresAt;
-         PaymentStatus status;
-     }
+diff --git a/gateway/internal/queue/sqlite_queue.go b/gateway/internal/queue/sqlite_queue.go
+index 3e1eb58..cd94ab1 100644
+--- a/gateway/internal/queue/sqlite_queue.go
++++ b/gateway/internal/queue/sqlite_queue.go
+@@ -275,10 +275,53 @@ func (qm *QueueManager) handleFailure(ctx context.Context, task SettleTask, last
+ 		nextRetryAt := time.Now().Add(delay).Unix()
  
-+    struct ChannelLock {
-+        address payer;
-+        uint256 agentId;
-+        uint256 maxAmount;
-+        uint256 settledAmount;
-+        uint256 expiresAt;
-+        PaymentStatus status;
-+    }
-+
-     IERC20 public immutable paymentToken;
-     IValidationRegistry public immutable validationRegistry;
-     address public immutable settler;
- 
-     uint256 private _nonce;
-     mapping(bytes32 => PaymentLock) private _locks;
-+    mapping(bytes32 => ChannelLock) public channels;
-+
-+    bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
-+    bytes32 public immutable DOMAIN_SEPARATOR;
- 
-     event PaymentLocked(
-         bytes32 indexed lockId,
-         address indexed payer,
-         uint256 indexed agentId,
-         uint256 amount,
-         bytes32 requestHash,
-         uint256 expiresAt
-     );
- 
-     event PaymentReleased(bytes32 indexed lockId, address indexed agentOwner);
-     event PaymentRefunded(bytes32 indexed lockId, address indexed payer);
- 
-+    event ChannelLocked(
-+        bytes32 indexed channelId,
-+        address indexed payer,
-+        uint256 indexed agentId,
-+        uint256 maxAmount,
-+        uint256 expiresAt
-+    );
-+
-+    event ChannelSettled(
-+        bytes32 indexed channelId,
-+        address indexed agentOwner,
-+        uint256 settledAmount
-+    );
-+
-+    event ChannelRefunded(
-+        bytes32 indexed channelId,
-+        address indexed payer,
-+        uint256 refundedAmount
-+    );
-+
-     error InvalidAmount();
-     error NotSettler();
-     error InvalidStatus();
-     error LockExpired();
-     error LockNotExpired();
-     error ProofValidationFailed();
-     error InvalidAddress();
-     error InvalidDuration();
-+    error InvalidSignature();
-+    error ChannelExpired();
-+    error ChannelNotExpired();
- 
-     modifier onlySettler() {
-         if (msg.sender != settler) revert NotSettler();
-         _;
-     }
- 
-     constructor(address _paymentToken, address _validationRegistry, address _settler) {
-         if (_paymentToken == address(0) || _validationRegistry == address(0) || _settler == address(0)) {
-             revert InvalidAddress();
-         }
-         paymentToken = IERC20(_paymentToken);
-         validationRegistry = IValidationRegistry(_validationRegistry);
-         settler = _settler;
-+
-+        DOMAIN_SEPARATOR = keccak256(
-+            abi.encode(
-+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-+                keccak256(bytes("PaymentEscrow")),
-+                keccak256(bytes("1")),
-+                block.chainid,
-+                address(this)
-+            )
-+        );
-     }
- 
-     function lockPayment(
-         uint256 agentId,
-         uint256 amount,
-         bytes32 requestHash,
-         uint256 duration
-     ) external returns (bytes32 lockId) {
-         if (amount == 0) revert InvalidAmount();
-         if (duration == 0) revert InvalidDuration();
-@@ -128,14 +175,97 @@ contract PaymentEscrow {
-         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
-         if (block.timestamp <= lock.expiresAt) revert LockNotExpired();
- 
-         lock.status = PaymentStatus.Refunded;
- 
-         paymentToken.safeTransfer(lock.payer, lock.amount);
- 
-         emit PaymentRefunded(lockId, lock.payer);
-     }
- 
-+    function lockChannel(
-+        uint256 agentId,
-+        uint256 amount,
-+        uint256 duration
-+    ) external returns (bytes32 channelId) {
-+        if (amount == 0) revert InvalidAmount();
-+        if (duration == 0) revert InvalidDuration();
-+
-+        paymentToken.safeTransferFrom(msg.sender, address(this), amount);
-+
-+        channelId = keccak256(abi.encodePacked(
-+            msg.sender,
-+            agentId,
-+            amount,
-+            block.timestamp,
-+            _nonce++
-+        ));
-+
-+        uint256 expiresAt = block.timestamp + duration;
-+
-+        channels[channelId] = ChannelLock({
-+            payer: msg.sender,
-+            agentId: agentId,
-+            maxAmount: amount,
-+            settledAmount: 0,
-+            expiresAt: expiresAt,
-+            status: PaymentStatus.Locked
-+        });
-+
-+        emit ChannelLocked(channelId, msg.sender, agentId, amount, expiresAt);
-+    }
-+
-+    function batchSettle(
-+        bytes32 channelId,
-+        uint256 accumulatedAmount,
-+        bytes calldata signature,
-+        address agentOwner
-+    ) external onlySettler {
-+        if (agentOwner == address(0)) revert InvalidAddress();
-+
-+        ChannelLock storage lock = channels[channelId];
-+        if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
-+        if (block.timestamp > lock.expiresAt) revert ChannelExpired();
-+        if (accumulatedAmount == 0 || accumulatedAmount > lock.maxAmount) revert InvalidAmount();
-+
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            DOMAIN_SEPARATOR,
-+            hashStruct
-+        ));
-+        address signer = ECDSA.recover(digest, signature);
-+        if (signer != lock.payer) revert InvalidSignature();
-+
-+        lock.status = PaymentStatus.Released;
-+        lock.settledAmount = accumulatedAmount;
-+
-+        paymentToken.safeTransfer(agentOwner, accumulatedAmount);
-+
-+        uint256 remainder = lock.maxAmount - accumulatedAmount;
-+        if (remainder > 0) {
-+            paymentToken.safeTransfer(lock.payer, remainder);
-+        }
-+
-+        emit ChannelSettled(channelId, agentOwner, accumulatedAmount);
-+    }
-+
-+    function refundChannel(bytes32 channelId) external {
-+        ChannelLock storage lock = channels[channelId];
-+        if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
-+        if (block.timestamp <= lock.expiresAt) revert ChannelNotExpired();
-+
-+        lock.status = PaymentStatus.Refunded;
-+
-+        paymentToken.safeTransfer(lock.payer, lock.maxAmount);
-+
-+        emit ChannelRefunded(channelId, lock.payer, lock.maxAmount);
-+    }
-+
-     function getLock(bytes32 lockId) external view returns (PaymentLock memory) {
-         return _locks[lockId];
-     }
+ 		query := `UPDATE settle_tasks SET retry_count = ?, next_retry_at = ? WHERE id = ?`
+ 		_, err := qm.db.Exec(query, newRetryCount, nextRetryAt, task.ID)
+ 		if err != nil {
+ 			log.Printf("[Queue Worker] Failed to update task %d retry status: %v", task.ID, err)
+ 		}
+ 		log.Printf("[Queue Worker] Settle failed for lockId %s, scheduling retry %d in %v", task.LockID, newRetryCount, delay)
+ 	}
  }
-diff --git a/contracts/test/PaymentEscrowTest.t.sol b/contracts/test/PaymentEscrowTest.t.sol
-index 10c3587..09e3c8c 100644
---- a/contracts/test/PaymentEscrowTest.t.sol
-+++ b/contracts/test/PaymentEscrowTest.t.sol
-@@ -253,11 +253,346 @@ contract PaymentEscrowTest is Test {
- 
-         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-         new PaymentEscrow(address(usdc), address(0), settler);
- 
-         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-         new PaymentEscrow(address(usdc), address(validationRegistry), address(0));
- 
-         vm.expectRevert(ReputationRegistry.InvalidAddress.selector);
-         new ReputationRegistry(address(0));
-     }
 +
-+    bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
++// GetLatestTasks 获取最近的 limit 个结算任务，用互斥锁保护，created_at 读为 int64
++func (qm *QueueManager) GetLatestTasks(limit int) ([]map[string]interface{}, error) {
++	qm.mu.Lock()
++	defer qm.mu.Unlock()
 +
-+    // 13. 测试正常状态通道锁定与 EIP-712 批量结算流程
-+    function test_ChannelBatchSettle() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
++	query := `
++	SELECT lock_id, proof, agent_owner, escrow_address, status, retry_count, created_at
++	FROM settle_tasks
++	ORDER BY id DESC
++	LIMIT ?
++	`
++	rows, err := qm.db.Query(query, limit)
++	if err != nil {
++		return nil, fmt.Errorf("failed to query latest tasks: %w", err)
++	}
++	defer rows.Close()
 +
-+        // 充值并授权
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        uint256 maxAmount = 500 * 10**6;
-+        uint256 duration = 3600;
-+
-+        // 锁定通道
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, duration);
-+
-+        // 检查 channels 存储
-+        (
-+            address channelPayer,
-+            uint256 channelAgentId,
-+            uint256 channelMaxAmount,
-+            uint256 channelSettledAmount,
-+            uint256 channelExpiresAt,
-+            PaymentEscrow.PaymentStatus channelStatus
-+        ) = escrow.channels(channelId);
-+
-+        assertEq(channelPayer, customPayer);
-+        assertEq(channelAgentId, agentId);
-+        assertEq(channelMaxAmount, maxAmount);
-+        assertEq(channelSettledAmount, 0);
-+        assertEq(channelExpiresAt, block.timestamp + duration);
-+        assertEq(uint256(channelStatus), 1); // Locked
-+
-+        // 线下生成 EIP-712 签名
-+        uint256 accumulatedAmount = 300 * 10**6;
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            escrow.DOMAIN_SEPARATOR(),
-+            hashStruct
-+        ));
-+
-+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
-+        bytes memory signature = abi.encodePacked(r, s, v);
-+
-+        uint256 agentOwnerBalanceBefore = usdc.balanceOf(agentOwner);
-+        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
-+
-+        // settler 结算
-+        vm.prank(settler);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
-+
-+        // 验证通道状态
-+        (,,,,, channelStatus) = escrow.channels(channelId);
-+        assertEq(uint256(channelStatus), 2); // Released
-+        
-+        // 验证余额：agentOwner 获得 accumulatedAmount，payer 获得退回的 remainder (maxAmount - accumulatedAmount)
-+        assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + accumulatedAmount);
-+        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + (maxAmount - accumulatedAmount));
-+    }
-+
-+    // 14. 逆向测试：伪造签名结算应失败
-+    function test_ChannelBatchSettleInvalidSignatureReverts() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
-+
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
-+
-+        uint256 accumulatedAmount = 300 * 10**6;
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            escrow.DOMAIN_SEPARATOR(),
-+            hashStruct
-+        ));
-+
-+        // 用错误的私钥签名
-+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xBAD, digest);
-+        bytes memory signature = abi.encodePacked(r, s, v);
-+
-+        vm.expectRevert(PaymentEscrow.InvalidSignature.selector);
-+        vm.prank(settler);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
-+    }
-+
-+    // 15. 逆向测试：状态通道超时后结算应被拦截
-+    function test_ChannelBatchSettleExpiredReverts() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
-+
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
-+
-+        uint256 accumulatedAmount = 300 * 10**6;
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            escrow.DOMAIN_SEPARATOR(),
-+            hashStruct
-+        ));
-+
-+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
-+        bytes memory signature = abi.encodePacked(r, s, v);
-+
-+        // 快进时间到超时
-+        skip(3601);
-+
-+        vm.expectRevert(PaymentEscrow.ChannelExpired.selector);
-+        vm.prank(settler);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
-+    }
-+
-+    // 16. 测试状态通道退款：未超时退款失败与超时退款成功
-+    function test_ChannelRefundSuccessAndNotExpiredRevert() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
-+
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        uint256 maxAmount = 500 * 10**6;
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
-+
-+        // 未超时退款应被拦截
-+        vm.expectRevert(PaymentEscrow.ChannelNotExpired.selector);
-+        escrow.refundChannel(channelId);
-+
-+        // 快进时间到超时后
-+        skip(3601);
-+
-+        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
-+        escrow.refundChannel(channelId);
-+
-+        (,,,,, PaymentEscrow.PaymentStatus channelStatus) = escrow.channels(channelId);
-+        assertEq(uint256(channelStatus), 3); // Refunded
-+        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + maxAmount);
-+    }
-+
-+    // 17. 增加 test_ChannelBatchSettleNonSettlerReverts
-+    function test_ChannelBatchSettleNonSettlerReverts() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
-+
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
-+
-+        uint256 accumulatedAmount = 300 * 10**6;
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            escrow.DOMAIN_SEPARATOR(),
-+            hashStruct
-+        ));
-+
-+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
-+        bytes memory signature = abi.encodePacked(r, s, v);
-+
-+        // 模拟非 Settler 尝试结算
-+        vm.expectRevert(PaymentEscrow.NotSettler.selector);
-+        vm.prank(payer);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
-+    }
-+
-+    // 18. 增加 test_ChannelBatchSettleZeroAddressRecipientReverts
-+    function test_ChannelBatchSettleZeroAddressRecipientReverts() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
-+
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
-+
-+        uint256 accumulatedAmount = 300 * 10**6;
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            escrow.DOMAIN_SEPARATOR(),
-+            hashStruct
-+        ));
-+
-+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
-+        bytes memory signature = abi.encodePacked(r, s, v);
-+
-+        // 结算传入的 agentOwner = address(0)
-+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-+        vm.prank(settler);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, address(0));
-+    }
-+
-+    // 19. 增加 test_ChannelBatchSettleZeroAmountReverts
-+    function test_ChannelBatchSettleZeroAmountReverts() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
-+
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
-+
-+        // 累计消费 accumulatedAmount = 0
-+        uint256 accumulatedAmount = 0;
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            escrow.DOMAIN_SEPARATOR(),
-+            hashStruct
-+        ));
-+
-+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
-+        bytes memory signature = abi.encodePacked(r, s, v);
-+
-+        vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
-+        vm.prank(settler);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
-+    }
-+
-+    // 20. 增加 test_ChannelBatchSettleExceedMaxAmountReverts
-+    function test_ChannelBatchSettleExceedMaxAmountReverts() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
-+
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        uint256 maxAmount = 500 * 10**6;
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
-+
-+        // 累计消费超过通道最大上限 maxAmount + 1
-+        uint256 accumulatedAmount = maxAmount + 1;
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            escrow.DOMAIN_SEPARATOR(),
-+            hashStruct
-+        ));
-+
-+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
-+        bytes memory signature = abi.encodePacked(r, s, v);
-+
-+        vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
-+        vm.prank(settler);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
-+    }
-+
-+    // 21. 增加 test_ChannelBatchSettleDoubleSettleReverts
-+    function test_ChannelBatchSettleDoubleSettleReverts() public {
-+        uint256 payerPrivateKey = 0xA11CE;
-+        address customPayer = vm.addr(payerPrivateKey);
-+
-+        usdc.mint(customPayer, 1000 * 10**6);
-+        vm.prank(customPayer);
-+        usdc.approve(address(escrow), type(uint256).max);
-+
-+        uint256 maxAmount = 500 * 10**6;
-+        vm.prank(customPayer);
-+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
-+
-+        uint256 accumulatedAmount = 300 * 10**6;
-+        bytes32 hashStruct = keccak256(abi.encode(
-+            CHANNEL_SETTLE_TYPEHASH,
-+            channelId,
-+            accumulatedAmount
-+        ));
-+        bytes32 digest = keccak256(abi.encodePacked(
-+            "\x19\x01",
-+            escrow.DOMAIN_SEPARATOR(),
-+            hashStruct
-+        ));
-+
-+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
-+        bytes memory signature = abi.encodePacked(r, s, v);
-+
-+        // 第一遍成功结算
-+        vm.prank(settler);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
-+
-+        // 尝试进行二次结算
-+        vm.expectRevert(PaymentEscrow.InvalidStatus.selector);
-+        vm.prank(settler);
-+        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
-+    }
- }
++	var tasks []map[string]interface{}
++	for rows.Next() {
++		var lockID, proof, agentOwner, escrowAddress, status string
++		var retryCount int
++		var createdAt int64
++		err := rows.Scan(&lockID, &proof, &agentOwner, &escrowAddress, &status, &retryCount, &createdAt)
++		if err != nil {
++			return nil, fmt.Errorf("failed to scan task: %w", err)
++		}
++		task := map[string]interface{}{
++			"lock_id":        lockID,
++			"proof":          proof,
++			"agent_owner":    agentOwner,
++			"escrow_address": escrowAddress,
++			"status":         status,
++			"retry_count":    retryCount,
++			"created_at":     createdAt,
++		}
++		tasks = append(tasks, task)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("rows iteration error: %w", err)
++	}
++	return tasks, nil
++}
