@@ -36,6 +36,11 @@ contract AgentIdentityRegistry is ERC721, Ownable {
         string capabilities
     );
 
+    error NotAgentOwner();
+    error SoulboundTransferBlocked();
+    error AgentDoesNotExist();
+    error InvalidMetadata();
+
     constructor() ERC721("Agent Identity NFT", "AGENT") Ownable(msg.sender) {
         _nextTokenId = 1;
     }
@@ -47,6 +52,10 @@ contract AgentIdentityRegistry is ERC721, Ownable {
         bytes32 teeAttestation,
         string calldata capabilities
     ) external returns (uint256) {
+        if (bytes(modelId).length == 0 || bytes(serviceEndpoint).length == 0) {
+            revert InvalidMetadata();
+        }
+
         uint256 agentId = _nextTokenId++;
         _safeMint(msg.sender, agentId);
 
@@ -78,9 +87,13 @@ contract AgentIdentityRegistry is ERC721, Ownable {
         bytes32 teeAttestation,
         string calldata capabilities
     ) external {
+        address agentOwner = _ownerOf(agentId);
+        if (agentOwner == address(0)) {
+            revert AgentDoesNotExist();
+        }
         // 只有 NFT 拥有者可以修改
-        if (ownerOf(agentId) != msg.sender) {
-            revert("Not authorized");
+        if (agentOwner != msg.sender) {
+            revert NotAgentOwner();
         }
 
         AgentMetadata storage metadata = _agentMetadata[agentId];
@@ -107,7 +120,10 @@ contract AgentIdentityRegistry is ERC721, Ownable {
         uint256 registeredAt,
         address owner
     ) {
-        address agentOwner = ownerOf(agentId); // 如果不存在，ownerOf 会自动 revert
+        address agentOwner = _ownerOf(agentId);
+        if (agentOwner == address(0)) {
+            revert AgentDoesNotExist();
+        }
 
         AgentMetadata memory metadata = _agentMetadata[agentId];
         return (
@@ -126,19 +142,31 @@ contract AgentIdentityRegistry is ERC721, Ownable {
         return owner != address(0);
     }
 
+    // 允许拥有者销毁自己的 Agent Identity NFT
+    function burn(uint256 agentId) external {
+        address agentOwner = _ownerOf(agentId);
+        if (agentOwner == address(0)) {
+            revert AgentDoesNotExist();
+        }
+        if (agentOwner != msg.sender) {
+            revert NotAgentOwner();
+        }
+        _burn(agentId);
+    }
+
     // 重写 _update 函数以确保 Soulbound 属性 (禁止转让)
     function _update(
         address to,
         uint256 tokenId,
         address auth
     ) internal virtual override returns (address) {
-        address previousOwner = super._update(to, tokenId, auth);
+        address previousOwner = _ownerOf(tokenId);
         
         // 如果 previousOwner != address(0) 且 to != address(0)，则是 transfer，需要禁止
         if (previousOwner != address(0) && to != address(0)) {
-            revert("Soulbound: transfer blocked");
+            revert SoulboundTransferBlocked();
         }
         
-        return previousOwner;
+        return super._update(to, tokenId, auth);
     }
 }

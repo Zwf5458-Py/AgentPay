@@ -109,7 +109,7 @@ contract AgentIdentityTest is Test {
 
         // 非拥有者更新应该被 revert
         vm.startPrank(user2);
-        vm.expectRevert("Not authorized");
+        vm.expectRevert(AgentIdentityRegistry.NotAgentOwner.selector);
         identityRegistry.updateMetadata(agentId, newModel, newEndpoint, newTee, newCap);
         vm.stopPrank();
     }
@@ -125,25 +125,25 @@ contract AgentIdentityTest is Test {
         );
 
         // 尝试转让应该 Revert
-        vm.expectRevert("Soulbound: transfer blocked");
+        vm.expectRevert(AgentIdentityRegistry.SoulboundTransferBlocked.selector);
         identityRegistry.transferFrom(user1, user2, agentId);
 
-        vm.expectRevert("Soulbound: transfer blocked");
+        vm.expectRevert(AgentIdentityRegistry.SoulboundTransferBlocked.selector);
         identityRegistry.safeTransferFrom(user1, user2, agentId);
 
         vm.stopPrank();
     }
 
-    // 4. 测试 ValidationRegistry 默认路由（未注册验证器时 Mock 返回 true）
+    // 4. 测试 ValidationRegistry 默认路由（未注册验证器时返回 false）
     function testValidationRegistryDefaultRouting() public {
         vm.prank(user1); // 避免 view 警告
-        // 未注册验证器时，对任意 proof 验证应返回 true
+        // 未注册验证器时，对任意 proof 验证应返回 false
         bytes memory mockProof = "some-proof";
         bool result = validationRegistry.validateProof(1, "TEE", mockProof);
-        assertTrue(result);
+        assertFalse(result);
 
         result = validationRegistry.validateProof(1, "MPC", mockProof);
-        assertTrue(result);
+        assertFalse(result);
     }
 
     // 5. 测试 ValidationRegistry 注册验证器及路由校验
@@ -157,8 +157,12 @@ contract AgentIdentityTest is Test {
         validationRegistry.registerValidator("TEE", address(mockValidator));
         vm.stopPrank();
 
-        // Owner 注册验证器
+        // 非合约地址注册应该报错 ValidatorNotContract
         vm.startPrank(owner);
+        vm.expectRevert(ValidationRegistry.ValidatorNotContract.selector);
+        validationRegistry.registerValidator("TEE", user1);
+
+        // Owner 注册验证器
         validationRegistry.registerValidator("TEE", address(mockValidator));
         assertEq(validationRegistry.getValidator("TEE"), address(mockValidator));
         vm.stopPrank();
@@ -173,8 +177,48 @@ contract AgentIdentityTest is Test {
         bool fail = validationRegistry.validateProof(1, "TEE", invalidProof);
         assertFalse(fail);
 
-        // 验证路由：对于未注册的验证器类型依然默认为 true
+        // 验证路由：对于未注册的验证器类型返回 false
         bool result = validationRegistry.validateProof(1, "OTHER_TYPE", invalidProof);
-        assertTrue(result);
+        assertFalse(result);
+    }
+
+    // 6. 测试空字段校验
+    function testRegisterAgentWithEmptyFields() public {
+        vm.startPrank(user1);
+        // modelId 为空
+        vm.expectRevert(AgentIdentityRegistry.InvalidMetadata.selector);
+        identityRegistry.registerAgent("", "endpoint-a", keccak256("tee-a"), "cap-a");
+        
+        // serviceEndpoint 为空
+        vm.expectRevert(AgentIdentityRegistry.InvalidMetadata.selector);
+        identityRegistry.registerAgent("model-a", "", keccak256("tee-a"), "cap-a");
+        vm.stopPrank();
+    }
+
+    // 7. 测试 NFT 销毁（Burn）行为
+    function testBurnAgent() public {
+        vm.startPrank(user1);
+        uint256 agentId = identityRegistry.registerAgent(
+            "model-a",
+            "endpoint-a",
+            keccak256("tee-a"),
+            "cap-a"
+        );
+        
+        // 验证销毁
+        identityRegistry.burn(agentId);
+        assertFalse(identityRegistry.verifyAgent(agentId));
+        
+        // 验证已销毁代币不能再被 getAgent、updateMetadata 或再次 burn
+        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
+        identityRegistry.getAgent(agentId);
+        
+        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
+        identityRegistry.updateMetadata(agentId, "model-b", "endpoint-b", keccak256("tee-b"), "cap-b");
+        
+        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
+        identityRegistry.burn(agentId);
+        
+        vm.stopPrank();
     }
 }

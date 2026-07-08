@@ -13,6 +13,8 @@ contract ValidationRegistry is Ownable {
 
     event ValidatorRegistered(string indexed validationType, address indexed validatorAddress);
 
+    error ValidatorNotContract();
+
     constructor() Ownable(msg.sender) {}
 
     // 注册/修改验证器地址，只有 Owner 可操作
@@ -20,6 +22,9 @@ contract ValidationRegistry is Ownable {
         string calldata validationType,
         address validatorAddress
     ) external onlyOwner {
+        if (validatorAddress != address(0) && validatorAddress.code.length == 0) {
+            revert ValidatorNotContract();
+        }
         _validators[validationType] = validatorAddress;
         emit ValidatorRegistered(validationType, validatorAddress);
     }
@@ -37,14 +42,14 @@ contract ValidationRegistry is Ownable {
     ) external view returns (bool) {
         address validator = _validators[validationType];
         
-        // 如果没有注册对应的验证器，默认放行返回 true（Mock 验证）
+        // 如果没有注册对应的验证器，直接返回 false
         if (validator == address(0)) {
-            return true;
+            return false;
         }
 
         // 调用对应验证器合约进行验证
-        try IValidator(validator).validate(agentId, proof) returns (bool success) {
-            return success;
+        try IValidator(validator).validate(agentId, proof) returns (bool result) {
+            return result;
         } catch {
             return false;
         }
