@@ -1,0 +1,527 @@
+diff --git a/gateway/cmd/gateway/main.go b/gateway/cmd/gateway/main.go
+new file mode 100644
+index 0000000..83b449f
+--- /dev/null
++++ b/gateway/cmd/gateway/main.go
+@@ -0,0 +1,60 @@
++package main
++
++import (
++	"log"
++	"net/http"
++	"os"
++
++	"github.com/go-chi/chi/v5"
++	chiMiddleware "github.com/go-chi/chi/v5/middleware"
++
++	"gateway/internal/middleware"
++	"gateway/internal/proxy"
++)
++
++func main() {
++	// 加载配置
++	port := os.Getenv("PORT")
++	if port == "" {
++		port = "8080"
++	}
++
++	elizaAgentURL := os.Getenv("ELIZA_AGENT_URL")
++	if elizaAgentURL == "" {
++		elizaAgentURL = "http://127.0.0.1:3002"
++	}
++
++	aaBridgeURL := os.Getenv("AA_BRIDGE_URL")
++	if aaBridgeURL == "" {
++		aaBridgeURL = "http://127.0.0.1:3001/aa/settle"
++	}
++
++	log.Printf("Starting gateway on port %s", port)
++	log.Printf("Eliza Agent URL: %s", elizaAgentURL)
++	log.Printf("AA Bridge Settle URL: %s", aaBridgeURL)
++
++	r := chi.NewRouter()
++
++	// 基础中间件
++	r.Use(chiMiddleware.Logger)
++	r.Use(chiMiddleware.Recoverer)
++
++	// 创建反向代理
++	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL)
++	if err != nil {
++		log.Fatalf("Failed to initialize reverse proxy: %v", err)
++	}
++
++	// 路由注册
++	r.Route("/agent", func(r chi.Router) {
++		r.Use(middleware.X402Middleware)
++		r.Handle("/execute", proxyHandler)
++	})
++
++	// 启动服务
++	addr := "0.0.0.0:" + port
++	log.Printf("Server listening on %s", addr)
++	if err := http.ListenAndServe(addr, r); err != nil {
++		log.Fatalf("Server exited with error: %v", err)
++	}
++}
+diff --git a/gateway/internal/middleware/x402.go b/gateway/internal/middleware/x402.go
+new file mode 100644
+index 0000000..18103b5
+--- /dev/null
++++ b/gateway/internal/middleware/x402.go
+@@ -0,0 +1,102 @@
++package middleware
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"os"
++	"strings"
++)
++
++type contextKey string
++
++const (
++	TokenContextKey  contextKey = "x402_token"
++	LockIDContextKey contextKey = "x402_lock_id"
++)
++
++type ErrorResponse struct {
++	Error   string `json:"error"`
++	Message string `json:"message"`
++}
++
++// X402Middleware 检查 Authorization: Bearer <token>
++func X402Middleware(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		authHeader := r.Header.Get("Authorization")
++		
++		// 优先获取 X-Payment-Lock-Id 作为 lockId
++		lockID := r.Header.Get("X-Payment-Lock-Id")
++
++		// 检查 Authorization
++		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
++			trigger402(w)
++			return
++		}
++
++		token := strings.TrimPrefix(authHeader, "Bearer ")
++		token = strings.TrimSpace(token)
++		if token == "" {
++			trigger402(w)
++			return
++		}
++
++		// 解析 lockId
++		// 需求："读取客户端请求头中携带的 X-402 支付哈希或 lockId（可以在 Authorization: Bearer <lockId:token> 格式中携带，或者使用 X-Payment-Lock-Id 头传递）"
++		if lockID == "" {
++			// 如果 Authorization 里有冒号，拆分出 lockId
++			if strings.Contains(token, ":") {
++				parts := strings.SplitN(token, ":", 2)
++				lockID = parts[0]
++			} else {
++				lockID = token
++			}
++		}
++
++		// 将 token 和 lockID 注入 context
++		ctx := r.Context()
++		ctx = context.WithValue(ctx, TokenContextKey, token)
++		ctx = context.WithValue(ctx, LockIDContextKey, lockID)
++
++		next.ServeHTTP(w, r.WithContext(ctx))
++	})
++}
++
++// GetLockID 从 context 中获取 lockId
++func GetLockID(ctx context.Context) string {
++	if val, ok := ctx.Value(LockIDContextKey).(string); ok {
++		return val
++	}
++	return ""
++}
++
++// GetToken 从 context 中获取 token
++func GetToken(ctx context.Context) string {
++	if val, ok := ctx.Value(TokenContextKey).(string); ok {
++		return val
++	}
++	return ""
++}
++
++func trigger402(w http.ResponseWriter) {
++	// 获取 ESCROW_ADDRESS 环境变量，默认为 Mock 合约地址
++	escrowAddr := os.Getenv("ESCROW_ADDRESS")
++	if escrowAddr == "" {
++		escrowAddr = "0x5FbDB2315678afecb367f032d93F642f64180aa3" // 默认回退 Mock 地址
++	}
++
++	w.Header().Set("X-402-Price", "1000")
++	w.Header().Set("X-402-Currency", "USDC")
++	w.Header().Set("X-402-Chain", "base-sepolia")
++	w.Header().Set("X-402-Payment-Address", escrowAddr)
++	w.Header().Set("X-402-Version", "1")
++	w.Header().Set("Content-Type", "application/json")
++
++	w.WriteHeader(http.StatusPaymentRequired) // 402
++
++	resp := ErrorResponse{
++		Error:   "payment_required",
++		Message: "micropayment required via x-402 protocol",
++	}
++	json.NewEncoder(w).Encode(resp)
++}
+diff --git a/gateway/internal/middleware/x402_test.go b/gateway/internal/middleware/x402_test.go
+new file mode 100644
+index 0000000..469e99d
+--- /dev/null
++++ b/gateway/internal/middleware/x402_test.go
+@@ -0,0 +1,233 @@
++package middleware_test
++
++import (
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"gateway/internal/middleware"
++	"gateway/internal/proxy"
++)
++
++func TestX402Middleware_NoToken(t *testing.T) {
++	// 设置环境变量以便测试
++	escrowAddr := "0xTestEscrowAddress123"
++	os.Setenv("ESCROW_ADDRESS", escrowAddr)
++	defer os.Unsetenv("ESCROW_ADDRESS")
++
++	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusOK)
++	}))
++
++	req := httptest.NewRequest("POST", "/agent/execute", nil)
++	rr := httptest.NewRecorder()
++
++	handler.ServeHTTP(rr, req)
++
++	// 验证 402 状态码
++	if rr.Code != http.StatusPaymentRequired {
++		t.Errorf("Expected status code %d, got %d", http.StatusPaymentRequired, rr.Code)
++	}
++
++	// 验证 Header 注入
++	headers := []struct {
++		key   string
++		value string
++	}{
++		{"X-402-Price", "1000"},
++		{"X-402-Currency", "USDC"},
++		{"X-402-Chain", "base-sepolia"},
++		{"X-402-Payment-Address", escrowAddr},
++		{"X-402-Version", "1"},
++		{"Content-Type", "application/json"},
++	}
++
++	for _, h := range headers {
++		got := rr.Header().Get(h.key)
++		if got != h.value {
++			t.Errorf("Header %s: expected %q, got %q", h.key, h.value, got)
++		}
++	}
++
++	// 验证 Response Body
++	var resp middleware.ErrorResponse
++	err := json.Unmarshal(rr.Body.Bytes(), &resp)
++	if err != nil {
++		t.Fatalf("Failed to unmarshal response body: %v", err)
++	}
++
++	if resp.Error != "payment_required" {
++		t.Errorf("Expected error field 'payment_required', got %q", resp.Error)
++	}
++	if !strings.Contains(resp.Message, "micropayment required") {
++		t.Errorf("Expected message to contain 'micropayment required', got %q", resp.Message)
++	}
++}
++
++func TestX402Middleware_WithToken(t *testing.T) {
++	var capturedToken string
++	var capturedLockID string
++
++	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		capturedToken = middleware.GetToken(r.Context())
++		capturedLockID = middleware.GetLockID(r.Context())
++		w.WriteHeader(http.StatusOK)
++	})
++
++	handler := middleware.X402Middleware(nextHandler)
++
++	// 用例 2a: 携带普通 Bearer mock-token
++	req := httptest.NewRequest("POST", "/agent/execute", nil)
++	req.Header.Set("Authorization", "Bearer mock-token")
++	rr := httptest.NewRecorder()
++
++	handler.ServeHTTP(rr, req)
++
++	if rr.Code != http.StatusOK {
++		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
++	}
++	if capturedToken != "mock-token" {
++		t.Errorf("Expected token 'mock-token', got %q", capturedToken)
++	}
++	if capturedLockID != "mock-token" {
++		t.Errorf("Expected lockID 'mock-token' (fallback to token), got %q", capturedLockID)
++	}
++
++	// 用例 2b: 携带 lockId:token 格式的 Bearer token
++	req = httptest.NewRequest("POST", "/agent/execute", nil)
++	req.Header.Set("Authorization", "Bearer myLockID:myActualToken")
++	rr = httptest.NewRecorder()
++
++	handler.ServeHTTP(rr, req)
++
++	if rr.Code != http.StatusOK {
++		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
++	}
++	if capturedToken != "myLockID:myActualToken" {
++		t.Errorf("Expected token 'myLockID:myActualToken', got %q", capturedToken)
++	}
++	if capturedLockID != "myLockID" {
++		t.Errorf("Expected lockID 'myLockID', got %q", capturedLockID)
++	}
++
++	// 用例 2c: 携带 X-Payment-Lock-Id 请求头
++	req = httptest.NewRequest("POST", "/agent/execute", nil)
++	req.Header.Set("Authorization", "Bearer someToken")
++	req.Header.Set("X-Payment-Lock-Id", "customLockID")
++	rr = httptest.NewRecorder()
++
++	handler.ServeHTTP(rr, req)
++
++	if rr.Code != http.StatusOK {
++		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
++	}
++	if capturedToken != "someToken" {
++		t.Errorf("Expected token 'someToken', got %q", capturedToken)
++	}
++	if capturedLockID != "customLockID" {
++		t.Errorf("Expected lockID 'customLockID', got %q", capturedLockID)
++	}
++}
++
++func TestProxyReverse_AsyncSettle(t *testing.T) {
++	// 1. 模拟下游 Agent 服务
++	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		// 校验请求
++		if r.URL.Path != "/agent/execute" {
++			t.Errorf("Agent received path %q, expected /agent/execute", r.URL.Path)
++		}
++		// 返回带有 X-Agent-Proof 的响应
++		w.Header().Set("X-Agent-Proof", "MockProofBase64String")
++		w.WriteHeader(http.StatusOK)
++		w.Write([]byte(`{"output":"mocked output"}`))
++	}))
++	defer agentServer.Close()
++
++	// 2. 模拟 AA Bridge 服务，捕获异步结算请求
++	var receivedSettleBody map[string]string
++	var wg sync.WaitGroup
++	wg.Add(1)
++
++	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		defer wg.Done()
++		if r.URL.Path != "/aa/settle" {
++			t.Errorf("Bridge received path %q, expected /aa/settle", r.URL.Path)
++		}
++
++		bodyBytes, err := io.ReadAll(r.Body)
++		if err != nil {
++			t.Errorf("Failed to read bridge request body: %v", err)
++		}
++
++		err = json.Unmarshal(bodyBytes, &receivedSettleBody)
++		if err != nil {
++			t.Errorf("Failed to parse bridge request body: %v", err)
++		}
++
++		// 返回成功响应
++		w.WriteHeader(http.StatusOK)
++		w.Write([]byte(`{"success":true,"txHash":"0x7777"}`))
++	}))
++	defer bridgeServer.Close()
++
++	// 3. 初始化 Gateway 反向代理
++	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle")
++	if err != nil {
++		t.Fatalf("Failed to create reverse proxy: %v", err)
++	}
++
++	// 4. 将中间件和代理组合成 Router 模拟网关
++	handler := middleware.X402Middleware(gatewayProxy)
++
++	// 5. 客户端发起正常支付放行的请求，携带 X-Payment-Lock-Id
++	req := httptest.NewRequest("POST", "/agent/execute", nil)
++	req.Header.Set("Authorization", "Bearer mock-session-token")
++	req.Header.Set("X-Payment-Lock-Id", "lock-999")
++	rr := httptest.NewRecorder()
++
++	handler.ServeHTTP(rr, req)
++
++	// 6. 验证客户端能够即时收到响应，并且不被阻塞
++	if rr.Code != http.StatusOK {
++		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
++	}
++
++	// 7. 等待异步 goroutine 执行结算请求 (带超时保护)
++	c := make(chan struct{})
++	go func() {
++		wg.Wait()
++		close(c)
++	}()
++
++	select {
++	case <-c:
++		// 正常接收
++	case <-time.After(3 * time.Second):
++		t.Fatal("Timeout waiting for async settle goroutine to trigger AA Bridge")
++	}
++
++	// 8. 验证结算请求体中的字段
++	if receivedSettleBody == nil {
++		t.Fatal("Bridge did not receive settle request")
++	}
++
++	if receivedSettleBody["lockId"] != "lock-999" {
++		t.Errorf("Expected lockId 'lock-999', got %q", receivedSettleBody["lockId"])
++	}
++	if receivedSettleBody["proof"] != "MockProofBase64String" {
++		t.Errorf("Expected proof 'MockProofBase64String', got %q", receivedSettleBody["proof"])
++	}
++	// 验证网关有默认/环境变量中读取的 EOA
++	if receivedSettleBody["agentOwner"] == "" {
++		t.Error("Expected non-empty agentOwner EOA")
++	}
++	if receivedSettleBody["escrowAddress"] == "" {
++		t.Error("Expected non-empty escrowAddress")
++	}
++}
+diff --git a/gateway/internal/proxy/reverse.go b/gateway/internal/proxy/reverse.go
+new file mode 100644
+index 0000000..39feb3b
+--- /dev/null
++++ b/gateway/internal/proxy/reverse.go
+@@ -0,0 +1,108 @@
++package proxy
++
++import (
++	"bytes"
++	"encoding/json"
++	"io"
++	"log"
++	"net/http"
++	"net/http/httputil"
++	"net/url"
++	"os"
++	"time"
++
++	"gateway/internal/middleware"
++)
++
++// ReverseProxyWrapper 封装了反向代理的逻辑
++type ReverseProxyWrapper struct {
++	proxy         *httputil.ReverseProxy
++	aaBridgeURL   string
++	agentOwner    string
++	escrowAddress string
++}
++
++// NewReverseProxy 构造反向代理实例
++func NewReverseProxy(targetURL string, aaBridgeURL string) (*ReverseProxyWrapper, error) {
++	url, err := url.Parse(targetURL)
++	if err != nil {
++		return nil, err
++	}
++
++	// 默认值
++	agentOwner := os.Getenv("AGENT_OWNER")
++	if agentOwner == "" {
++		agentOwner = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" // Anvil 默认第一个账户
++	}
++
++	escrowAddress := os.Getenv("ESCROW_ADDRESS")
++	if escrowAddress == "" {
++		escrowAddress = "0x5FbDB2315678afecb367f032d93F642f64180aa3" // 默认合约 Mock 地址
++	}
++
++	wrapper := &ReverseProxyWrapper{
++		aaBridgeURL:   aaBridgeURL,
++		agentOwner:    agentOwner,
++		escrowAddress: escrowAddress,
++	}
++
++	proxy := httputil.NewSingleHostReverseProxy(url)
++
++	// 劫持响应
++	proxy.ModifyResponse = func(res *http.Response) error {
++		proof := res.Header.Get("X-Agent-Proof")
++		if proof != "" {
++			// 提取 lockId
++			ctx := res.Request.Context()
++			lockID := middleware.GetLockID(ctx)
++
++			if lockID != "" {
++				log.Printf("[Proxy] Intercepted X-Agent-Proof. Triggering async settle for lockId: %s", lockID)
++				go wrapper.settle(lockID, proof)
++			} else {
++				log.Printf("[Proxy] Intercepted X-Agent-Proof but lockId is missing in request context.")
++			}
++		}
++		return nil
++	}
++
++	wrapper.proxy = proxy
++	return wrapper, nil
++}
++
++// ServeHTTP 转发请求
++func (w *ReverseProxyWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
++	w.proxy.ServeHTTP(rw, req)
++}
++
++func (w *ReverseProxyWrapper) settle(lockID, proof string) {
++	bodyMap := map[string]string{
++		"lockId":        lockID,
++		"proof":         proof,
++		"agentOwner":    w.agentOwner,
++		"escrowAddress": w.escrowAddress,
++	}
++	bodyBytes, err := json.Marshal(bodyMap)
++	if err != nil {
++		log.Printf("[Proxy Settle] Error marshaling settle body: %v", err)
++		return
++	}
++
++	req, err := http.NewRequest("POST", w.aaBridgeURL, bytes.NewBuffer(bodyBytes))
++	if err != nil {
++		log.Printf("[Proxy Settle] Error creating settle request: %v", err)
++		return
++	}
++	req.Header.Set("Content-Type", "application/json")
++
++	client := &http.Client{Timeout: 10 * time.Second}
++	resp, err := client.Do(req)
++	if err != nil {
++		log.Printf("[Proxy Settle] Error executing settle request for lockId %s: %v", lockID, err)
++		return
++	}
++	defer resp.Body.Close()
++
++	respBody, _ := io.ReadAll(resp.Body)
++	log.Printf("[Proxy Settle] AA Bridge response for lockId %s: Status: %s, Body: %s", lockID, resp.Status, string(respBody))
++}

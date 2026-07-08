@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,6 +21,7 @@ type ReverseProxyWrapper struct {
 	aaBridgeURL   string
 	agentOwner    string
 	escrowAddress string
+	Client        *http.Client // 复用 HTTP Client，避免并发端口耗尽
 }
 
 // NewReverseProxy 构造反向代理实例
@@ -44,6 +46,9 @@ func NewReverseProxy(targetURL string, aaBridgeURL string) (*ReverseProxyWrapper
 		aaBridgeURL:   aaBridgeURL,
 		agentOwner:    agentOwner,
 		escrowAddress: escrowAddress,
+		Client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
@@ -76,6 +81,13 @@ func (w *ReverseProxyWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Reques
 }
 
 func (w *ReverseProxyWrapper) settle(lockID, proof string) {
+	// 1. Panic 安全屏障，决不引发主网关进程崩溃
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[Proxy Settle] Recovered from panic: %v", r)
+		}
+	}()
+
 	bodyMap := map[string]string{
 		"lockId":        lockID,
 		"proof":         proof,
@@ -88,21 +100,48 @@ func (w *ReverseProxyWrapper) settle(lockID, proof string) {
 		return
 	}
 
-	req, err := http.NewRequest("POST", w.aaBridgeURL, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		log.Printf("[Proxy Settle] Error creating settle request: %v", err)
+	maxRetries := 3
+	var lastErr error
+	var resp *http.Response
+
+	// 2. 退避重试机制
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", w.aaBridgeURL, bytes.NewBuffer(bodyBytes))
+		if err != nil {
+			log.Printf("[Proxy Settle] Error creating settle request (attempt %d/%d): %v", attempt, maxRetries, err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		// 3. 复用结构体自带的 Client 进行网络调用
+		resp, err = w.Client.Do(req)
+		if err != nil {
+			lastErr = err
+			log.Printf("[Proxy Settle] Connection failed (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, err)
+			if attempt < maxRetries {
+				time.Sleep(1 * time.Second)
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP status %s: %s", resp.Status, string(respBody))
+			log.Printf("[Proxy Settle] Bridge returned non-200 (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, lastErr)
+			if attempt < maxRetries {
+				time.Sleep(1 * time.Second)
+			}
+			continue
+		}
+
+		// 成功响应
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		log.Printf("[Proxy Settle] AA Bridge response for lockId %s: Status: %s, Body: %s", lockID, resp.Status, string(respBody))
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[Proxy Settle] Error executing settle request for lockId %s: %v", lockID, err)
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	log.Printf("[Proxy Settle] AA Bridge response for lockId %s: Status: %s, Body: %s", lockID, resp.Status, string(respBody))
+	// 3次重试后依然失败，记录致命报警日志
+	log.Printf("[Proxy Settle] [CRITICAL ERROR] Failed to settle payment for lockId %s after %d attempts. Last error: %v", lockID, maxRetries, lastErr)
 }

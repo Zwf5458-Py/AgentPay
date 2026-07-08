@@ -231,3 +231,57 @@ func TestProxyReverse_AsyncSettle(t *testing.T) {
 		t.Error("Expected non-empty escrowAddress")
 	}
 }
+
+func TestProxyReverse_SettleRetry(t *testing.T) {
+	// 模拟下游 Agent 服务
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Agent-Proof", "MockProofForRetry")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"output":"mocked output"}`))
+	}))
+	defer agentServer.Close()
+
+	// 模拟一个总是失败的 AA Bridge 服务 (返回 500)
+	var mu sync.Mutex
+	attempts := 0
+	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"bridge internal error"}`))
+	}))
+	defer bridgeServer.Close()
+
+	// 初始化 Gateway 反向代理，指向会失败的 AA Bridge
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle")
+	if err != nil {
+		t.Fatalf("Failed to create reverse proxy: %v", err)
+	}
+
+	handler := middleware.X402Middleware(gatewayProxy)
+
+	req := httptest.NewRequest("POST", "/agent/execute", nil)
+	req.Header.Set("Authorization", "Bearer mock-session-token")
+	req.Header.Set("X-Payment-Lock-Id", "lock-fail-retry")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	// 异步重试最长需要 2 秒（每次重试间隔 1 秒，共 3 次请求）
+	// 我们等待 3.5 秒确保重试流程全部走完
+	time.Sleep(3500 * time.Millisecond)
+
+	mu.Lock()
+	finalAttempts := attempts
+	mu.Unlock()
+
+	// 应该在失败后尝试了 3 次
+	if finalAttempts != 3 {
+		t.Errorf("Expected exactly 3 settle attempts, got %d", finalAttempts)
+	}
+}
