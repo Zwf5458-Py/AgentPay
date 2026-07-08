@@ -1,351 +1,334 @@
-diff --git a/agent/src/index.ts b/agent/src/index.ts
+diff --git a/gateway/cmd/gateway/main.go b/gateway/cmd/gateway/main.go
+index 8dd157c..a08814a 100644
+--- a/gateway/cmd/gateway/main.go
++++ b/gateway/cmd/gateway/main.go
+@@ -1,20 +1,22 @@
+ package main
+ 
+ import (
+ 	"context"
+ 	"log"
+ 	"net/http"
+ 	"os"
++	"time"
+ 
+ 	"github.com/go-chi/chi/v5"
+ 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
++	"golang.org/x/time/rate"
+ 
+ 	"gateway/internal/middleware"
+ 	"gateway/internal/proxy"
+ 	"gateway/internal/queue"
+ )
+ 
+ func main() {
+ 	// 加载配置
+ 	port := os.Getenv("PORT")
+ 	if port == "" {
+@@ -30,36 +32,44 @@ func main() {
+ 	if aaBridgeURL == "" {
+ 		aaBridgeURL = "http://127.0.0.1:3001/aa/settle"
+ 	}
+ 
+ 	log.Printf("Starting gateway on port %s", port)
+ 	log.Printf("Eliza Agent URL: %s", elizaAgentURL)
+ 	log.Printf("AA Bridge Settle URL: %s", aaBridgeURL)
+ 
+ 	r := chi.NewRouter()
+ 
++	// 基础环境 Context
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
++	// 挂载限流中间件在最顶端，每秒充能 5 个，最大容纳 10 个
++	limiter := middleware.NewIPRateLimiter(rate.Limit(5), 10)
++	// 启动后台 Cleanup 协程，每隔 1 分钟执行一次，清除过期时间达 5 分钟的 IP 记录
++	go limiter.StartCleanup(ctx, 1*time.Minute, 5*time.Minute)
++	r.Use(middleware.RateLimitMiddleware(limiter))
++
+ 	// 基础中间件
+ 	r.Use(chiMiddleware.Logger)
+ 	r.Use(chiMiddleware.Recoverer)
+ 
+ 	internalSecret := os.Getenv("INTERNAL_SECRET")
+ 
+ 	// 初始化 SQLite 本地队列管理器
+ 	queueMgr, err := queue.NewQueueManager("gateway.db", aaBridgeURL, internalSecret)
+ 	if err != nil {
+ 		log.Fatalf("Failed to initialize queue manager: %v", err)
+ 	}
+ 	defer queueMgr.Close()
+ 
+ 	// 启动后台重试 Worker
+-	ctx, cancel := context.WithCancel(context.Background())
+-	defer cancel()
+ 	queueMgr.StartWorker(ctx)
+ 
+ 	// 创建反向代理
+ 	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret, queueMgr)
+ 	if err != nil {
+ 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
+ 	}
+ 
+ 	// 路由注册
+ 	r.Route("/agent", func(r chi.Router) {
+diff --git a/gateway/internal/middleware/rate_limit.go b/gateway/internal/middleware/rate_limit.go
 new file mode 100644
-index 0000000..07aa153
+index 0000000..50ab5d3
 --- /dev/null
-+++ b/agent/src/index.ts
-@@ -0,0 +1,99 @@
-+import Fastify from 'fastify';
-+import dotenv from 'dotenv';
-+import { fileURLToPath } from 'url';
-+import { generateProof, serializeProof } from './plugins/erc8004/proof.js';
-+import { getAgentPrivateKey } from './tee/mock.js';
++++ b/gateway/internal/middleware/rate_limit.go
+@@ -0,0 +1,143 @@
++package middleware
 +
-+// 加载环境变量
-+dotenv.config();
++import (
++	"context"
++	"encoding/json"
++	"net"
++	"net/http"
++	"os"
++	"strings"
++	"sync"
++	"time"
 +
-+const server = Fastify({
-+  logger: process.env.NODE_ENV !== 'test'
-+});
++	"golang.org/x/time/rate"
++)
 +
-+interface ExecuteBody {
-+  input: string;
-+  agentId: number;
++type limiterItem struct {
++	limiter  *rate.Limiter
++	lastSeen time.Time
 +}
 +
-+// POST /agent/execute
-+server.post('/agent/execute', async (request, reply) => {
-+  const body = request.body as ExecuteBody;
-+
-+  // 1. 校验参数完整性与类型限制
-+  if (!body) {
-+    return reply.status(400).send({ error: 'Missing request body' });
-+  }
-+
-+  const { input, agentId } = body;
-+
-+  // 限制 input 必须是有效的非空字符串
-+  if (typeof input !== 'string' || input.trim() === '') {
-+    return reply.status(400).send({ error: 'Invalid input. Must be a non-empty string.' });
-+  }
-+
-+  // 限制 agentId 必须是安全的、合规的非负整数
-+  if (typeof agentId !== 'number' || !Number.isSafeInteger(agentId) || agentId < 0) {
-+    return reply.status(400).send({ error: 'Invalid agentId. Must be a non-negative safe integer.' });
-+  }
-+
-+  try {
-+    // 3. 生成 mock 的推理输出
-+    const output = `Processed by AgentPay AI: ${input}`;
-+
-+    // 获取私钥
-+    const privateKey = getAgentPrivateKey();
-+
-+    // 4. 调用 generateProof，生成包含签名的 InferenceProof
-+    const proof = await generateProof(
-+      BigInt(agentId),
-+      input,
-+      output,
-+      'deepseek-r1', // mock 模型的 modelId
-+      privateKey
-+    );
-+
-+    // 将 InferenceProof 序列化并 Base64 编码，附加至返回的 Response Header `X-Agent-Proof` 中
-+    const proofJson = serializeProof(proof);
-+    const proofBase64 = Buffer.from(proofJson).toString('base64');
-+    reply.header('X-Agent-Proof', proofBase64);
-+
-+    // 5. 返回 Body 格式：{ output: string, proof: InferenceProof }
-+    // 使用自定义序列化以支持 bigint 字段的 JSON 传输
-+    const responseJson = JSON.stringify(
-+      { output, proof },
-+      (_, value) => (typeof value === 'bigint' ? value.toString() : value)
-+    );
-+
-+    return reply.type('application/json').send(responseJson);
-+  } catch (error: any) {
-+    server.log.error(error);
-+    return reply.status(500).send({ error: error.message || 'Internal Server Error' });
-+  }
-+});
-+
-+const start = async () => {
-+  try {
-+    const port = 3002;
-+    const host = '127.0.0.1';
-+    await server.listen({ port, host });
-+    console.log(`AgentPay Agent server running at http://${host}:${port}`);
-+  } catch (err) {
-+    server.log.error(err);
-+    process.exit(1);
-+  }
-+};
-+
-+// 检查是否作为主模块运行
-+const isMain = process.argv[1] && (
-+  process.argv[1] === fileURLToPath(import.meta.url) ||
-+  process.argv[1].endsWith('index.ts') ||
-+  process.argv[1].endsWith('src/index.ts') ||
-+  process.argv[1].endsWith('index.js')
-+);
-+
-+if (isMain) {
-+  start();
++// IPRateLimiter 包含针对不同 IP 的 rate.Limiter，支持并发安全与内存过期清理
++type IPRateLimiter struct {
++	ips map[string]*limiterItem
++	mu  sync.RWMutex
++	r   rate.Limit
++	b   int
 +}
 +
-+export { server };
-diff --git a/agent/src/plugins/erc8004/proof.ts b/agent/src/plugins/erc8004/proof.ts
-new file mode 100644
-index 0000000..d43b783
---- /dev/null
-+++ b/agent/src/plugins/erc8004/proof.ts
-@@ -0,0 +1,80 @@
-+import { encodePacked, keccak256, toBytes } from 'viem';
-+import { privateKeyToAccount } from 'viem/accounts';
-+
-+export interface InferenceProof {
-+  agentId: bigint;
-+  inputHash: `0x${string}`;
-+  outputHash: `0x${string}`;
-+  modelId: string;
-+  timestamp: number;
-+  signature: `0x${string}`;
++// NewIPRateLimiter 构造器
++func NewIPRateLimiter(r rate.Limit, b int) *IPRateLimiter {
++	return &IPRateLimiter{
++		ips: make(map[string]*limiterItem),
++		r:   r,
++		b:   b,
++	}
 +}
 +
-+/**
-+ * 根据 ERC-8004 规范生成 AI 推理证明与签名
-+ * 
-+ * @param agentId 智能体 ID
-+ * @param input 推理输入文本
-+ * @param output 推理输出文本
-+ * @param modelId 模型 ID
-+ * @param privateKey 用于签名的私钥
-+ */
-+export async function generateProof(
-+  agentId: bigint,
-+  input: string,
-+  output: string,
-+  modelId: string,
-+  privateKey: `0x${string}`
-+): Promise<InferenceProof> {
-+  // 1. 计算 inputHash = keccak256(toBytes(input))
-+  const inputHash = keccak256(toBytes(input));
++// GetLimiter 获取或动态创建指定 IP 的限流器，并刷新活跃时间戳
++func (i *IPRateLimiter) GetLimiter(ip string) *rate.Limiter {
++	i.mu.Lock()
++	defer i.mu.Unlock()
 +
-+  // 2. 计算 outputHash = keccak256(toBytes(output))
-+  const outputHash = keccak256(toBytes(output));
++	item, exists := i.ips[ip]
++	if exists {
++		item.lastSeen = time.Now()
++		return item.limiter
++	}
 +
-+  // 3. 获取当前时间戳
-+  const timestamp = Math.floor(Date.now() / 1000);
-+
-+  // 4. 构造需要被签名的结构体消息，使用 Solidity ABI 兼容的打包编码
-+  // 打包顺序与类型：[agentId (uint256), inputHash (bytes32), outputHash (bytes32), modelId (string), timestamp (uint256)]
-+  const encoded = encodePacked(
-+    ['uint256', 'bytes32', 'bytes32', 'string', 'uint256'],
-+    [agentId, inputHash, outputHash, modelId, BigInt(timestamp)]
-+  );
-+  const messageHash = keccak256(encoded);
-+
-+  // 5. 使用私钥进行 EIP-191 签名
-+  const account = privateKeyToAccount(privateKey);
-+  const signature = await account.signMessage({
-+    message: { raw: messageHash }
-+  });
-+
-+  return {
-+    agentId,
-+    inputHash,
-+    outputHash,
-+    modelId,
-+    timestamp,
-+    signature
-+  };
++	limiter := rate.NewLimiter(i.r, i.b)
++	i.ips[ip] = &limiterItem{
++		limiter:  limiter,
++		lastSeen: time.Now(),
++	}
++	return limiter
 +}
 +
-+/**
-+ * 将 InferenceProof 序列化为 JSON 字符串，安全处理 bigint 类型
-+ */
-+export function serializeProof(proof: InferenceProof): string {
-+  return JSON.stringify(proof, (_, value) => 
-+    typeof value === 'bigint' ? value.toString() : value
-+  );
++// StartCleanup 启动后台清理 Worker 协程，定期清理过期 IP 限流器
++func (i *IPRateLimiter) StartCleanup(ctx context.Context, interval, ttl time.Duration) {
++	ticker := time.NewTicker(interval)
++	defer ticker.Stop()
++
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticker.C:
++			i.Cleanup(ttl)
++		}
++	}
 +}
 +
-+/**
-+ * 将 JSON 字符串反序列化为 InferenceProof 对象，恢复 bigint 类型
-+ */
-+export function deserializeProof(jsonStr: string): InferenceProof {
-+  const parsed = JSON.parse(jsonStr);
-+  return {
-+    ...parsed,
-+    agentId: BigInt(parsed.agentId)
-+  };
-+}
-diff --git a/agent/src/tee/mock.ts b/agent/src/tee/mock.ts
-new file mode 100644
-index 0000000..55ff76a
---- /dev/null
-+++ b/agent/src/tee/mock.ts
-@@ -0,0 +1,31 @@
-+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
++// Cleanup 执行一次过期 IP 限流器的清理
++func (i *IPRateLimiter) Cleanup(ttl time.Duration) {
++	i.mu.Lock()
++	defer i.mu.Unlock()
 +
-+let cachedPrivateKey: `0x${string}` | null = null;
-+
-+/**
-+ * 获取 Agent 的私钥。优先从环境变量 AGENT_PRIVATE_KEY 获取。
-+ * 如果没有配置环境变量，则动态生成一个临时的私钥并缓存，确保不因私钥缺失而中断。
-+ */
-+export function getAgentPrivateKey(): `0x${string}` {
-+  const envKey = process.env.AGENT_PRIVATE_KEY;
-+  if (envKey) {
-+    if (envKey.startsWith('0x')) {
-+      return envKey as `0x${string}`;
-+    }
-+    return `0x${envKey}` as `0x${string}`;
-+  }
-+
-+  if (!cachedPrivateKey) {
-+    cachedPrivateKey = generatePrivateKey();
-+  }
-+  return cachedPrivateKey;
++	now := time.Now()
++	for ip, item := range i.ips {
++		if now.Sub(item.lastSeen) > ttl {
++			delete(i.ips, ip)
++		}
++	}
 +}
 +
-+/**
-+ * 获取 Agent 的公钥地址（由私钥派生）
-+ */
-+export function getAgentAddress(): `0x${string}` {
-+  const privateKey = getAgentPrivateKey();
-+  const account = privateKeyToAccount(privateKey);
-+  return account.address;
++// GetIPsCount 返回缓存的 IP 数量，便于单测断言
++func (i *IPRateLimiter) GetIPsCount() int {
++	i.mu.RLock()
++	defer i.mu.RUnlock()
++	return len(i.ips)
 +}
-diff --git a/agent/test/agent.test.ts b/agent/test/agent.test.ts
-new file mode 100644
-index 0000000..29a541e
---- /dev/null
-+++ b/agent/test/agent.test.ts
-@@ -0,0 +1,117 @@
-+import { describe, it, expect } from 'vitest';
-+import { server } from '../src/index.js';
-+import { deserializeProof } from '../src/plugins/erc8004/proof.js';
-+import { getAgentAddress } from '../src/tee/mock.js';
-+import { encodePacked, keccak256, recoverMessageAddress } from 'viem';
 +
-+describe('Agent execute endpoint & cryptography validation', () => {
-+  it('should successfully execute inference and return a valid signature proof', async () => {
-+    const payload = {
-+      input: 'hello world',
-+      agentId: 1
-+    };
++// SetLimiterLastSeen 手动设置某个 IP 的 lastSeen，便于单测模拟超时
++func (i *IPRateLimiter) SetLimiterLastSeen(ip string, t time.Time) {
++	i.mu.Lock()
++	defer i.mu.Unlock()
++	if item, exists := i.ips[ip]; exists {
++		item.lastSeen = t
++	}
++}
 +
-+    // 使用 Fastify 的 inject 发起 HTTP POST 请求，不会实际监听物理端口，便于并行测试
-+    const response = await server.inject({
-+      method: 'POST',
-+      url: '/agent/execute',
-+      payload
-+    });
++// RateLimitMiddleware 限流中间件处理器
++func RateLimitMiddleware(limiter *IPRateLimiter) func(http.Handler) http.Handler {
++	return func(next http.Handler) http.Handler {
++		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			ip := getIP(r)
++			l := limiter.GetLimiter(ip)
++			if !l.Allow() {
++				w.Header().Set("Content-Type", "application/json")
++				w.WriteHeader(http.StatusTooManyRequests) // 429
++				resp := ErrorResponse{
++					Error:   "rate_limit_exceeded",
++					Message: "too many requests",
++				}
++				json.NewEncoder(w).Encode(resp)
++				return
++			}
++			next.ServeHTTP(w, r)
++		})
++	}
++}
 +
-+    expect(response.statusCode).toBe(200);
++// getIP 提取客户端 IP 地址，过滤端口号。仅当 TRUST_PROXY=true 时才信赖 X-Forwarded-For
++func getIP(r *http.Request) string {
++	var ip string
++	if os.Getenv("TRUST_PROXY") == "true" {
++		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
++			parts := strings.Split(xff, ",")
++			if len(parts) > 0 {
++				ip = strings.TrimSpace(parts[0])
++			}
++		}
++	}
++	if ip == "" {
++		ip = r.RemoteAddr
++	}
 +
-+    const body = JSON.parse(response.body);
-+    expect(body).toHaveProperty('output');
-+    expect(body.output).toBe('Processed by AgentPay AI: hello world');
-+    expect(body).toHaveProperty('proof');
++	host, _, err := net.SplitHostPort(ip)
++	if err == nil {
++		return host
++	}
 +
-+    const proof = body.proof;
-+    expect(proof).toHaveProperty('agentId');
-+    expect(proof.agentId).toBe('1'); // JSON 序列化中 bigint 被转换为 string 传输
-+    expect(proof).toHaveProperty('inputHash');
-+    expect(proof).toHaveProperty('outputHash');
-+    expect(proof).toHaveProperty('modelId');
-+    expect(proof).toHaveProperty('timestamp');
-+    expect(proof).toHaveProperty('signature');
++	return strings.Trim(ip, "[]")
++}
+diff --git a/gateway/internal/middleware/x402_test.go b/gateway/internal/middleware/x402_test.go
+index ee85a70..e4e33b3 100644
+--- a/gateway/internal/middleware/x402_test.go
++++ b/gateway/internal/middleware/x402_test.go
+@@ -9,20 +9,22 @@ import (
+ 	"net/http/httptest"
+ 	"os"
+ 	"strings"
+ 	"sync"
+ 	"testing"
+ 	"time"
+ 
+ 	"gateway/internal/middleware"
+ 	"gateway/internal/proxy"
+ 	"gateway/internal/queue"
 +
-+    // 验证 Response Header 中的 X-Agent-Proof
-+    const headerProofBase64 = response.headers['x-agent-proof'] as string;
-+    expect(headerProofBase64).toBeDefined();
++	"golang.org/x/time/rate"
+ )
+ 
+ func TestX402Middleware_NoToken(t *testing.T) {
+ 	// 设置环境变量以便测试
+ 	escrowAddr := "0xTestEscrowAddress123"
+ 	os.Setenv("ESCROW_ADDRESS", escrowAddr)
+ 	defer os.Unsetenv("ESCROW_ADDRESS")
+ 
+ 	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		w.WriteHeader(http.StatusOK)
+@@ -376,10 +378,83 @@ func TestProxyReverse_BridgeOutageSelfHealing(t *testing.T) {
+ 	mu.Unlock()
+ 
+ 	if !successReceived {
+ 		t.Error("Mock Bridge did not receive a successful settle request")
+ 	}
+ 
+ 	if receivedSecret != "test-secret" {
+ 		t.Errorf("Expected secret 'test-secret', got %q", receivedSecret)
+ 	}
+ }
 +
-+    // 验证 Base64 完美还原为 Proof 对象
-+    const headerProofJson = Buffer.from(headerProofBase64, 'base64').toString('utf8');
-+    const headerProof = deserializeProof(headerProofJson);
++func TestRateLimitMiddleware_LimitExceeded(t *testing.T) {
++	// 配置 IPRateLimiter 限制速率为 2/s，桶大小为 3
++	limiter := middleware.NewIPRateLimiter(rate.Limit(2), 3)
 +
-+    expect(headerProof.agentId).toBe(1n);
-+    expect(headerProof.inputHash).toBe(proof.inputHash);
-+    expect(headerProof.outputHash).toBe(proof.outputHash);
-+    expect(headerProof.modelId).toBe(proof.modelId);
-+    expect(headerProof.timestamp).toBe(proof.timestamp);
-+    expect(headerProof.signature).toBe(proof.signature);
++	// 创建一个路由器处理器：限流中间件包裹 X402 中间件
++	// 前 3 次请求由于没有携带 Authorization 头，但能通过限流器，所以会被 X402 拦截并返回 402
++	// 第 4 次和第 5 次请求由于超出速率限制，会被限流中间件拦截并返回 429
++	handler := middleware.RateLimitMiddleware(limiter)(middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusOK)
++	})))
 +
-+    // 验证 Proof 对象的密码学签名合法性：
-+    // 1. 构造相同的数据包进行 keccak256
-+    const encoded = encodePacked(
-+      ['uint256', 'bytes32', 'bytes32', 'string', 'uint256'],
-+      [
-+        headerProof.agentId,
-+        headerProof.inputHash,
-+        headerProof.outputHash,
-+        headerProof.modelId,
-+        BigInt(headerProof.timestamp)
-+      ]
-+    );
-+    const messageHash = keccak256(encoded);
++	for i := 1; i <= 5; i++ {
++		req := httptest.NewRequest("POST", "/agent/execute", nil)
++		req.RemoteAddr = "192.168.1.100:12345" // 统一客户端 IP
++		rr := httptest.NewRecorder()
 +
-+    // 2. 反解签名地址
-+    const recoveredAddress = await recoverMessageAddress({
-+      message: { raw: messageHash },
-+      signature: headerProof.signature
-+    });
++		handler.ServeHTTP(rr, req)
 +
-+    // 3. 验证反解出的地址与 Agent 的 Public Address 完全一致
-+    const expectedAddress = getAgentAddress();
-+    expect(recoveredAddress.toLowerCase()).toBe(expectedAddress.toLowerCase());
-+  });
++		if i <= 3 {
++			// 前 3 次请求返回 HTTP 402
++			if rr.Code != http.StatusPaymentRequired {
++				t.Errorf("Request %d: expected status code %d, got %d", i, http.StatusPaymentRequired, rr.Code)
++			}
++		} else {
++			// 第 4 次和第 5 次请求返回 HTTP 429
++			if rr.Code != http.StatusTooManyRequests {
++				t.Errorf("Request %d: expected status code %d, got %d", i, http.StatusTooManyRequests, rr.Code)
++			}
 +
-+  it('should return 400 for various invalid inputs', async () => {
-+    const invalidInputs = [
-+      { payload: { agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // missing input
-+      { payload: { input: '', agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // empty string
-+      { payload: { input: '   ', agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // blank string
-+      { payload: { input: null, agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // null input
-+      { payload: { input: 123, agentId: 1 }, errorMsg: 'Invalid input. Must be a non-empty string.' }, // non-string input
-+    ];
++			// 验证 Response Body 匹配 rate_limit_exceeded
++			var resp middleware.ErrorResponse
++			err := json.Unmarshal(rr.Body.Bytes(), &resp)
++			if err != nil {
++				t.Fatalf("Request %d: failed to unmarshal response body: %v", i, err)
++			}
 +
-+    for (const { payload, errorMsg } of invalidInputs) {
-+      const response = await server.inject({
-+        method: 'POST',
-+        url: '/agent/execute',
-+        payload
-+      });
-+      expect(response.statusCode).toBe(400);
-+      expect(JSON.parse(response.body).error).toBe(errorMsg);
-+    }
-+  });
++			if resp.Error != "rate_limit_exceeded" {
++				t.Errorf("Request %d: expected error field 'rate_limit_exceeded', got %q", i, resp.Error)
++			}
++			if resp.Message != "too many requests" {
++				t.Errorf("Request %d: expected message 'too many requests', got %q", i, resp.Message)
++			}
++		}
++	}
++}
 +
-+  it('should return 400 for various invalid agentIds', async () => {
-+    const invalidAgentIds = [
-+      { payload: { input: 'hello' }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // missing agentId
-+      { payload: { input: 'hello', agentId: -1 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // negative
-+      { payload: { input: 'hello', agentId: 1.5 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // float
-+      { payload: { input: 'hello', agentId: NaN }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // NaN
-+      { payload: { input: 'hello', agentId: null }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // null agentId
-+      { payload: { input: 'hello', agentId: Number.MAX_SAFE_INTEGER + 10 }, errorMsg: 'Invalid agentId. Must be a non-negative safe integer.' }, // unsafe integer
-+    ];
++func TestRateLimitLimiter_CleanupTTL(t *testing.T) {
++	// 配置限流速率为 2/s，桶大小为 3
++	limiter := middleware.NewIPRateLimiter(rate.Limit(2), 3)
 +
-+    for (const { payload, errorMsg } of invalidAgentIds) {
-+      const response = await server.inject({
-+        method: 'POST',
-+        url: '/agent/execute',
-+        payload
-+      });
-+      expect(response.statusCode).toBe(400);
-+      expect(JSON.parse(response.body).error).toBe(errorMsg);
-+    }
-+  });
-+});
++	ip := "192.168.1.50"
++
++	// 写入一个 IP 记录
++	limiter.GetLimiter(ip)
++
++	if limiter.GetIPsCount() != 1 {
++		t.Errorf("Expected IP count to be 1, got %d", limiter.GetIPsCount())
++	}
++
++	// 模拟写入一个 IP 记录，设置其 lastSeen 为 10 分钟前
++	limiter.SetLimiterLastSeen(ip, time.Now().Add(-10*time.Minute))
++
++	// 执行清理，清除过期时间大于 5 分钟的 IP
++	limiter.Cleanup(5 * time.Minute)
++
++	// 断言 map 确实删除了该超期 IP
++	if limiter.GetIPsCount() != 0 {
++		t.Errorf("Expected IP count to be 0 after cleanup, got %d", limiter.GetIPsCount())
++	}
++}
++
++
