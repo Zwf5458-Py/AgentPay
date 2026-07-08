@@ -1,0 +1,471 @@
+diff --git a/contracts/src/identity/AgentIdentityRegistry.sol b/contracts/src/identity/AgentIdentityRegistry.sol
+new file mode 100644
+index 0000000..ac18163
+--- /dev/null
++++ b/contracts/src/identity/AgentIdentityRegistry.sol
+@@ -0,0 +1,172 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.20;
++
++import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
++import "@openzeppelin/contracts/access/Ownable.sol";
++
++contract AgentIdentityRegistry is ERC721, Ownable {
++    struct AgentMetadata {
++        string modelId;
++        string serviceEndpoint;
++        bytes32 teeAttestation;
++        string capabilities;
++        uint256 registeredAt;
++    }
++
++    // 存储 agentId (即 tokenId) 到其元数据的映射
++    mapping(uint256 => AgentMetadata) private _agentMetadata;
++    
++    // tokenId 计数器
++    uint256 private _nextTokenId;
++
++    event AgentRegistered(
++        uint256 indexed agentId,
++        address indexed owner,
++        string modelId,
++        string serviceEndpoint,
++        bytes32 teeAttestation,
++        string capabilities
++    );
++
++    event MetadataUpdated(
++        uint256 indexed agentId,
++        string modelId,
++        string serviceEndpoint,
++        bytes32 teeAttestation,
++        string capabilities
++    );
++
++    error NotAgentOwner();
++    error SoulboundTransferBlocked();
++    error AgentDoesNotExist();
++    error InvalidMetadata();
++
++    constructor() ERC721("Agent Identity NFT", "AGENT") Ownable(msg.sender) {
++        _nextTokenId = 1;
++    }
++
++    // 注册 Agent
++    function registerAgent(
++        string calldata modelId,
++        string calldata serviceEndpoint,
++        bytes32 teeAttestation,
++        string calldata capabilities
++    ) external returns (uint256) {
++        if (bytes(modelId).length == 0 || bytes(serviceEndpoint).length == 0) {
++            revert InvalidMetadata();
++        }
++
++        uint256 agentId = _nextTokenId++;
++        _safeMint(msg.sender, agentId);
++
++        _agentMetadata[agentId] = AgentMetadata({
++            modelId: modelId,
++            serviceEndpoint: serviceEndpoint,
++            teeAttestation: teeAttestation,
++            capabilities: capabilities,
++            registeredAt: block.timestamp
++        });
++
++        emit AgentRegistered(
++            agentId,
++            msg.sender,
++            modelId,
++            serviceEndpoint,
++            teeAttestation,
++            capabilities
++        );
++
++        return agentId;
++    }
++
++    // 更新元数据
++    function updateMetadata(
++        uint256 agentId,
++        string calldata modelId,
++        string calldata serviceEndpoint,
++        bytes32 teeAttestation,
++        string calldata capabilities
++    ) external {
++        address agentOwner = _ownerOf(agentId);
++        if (agentOwner == address(0)) {
++            revert AgentDoesNotExist();
++        }
++        // 只有 NFT 拥有者可以修改
++        if (agentOwner != msg.sender) {
++            revert NotAgentOwner();
++        }
++
++        AgentMetadata storage metadata = _agentMetadata[agentId];
++        metadata.modelId = modelId;
++        metadata.serviceEndpoint = serviceEndpoint;
++        metadata.teeAttestation = teeAttestation;
++        metadata.capabilities = capabilities;
++
++        emit MetadataUpdated(
++            agentId,
++            modelId,
++            serviceEndpoint,
++            teeAttestation,
++            capabilities
++        );
++    }
++
++    // 获取 Agent 元数据
++    function getAgent(uint256 agentId) external view returns (
++        string memory modelId,
++        string memory serviceEndpoint,
++        bytes32 teeAttestation,
++        string memory capabilities,
++        uint256 registeredAt,
++        address owner
++    ) {
++        address agentOwner = _ownerOf(agentId);
++        if (agentOwner == address(0)) {
++            revert AgentDoesNotExist();
++        }
++
++        AgentMetadata memory metadata = _agentMetadata[agentId];
++        return (
++            metadata.modelId,
++            metadata.serviceEndpoint,
++            metadata.teeAttestation,
++            metadata.capabilities,
++            metadata.registeredAt,
++            agentOwner
++        );
++    }
++
++    // 验证 Agent 存在
++    function verifyAgent(uint256 agentId) external view returns (bool) {
++        address owner = _ownerOf(agentId);
++        return owner != address(0);
++    }
++
++    // 允许拥有者销毁自己的 Agent Identity NFT
++    function burn(uint256 agentId) external {
++        address agentOwner = _ownerOf(agentId);
++        if (agentOwner == address(0)) {
++            revert AgentDoesNotExist();
++        }
++        if (agentOwner != msg.sender) {
++            revert NotAgentOwner();
++        }
++        _burn(agentId);
++    }
++
++    // 重写 _update 函数以确保 Soulbound 属性 (禁止转让)
++    function _update(
++        address to,
++        uint256 tokenId,
++        address auth
++    ) internal virtual override returns (address) {
++        address previousOwner = _ownerOf(tokenId);
++        
++        // 如果 previousOwner != address(0) 且 to != address(0)，则是 transfer，需要禁止
++        if (previousOwner != address(0) && to != address(0)) {
++            revert SoulboundTransferBlocked();
++        }
++        
++        return super._update(to, tokenId, auth);
++    }
++}
+diff --git a/contracts/src/identity/ValidationRegistry.sol b/contracts/src/identity/ValidationRegistry.sol
+new file mode 100644
+index 0000000..50ab7bc
+--- /dev/null
++++ b/contracts/src/identity/ValidationRegistry.sol
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.20;
++
++import "@openzeppelin/contracts/access/Ownable.sol";
++
++interface IValidator {
++    function validate(uint256 agentId, bytes calldata proof) external view returns (bool);
++}
++
++contract ValidationRegistry is Ownable {
++    // 映射验证类型（如 "TEE"）到其验证器合约地址
++    mapping(string => address) private _validators;
++
++    event ValidatorRegistered(string indexed validationType, address indexed validatorAddress);
++
++    error ValidatorNotContract();
++
++    constructor() Ownable(msg.sender) {}
++
++    // 注册/修改验证器地址，只有 Owner 可操作
++    function registerValidator(
++        string calldata validationType,
++        address validatorAddress
++    ) external onlyOwner {
++        if (validatorAddress != address(0) && validatorAddress.code.length == 0) {
++            revert ValidatorNotContract();
++        }
++        _validators[validationType] = validatorAddress;
++        emit ValidatorRegistered(validationType, validatorAddress);
++    }
++
++    // 获取验证器地址
++    function getValidator(string calldata validationType) external view returns (address) {
++        return _validators[validationType];
++    }
++
++    // 校验证明
++    function validateProof(
++        uint256 agentId,
++        string calldata validationType,
++        bytes calldata proof
++    ) external view returns (bool) {
++        address validator = _validators[validationType];
++        
++        // 如果没有注册对应的验证器，直接返回 false
++        if (validator == address(0)) {
++            return false;
++        }
++
++        // 调用对应验证器合约进行验证
++        try IValidator(validator).validate(agentId, proof) returns (bool result) {
++            return result;
++        } catch {
++            return false;
++        }
++    }
++}
+diff --git a/contracts/test/AgentIdentityTest.t.sol b/contracts/test/AgentIdentityTest.t.sol
+new file mode 100644
+index 0000000..1316091
+--- /dev/null
++++ b/contracts/test/AgentIdentityTest.t.sol
+@@ -0,0 +1,224 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.20;
++
++import "forge-std/Test.sol";
++import "../src/identity/AgentIdentityRegistry.sol";
++import "../src/identity/ValidationRegistry.sol";
++
++// Mock 验证器用于测试自定义验证逻辑路由
++contract MockValidator is IValidator {
++    function validate(uint256 /*agentId*/, bytes calldata proof) external pure override returns (bool) {
++        // 如果 proof 以 0x01 开头，返回 true，否则返回 false
++        if (proof.length > 0 && proof[0] == 0x01) {
++            return true;
++        }
++        return false;
++    }
++}
++
++contract AgentIdentityTest is Test {
++    AgentIdentityRegistry public identityRegistry;
++    ValidationRegistry public validationRegistry;
++
++    address public owner = address(0xABC);
++    address public user1 = address(0x111);
++    address public user2 = address(0x222);
++
++    function setUp() public {
++        // 切换到 owner 部署合约
++        vm.startPrank(owner);
++        identityRegistry = new AgentIdentityRegistry();
++        validationRegistry = new ValidationRegistry();
++        vm.stopPrank();
++    }
++
++    // 1. 测试 AgentIdentityRegistry 的注册和基本元数据读取
++    function testRegisterAgent() public {
++        vm.startPrank(user1);
++        
++        string memory modelId = "deepseek-r1";
++        string memory serviceEndpoint = "https://api.deepseek.com/v1";
++        bytes32 teeAttestation = keccak256("attestation-data");
++        string memory capabilities = "inference,payment";
++
++        uint256 agentId = identityRegistry.registerAgent(
++            modelId,
++            serviceEndpoint,
++            teeAttestation,
++            capabilities
++        );
++
++        // 验证返回的 agentId 应该为 1
++        assertEq(agentId, 1);
++
++        // 验证元数据是否正确写入
++        (
++            string memory rModelId,
++            string memory rServiceEndpoint,
++            bytes32 rTeeAttestation,
++            string memory rCapabilities,
++            uint256 rRegisteredAt,
++            address rOwner
++        ) = identityRegistry.getAgent(agentId);
++
++        assertEq(rModelId, modelId);
++        assertEq(rServiceEndpoint, serviceEndpoint);
++        assertEq(rTeeAttestation, teeAttestation);
++        assertEq(rCapabilities, capabilities);
++        assertEq(rRegisteredAt, block.timestamp);
++        assertEq(rOwner, user1);
++
++        // 验证 verifyAgent 接口
++        assertTrue(identityRegistry.verifyAgent(agentId));
++        assertFalse(identityRegistry.verifyAgent(999)); // 不存在的 agentId
++
++        vm.stopPrank();
++    }
++
++    // 2. 测试更新元数据
++    function testUpdateMetadata() public {
++        vm.startPrank(user1);
++        uint256 agentId = identityRegistry.registerAgent(
++            "model-a",
++            "endpoint-a",
++            keccak256("tee-a"),
++            "cap-a"
++        );
++
++        // 拥有者成功更新
++        string memory newModel = "model-b";
++        string memory newEndpoint = "endpoint-b";
++        bytes32 newTee = keccak256("tee-b");
++        string memory newCap = "cap-b";
++
++        identityRegistry.updateMetadata(agentId, newModel, newEndpoint, newTee, newCap);
++
++        (
++            string memory rModelId,
++            string memory rServiceEndpoint,
++            bytes32 rTeeAttestation,
++            string memory rCapabilities,,
++        ) = identityRegistry.getAgent(agentId);
++
++        assertEq(rModelId, newModel);
++        assertEq(rServiceEndpoint, newEndpoint);
++        assertEq(rTeeAttestation, newTee);
++        assertEq(rCapabilities, newCap);
++
++        vm.stopPrank();
++
++        // 非拥有者更新应该被 revert
++        vm.startPrank(user2);
++        vm.expectRevert(AgentIdentityRegistry.NotAgentOwner.selector);
++        identityRegistry.updateMetadata(agentId, newModel, newEndpoint, newTee, newCap);
++        vm.stopPrank();
++    }
++
++    // 3. 测试 Soulbound 限制 (禁止转让)
++    function testSoulboundTransferBlocked() public {
++        vm.startPrank(user1);
++        uint256 agentId = identityRegistry.registerAgent(
++            "model-a",
++            "endpoint-a",
++            keccak256("tee-a"),
++            "cap-a"
++        );
++
++        // 尝试转让应该 Revert
++        vm.expectRevert(AgentIdentityRegistry.SoulboundTransferBlocked.selector);
++        identityRegistry.transferFrom(user1, user2, agentId);
++
++        vm.expectRevert(AgentIdentityRegistry.SoulboundTransferBlocked.selector);
++        identityRegistry.safeTransferFrom(user1, user2, agentId);
++
++        vm.stopPrank();
++    }
++
++    // 4. 测试 ValidationRegistry 默认路由（未注册验证器时返回 false）
++    function testValidationRegistryDefaultRouting() public {
++        vm.prank(user1); // 避免 view 警告
++        // 未注册验证器时，对任意 proof 验证应返回 false
++        bytes memory mockProof = "some-proof";
++        bool result = validationRegistry.validateProof(1, "TEE", mockProof);
++        assertFalse(result);
++
++        result = validationRegistry.validateProof(1, "MPC", mockProof);
++        assertFalse(result);
++    }
++
++    // 5. 测试 ValidationRegistry 注册验证器及路由校验
++    function testValidationRegistryCustomRouting() public {
++        // 部署 Mock 验证器
++        MockValidator mockValidator = new MockValidator();
++
++        // 只有 Owner 可以注册验证器
++        vm.startPrank(user1);
++        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", user1));
++        validationRegistry.registerValidator("TEE", address(mockValidator));
++        vm.stopPrank();
++
++        // 非合约地址注册应该报错 ValidatorNotContract
++        vm.startPrank(owner);
++        vm.expectRevert(ValidationRegistry.ValidatorNotContract.selector);
++        validationRegistry.registerValidator("TEE", user1);
++
++        // Owner 注册验证器
++        validationRegistry.registerValidator("TEE", address(mockValidator));
++        assertEq(validationRegistry.getValidator("TEE"), address(mockValidator));
++        vm.stopPrank();
++
++        // 验证路由：传递以 0x01 开头的证明，应当验证通过 (true)
++        bytes memory validProof = abi.encodePacked(uint8(0x01), "valid-attestation");
++        bool success = validationRegistry.validateProof(1, "TEE", validProof);
++        assertTrue(success);
++
++        // 验证路由：传递其他开头的证明，应当验证失败 (false)
++        bytes memory invalidProof = abi.encodePacked(uint8(0x00), "invalid-attestation");
++        bool fail = validationRegistry.validateProof(1, "TEE", invalidProof);
++        assertFalse(fail);
++
++        // 验证路由：对于未注册的验证器类型返回 false
++        bool result = validationRegistry.validateProof(1, "OTHER_TYPE", invalidProof);
++        assertFalse(result);
++    }
++
++    // 6. 测试空字段校验
++    function testRegisterAgentWithEmptyFields() public {
++        vm.startPrank(user1);
++        // modelId 为空
++        vm.expectRevert(AgentIdentityRegistry.InvalidMetadata.selector);
++        identityRegistry.registerAgent("", "endpoint-a", keccak256("tee-a"), "cap-a");
++        
++        // serviceEndpoint 为空
++        vm.expectRevert(AgentIdentityRegistry.InvalidMetadata.selector);
++        identityRegistry.registerAgent("model-a", "", keccak256("tee-a"), "cap-a");
++        vm.stopPrank();
++    }
++
++    // 7. 测试 NFT 销毁（Burn）行为
++    function testBurnAgent() public {
++        vm.startPrank(user1);
++        uint256 agentId = identityRegistry.registerAgent(
++            "model-a",
++            "endpoint-a",
++            keccak256("tee-a"),
++            "cap-a"
++        );
++        
++        // 验证销毁
++        identityRegistry.burn(agentId);
++        assertFalse(identityRegistry.verifyAgent(agentId));
++        
++        // 验证已销毁代币不能再被 getAgent、updateMetadata 或再次 burn
++        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
++        identityRegistry.getAgent(agentId);
++        
++        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
++        identityRegistry.updateMetadata(agentId, "model-b", "endpoint-b", keccak256("tee-b"), "cap-b");
++        
++        vm.expectRevert(AgentIdentityRegistry.AgentDoesNotExist.selector);
++        identityRegistry.burn(agentId);
++        
++        vm.stopPrank();
++    }
++}
