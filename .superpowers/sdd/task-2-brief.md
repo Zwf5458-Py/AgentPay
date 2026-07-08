@@ -1,63 +1,54 @@
-# Task 2 Brief: 信誉与支付托管合约开发 (PaymentEscrow & ReputationRegistry)
+# Task 2 Brief: ERC-6551 TBA 智能体收款执行账户部署与防御
 
 ## 目标
-实现 `ReputationRegistry.sol`（信誉评价合约，仅允许付款方对 Agent 评分）和 `PaymentEscrow.sol`（非托管式资金锁定、超时退款、以及由 Settler 验证后释放资金）。
+实现标准的 ERC-6551 智能体 TBA 账户合约（`AgentTokenBoundAccount.sol`），并在托管合约（`PaymentEscrow.sol`）的结算中绑定专属 TBA 验证防护，拦截非 TBA 的越权接收地址。
 
 ## 涉及文件
-- 新增/修改: `contracts/src/identity/ReputationRegistry.sol`
-- 新增: `contracts/src/payment/PaymentEscrow.sol`
-- 新增: `contracts/test/MockERC20.sol` (如果未包含，编写一个极简 Mock 用作 USDC)
-- 新增: `contracts/test/PaymentEscrowTest.t.sol`
+- 新增: `contracts/src/interfaces/IERC6551Account.sol`
+- 新增: `contracts/src/payment/AgentTokenBoundAccount.sol`
+- 修改: `contracts/src/payment/PaymentEscrow.sol`
+- 修改: `contracts/test/PaymentEscrowTest.t.sol`
 
 ## 全局约束
-- 链基础: Base Sepolia (Chain ID: 84532)
-- 语言和框架: Solidity + Foundry (EntryPoint v0.7 / OpenZeppelin v5)
+- Solidity 统一为 `0.8.20`。
+- 不得使用 TODO 或占位符。
+- TBA 划出资金必须只有其对应的 Agent NFT 的 owner 拥有执行权限。
 
 ## 需求与步骤
 
-### 1. ReputationRegistry.sol
-- **与托管合约绑定**：引入 `IPaymentEscrow` 接口，在提交反馈时校验 `paymentEscrow.hasPaid(msg.sender, agentId)`，必须返回 `true` 才允许提交（防刷分）。
-- **字段和机制**：
-  - 评分范围 1-5。包含任务哈希 (taskHash) 以及是否完成 (taskCompleted)。
-  - 提供 `getReputation(uint256 agentId)` 查询平均评分和评价总数。
-  - 提供 `getRecords` 或类似结构返回评价明细。
-  - 自定义错误：如评分超限抛出 `InvalidScore()`，未付款抛出 `NotPaid()`。
+### 1. 编写 ERC-6551 账户合约
+- 创建 `contracts/src/interfaces/IERC6551Account.sol`：定义标准账户的 `isValidSigner`，`token`，`state` 和 `receive()` 接口。
+- 创建 `contracts/src/payment/AgentTokenBoundAccount.sol`：
+  - 挂接 `IERC6551Account`。
+  - 实现 `token()`：返还持有该 TBA 账户的 NFT 元组 `(uint256 chainId, address tokenContract, uint256 tokenId)`。为简化解析，可在创建时通过 `immutable` 构造参数存入这三个变量。
+  - 实现 `execute(address to, uint256 value, bytes calldata data) external payable returns (bytes memory)`：
+    - **安全校验**：仅允许此 TBA 绑定的 Agent NFT 拥有者（`ownerOf(tokenId)`）调用。可通过反查 `tokenContract.ownerOf(tokenId)` 检验 `msg.sender` 权限。非 owner 触发则 Revert。
+    - 执行调用并返回执行结果。
 
-### 2. PaymentEscrow.sol
-- **非托管支付托管**：
-  - 拥有 `IERC20 public paymentToken`（初始化传入，例如 mock USDC）。
-  - 拥有 `ValidationRegistry public validationRegistry` 用来做 TEE Proof 校验路由。
-  - 拥有 `address public settler`（仅此地址可调用 `releasePayment`）。
-- **核心函数**：
-  - `lockPayment(uint256 agentId, uint256 amount, bytes32 requestHash, uint256 duration)`:
-    - 校验 `amount > 0`。
-    - 将 `paymentToken` 从 `msg.sender` 划转至当前合约。
-    - 记录锁定结构 `PaymentLock`，状态设为 `Locked`，到期时间为 `block.timestamp + duration`。
-    - 返回唯一的 `lockId`（使用 `keccak256(abi.encodePacked(...))` 生成）。
-  - `releasePayment(bytes32 lockId, bytes calldata proof, address agentOwner)`:
-    - **仅限 `settler` 调用** (使用 `onlySettler` modifier)。
-    - 确保 `lock.status == PaymentStatus.Locked` 且未超时。
-    - 调用 `validationRegistry.validateProof(lock.agentId, "TEE", proof)` 必须返回 `true`。
-    - 标记该 lock 为 `Released`。
-    - 标记 payer 对该 agentId 已有付款记录（即 `hasPaid[payer][agentId] = true`）。
-    - 将锁定资金划转给传入的 `agentOwner`。
-  - `refund(bytes32 lockId)`:
-    - 任何人都可以触发，但必须在锁定超时之后（`block.timestamp > lock.expiresAt`）且状态为 `Locked` 时。
-    - 标记为 `Refunded`，并将资金退回 `payer`。
-- **自定义错误**：
-  - 例如：`NotSettler()`, `InvalidStatus()`, `LockExpired()`, `LockNotExpired()`, `ProofValidationFailed()`, `TransferFailed()`。
+### 2. 托管结算绑定 TBA 防御
+- 修改 `PaymentEscrow.sol`：
+  - 增加状态变量：
+    ```solidity
+    address public erc6551Registry;
+    address public tbaImplementation;
+    address public agentIdentityRegistry;
+    ```
+  - 在 `initialize` / 构造函数中支持对这三个变量的配置。
+  - 在 `batchSettle` 与原有的 `releasePayment` 结算转账前，增加安全防线：
+    - 调用 `IERC6551Registry(erc6551Registry).account(tbaImplementation, bytes32(0), block.chainid, agentIdentityRegistry, lock.agentId)` 计算专属 TBA 地址。
+    - 校验接收方 `agentOwner` 必须等于该计算出来的专属 TBA 地址，如果不匹配，抛出 `InvalidAddress()` 异常拦截结算。
 
-### 3. 测试与 TDD 验证
-- 编写 `contracts/test/PaymentEscrowTest.t.sol`。
-- 测试覆盖：
-  - 正常的资金锁定、验证 Proof 后释放。
-  - 未超时的退款拦截，超时的成功退款。
-  - 非 Settler 触发释放报错拦截。
-  - 验证付款记录是否正确传递，使得 `ReputationRegistry` 顺利通过付款判断并提交反馈。
+### 3. 单元测试覆盖
+- 在 `PaymentEscrowTest.t.sol` 中：
+  - 编写一个 Mock ERC-6551 Registry 合约（用于 `account` 反查和 `createAccount` 自动部署模拟）。
+  - 在 `setUp` 阶段部署 `AgentTokenBoundAccount` 实现模板和 Mock Registry。
+  - 编写 `test_BatchSettleToTBARecipientSuccess()`：校验批量结算时，结算金额成功转入对应的 TBA 账户，剩余资金返回 payer。
+  - 编写 `test_BatchSettleToNonTBARecipientReverts()`：校验当 `agentOwner` 传入普通 EOA 地址时，被托管合约成功 Revert 拦截。
+  - 编写 `test_TBAExecuteOnlyOwner()`：校验由 EOA 尝试调用 TBA 账户的 `execute` 转移资金被 Revert 拦截，而 NFT owner 调用则成功通过。
 
 ## 验证与测试命令
 在 `contracts` 目录下执行：
 ```bash
-forge test
+forge test -v
 ```
-要求：所有测试正常通过。
+要求：所有测试编译无误并 100% 通过。

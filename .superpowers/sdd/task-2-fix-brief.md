@@ -1,36 +1,41 @@
-# Task 2 修复 Brief: 信誉防刷分加固与合约安全加固
+# Task 2 修复 Brief: TBA 状态一致性及 Escrow 静态优化
 
 ## 问题描述与修复要求
 
-### 1. 修复防刷分漏洞 (Reputation Registry Bypass)
-- **移去 `_hasPaid` 机制**：在 `PaymentEscrow.sol` 移除 `_hasPaid` 的存储和更新。
-- **绑定 `lockId` 到评分系统**：
-  - 修改 `ReputationRegistry.sol` 的 `addFeedback` 为：
-    `function addFeedback(bytes32 lockId, uint8 score, bool completed) external`
-  - 在 `addFeedback` 中通过 `paymentEscrow.getLock(lockId)` 获取锁定详情 `lock`：
-    - 校验 `lock.payer == msg.sender`，不符合则抛出 `NotPayer()`。
-    - 校验 `lock.status == PaymentStatus.Released`，不符合则抛出 `PaymentNotReleased()`。
-    - 校验该 `lockId` 没有被评价过（定义 `mapping(bytes32 => bool) private _evaluatedLocks`），如果已被评分，抛出 `LockAlreadyEvaluated()`。
-  - 提取 `lock.agentId` 进行数据聚合。
+### 1. 修复 TBA state() 规范一致性缺陷 (`contracts/src/payment/AgentTokenBoundAccount.sol`)
+- 添加私有状态变量 `uint256 private _state;`。
+- 将 `state()` 视图方法由 `pure` 重构为 `view`，并返回该状态值。
+- 在 `execute` 方法成功执行外部 `call` 调用后，递增该状态值：`_state++`，以符合 ERC-6551 标准对状态改变的更新要求。
 
-### 2. 安全边界防御
-- **接收方零地址防空**：在 `PaymentEscrow.sol` 的 `releasePayment` 方法中，增加对 `agentOwner != address(0)` 的校验，否则抛出 `InvalidAddress()` 自定义错误。
-- **时序校验**：在 `lockPayment` 限制 `duration > 0`，若为 0 抛出 `InvalidDuration()`。
-- **构造函数校验**：所有构造函数在绑定外部合约地址（如 `paymentToken`、`validationRegistry` 等）时，确保传入参数非 `address(0)`。
+### 2. 优化错误回滚冒泡 (`contracts/src/payment/AgentTokenBoundAccount.sol`)
+- 在 `execute` 外部调用成功与否的判断中，若执行失败，将原有的报错逻辑重构为基于 Assembly 提取并重新抛出（Bubble Up）目标合约返回的原始回滚报错数据：
+  ```solidity
+  if (!success) {
+      assembly {
+          revert(add(result, 32), mload(result))
+      }
+  }
+  ```
 
-### 3. 分页机制
-- 优化 `ReputationRegistry.sol` 的 `getRecords(uint256 agentId, uint256 offset, uint256 limit)`，不再直接返回全局大数组，避免 Gas 耗尽。
+### 3. 将托管静态地址声明为 immutable (`contracts/src/payment/PaymentEscrow.sol`)
+- 将 `erc6551Registry`、`tbaImplementation` 以及 `agentIdentityRegistry` 状态变量均声明为 `immutable` 类型：
+  ```solidity
+  address public immutable erc6551Registry;
+  address public immutable tbaImplementation;
+  address public immutable agentIdentityRegistry;
+  ```
+- 确保在构造函数中执行赋值。
 
-### 4. 逆向测试与通过验证
-- 在 `PaymentEscrowTest.t.sol` 中添加：
-  - `test_addFeedbackDuplicateReverts`：验证对同一个 `lockId` 两次评价会抛出 `LockAlreadyEvaluated()` 异常。
-  - `test_addFeedbackUnauthorizedPayerReverts`：验证非该锁的 payer 尝试对 `lockId` 评分时被拒绝并抛出 `NotPayer()`。
-  - `test_addFeedbackNotReleasedReverts`：验证锁定但未释放的锁无法评分。
-  - `test_releaseZeroAddressReverts`：验证 settler 传入零地址接收人会被拦截。
+### 4. 冗余变量清理与单测追加 (`contracts/test/PaymentEscrowTest.t.sol`)
+- 移除 `MockERC6551Registry` 合约中定义的未使用冗余变量 `_accounts`。
+- 新增单元测试 `test_TBAExecuteIncrementsState()`：
+  - 模拟 NFT 拥有者通过 TBA 执行一笔普通转账（或向 mock 合约发起调用）。
+  - 在调用执行前后分别查询 `state()`。
+  - 断言调用后的状态值确实相比调用前递增了 1。
 
 ## 验证与测试命令
 在 `contracts` 目录下执行：
 ```bash
-forge test
+forge test -v
 ```
-要求：所有原有与新写测试 100% 成功。
+要求：所有测试正常通过。

@@ -1,559 +1,589 @@
-diff --git a/contracts/src/identity/ReputationRegistry.sol b/contracts/src/identity/ReputationRegistry.sol
+diff --git a/contracts/src/interfaces/IERC6551Account.sol b/contracts/src/interfaces/IERC6551Account.sol
 new file mode 100644
-index 0000000..69b8d2d
+index 0000000..83fe185
 --- /dev/null
-+++ b/contracts/src/identity/ReputationRegistry.sol
-@@ -0,0 +1,119 @@
++++ b/contracts/src/interfaces/IERC6551Account.sol
+@@ -0,0 +1,22 @@
 +// SPDX-License-Identifier: MIT
 +pragma solidity ^0.8.20;
 +
-+interface IPaymentEscrow {
-+    enum PaymentStatus { None, Locked, Released, Refunded }
++interface IERC6551Account {
++    receive() external payable;
 +
-+    struct PaymentLock {
-+        address payer;
-+        uint256 agentId;
-+        uint256 amount;
-+        bytes32 requestHash;
-+        uint256 expiresAt;
-+        PaymentStatus status;
-+    }
++    function token()
++        external
++        view
++        returns (
++            uint256 chainId,
++            address tokenContract,
++            uint256 tokenId
++        );
 +
-+    function getLock(bytes32 lockId) external view returns (PaymentLock memory);
++    function state() external view returns (uint256);
++
++    function isValidSigner(address signer, bytes calldata context)
++        external
++        view
++        returns (bytes4 magicValue);
 +}
+diff --git a/contracts/src/payment/AgentTokenBoundAccount.sol b/contracts/src/payment/AgentTokenBoundAccount.sol
+new file mode 100644
+index 0000000..6338118
+--- /dev/null
++++ b/contracts/src/payment/AgentTokenBoundAccount.sol
+@@ -0,0 +1,72 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.20;
 +
-+contract ReputationRegistry {
-+    struct FeedbackRecord {
-+        uint8 score;
-+        bytes32 lockId;
-+        bool completed;
-+        address reviewer;
++import "../interfaces/IERC6551Account.sol";
++import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
++
++contract AgentTokenBoundAccount is IERC6551Account {
++    uint256 public immutable chainIdVal;
++    address public immutable tokenContractVal;
++    uint256 public immutable tokenIdVal;
++    uint256 private _state;
++
++    error NotOwner();
++
++    constructor(uint256 _chainId, address _tokenContract, uint256 _tokenId) {
++        chainIdVal = _chainId;
++        tokenContractVal = _tokenContract;
++        tokenIdVal = _tokenId;
 +    }
 +
-+    IPaymentEscrow public immutable paymentEscrow;
++    receive() external payable override {}
 +
-+    // agentId => feedback records
-+    mapping(uint256 => FeedbackRecord[]) private _records;
-+    // agentId => total score
-+    mapping(uint256 => uint256) private _totalScore;
-+    // lockId => evaluated status
-+    mapping(bytes32 => bool) private _evaluatedLocks;
-+
-+    event FeedbackAdded(
-+        uint256 indexed agentId,
-+        address indexed reviewer,
-+        uint8 score,
-+        bytes32 indexed lockId,
-+        bool completed
-+    );
-+
-+    error InvalidScore();
-+    error LockAlreadyEvaluated();
-+    error NotPayer();
-+    error PaymentNotReleased();
-+    error InvalidAddress();
-+
-+    constructor(address escrowAddress) {
-+        if (escrowAddress == address(0)) revert InvalidAddress();
-+        paymentEscrow = IPaymentEscrow(escrowAddress);
++    function token()
++        external
++        view
++        override
++        returns (
++            uint256,
++            address,
++            uint256
++        )
++    {
++        return (chainIdVal, tokenContractVal, tokenIdVal);
 +    }
 +
-+    function addFeedback(
-+        bytes32 lockId,
-+        uint8 score,
-+        bool completed
-+    ) external {
-+        if (score < 1 || score > 5) revert InvalidScore();
-+        if (_evaluatedLocks[lockId]) revert LockAlreadyEvaluated();
-+
-+        IPaymentEscrow.PaymentLock memory lock = paymentEscrow.getLock(lockId);
-+        if (lock.payer != msg.sender) revert NotPayer();
-+        if (lock.status != IPaymentEscrow.PaymentStatus.Released) revert PaymentNotReleased();
-+
-+        FeedbackRecord memory newRecord = FeedbackRecord({
-+            score: score,
-+            lockId: lockId,
-+            completed: completed,
-+            reviewer: msg.sender
-+        });
-+
-+        _records[lock.agentId].push(newRecord);
-+        _totalScore[lock.agentId] += score;
-+        _evaluatedLocks[lockId] = true;
-+
-+        emit FeedbackAdded(lock.agentId, msg.sender, score, lockId, completed);
++    function state() external view override returns (uint256) {
++        return _state;
 +    }
 +
-+    function getReputation(
-+        uint256 agentId
-+    ) external view returns (uint256 averageScore, uint256 totalReviews) {
-+        totalReviews = _records[agentId].length;
-+        if (totalReviews == 0) {
-+            return (0, 0);
++    function isValidSigner(address signer, bytes calldata)
++        external
++        view
++        override
++        returns (bytes4 magicValue)
++    {
++        if (signer == IERC721(tokenContractVal).ownerOf(tokenIdVal)) {
++            return IERC6551Account.isValidSigner.selector;
 +        }
-+        averageScore = (_totalScore[agentId] * 100) / totalReviews;
-+        return (averageScore, totalReviews);
++        return bytes4(0);
 +    }
 +
-+    function getRecords(
-+        uint256 agentId,
-+        uint256 offset,
-+        uint256 limit
-+    ) external view returns (FeedbackRecord[] memory) {
-+        FeedbackRecord[] storage allRecords = _records[agentId];
-+        uint256 total = allRecords.length;
-+
-+        if (offset >= total || limit == 0) {
-+            return new FeedbackRecord[](0);
++    function execute(
++        address to,
++        uint256 value,
++        bytes calldata data
++    ) external payable returns (bytes memory) {
++        if (msg.sender != IERC721(tokenContractVal).ownerOf(tokenIdVal)) {
++            revert NotOwner();
 +        }
 +
-+        uint256 size = limit;
-+        if (offset + limit > total) {
-+            size = total - offset;
++        (bool success, bytes memory result) = to.call{value: value}(data);
++        if (!success) {
++            assembly {
++                revert(add(result, 32), mload(result))
++            }
 +        }
 +
-+        FeedbackRecord[] memory result = new FeedbackRecord[](size);
-+        for (uint256 i = 0; i < size; i++) {
-+            result[i] = allRecords[offset + i];
-+        }
++        _state++;
++
 +        return result;
-+    }
-+
-+    function isLockEvaluated(bytes32 lockId) external view returns (bool) {
-+        return _evaluatedLocks[lockId];
 +    }
 +}
 diff --git a/contracts/src/payment/PaymentEscrow.sol b/contracts/src/payment/PaymentEscrow.sol
-new file mode 100644
-index 0000000..9f91612
---- /dev/null
+index edb357d..403a606 100644
+--- a/contracts/src/payment/PaymentEscrow.sol
 +++ b/contracts/src/payment/PaymentEscrow.sol
-@@ -0,0 +1,141 @@
-+// SPDX-License-Identifier: MIT
-+pragma solidity ^0.8.20;
+@@ -1,16 +1,17 @@
+ // SPDX-License-Identifier: MIT
+ pragma solidity ^0.8.20;
+ 
+ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
++import "../interfaces/IERC6551Registry.sol";
+ 
+ interface IValidationRegistry {
+     function validateProof(
+         uint256 agentId,
+         string calldata validationType,
+         bytes calldata proof
+     ) external view returns (bool);
+ }
+ 
+ contract PaymentEscrow {
+@@ -32,20 +33,23 @@ contract PaymentEscrow {
+         uint256 agentId;
+         uint256 maxAmount;
+         uint256 settledAmount;
+         uint256 expiresAt;
+         PaymentStatus status;
+     }
+ 
+     IERC20 public immutable paymentToken;
+     IValidationRegistry public immutable validationRegistry;
+     address public immutable settler;
++    address public immutable erc6551Registry;
++    address public immutable tbaImplementation;
++    address public immutable agentIdentityRegistry;
+ 
+     uint256 private _nonce;
+     mapping(bytes32 => PaymentLock) private _locks;
+     mapping(bytes32 => ChannelLock) public channels;
+ 
+     bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
+     bytes32 public immutable DOMAIN_SEPARATOR;
+ 
+     event PaymentLocked(
+         bytes32 indexed lockId,
+@@ -89,27 +93,44 @@ contract PaymentEscrow {
+     error InvalidDuration();
+     error InvalidSignature();
+     error ChannelExpired();
+     error ChannelNotExpired();
+ 
+     modifier onlySettler() {
+         if (msg.sender != settler) revert NotSettler();
+         _;
+     }
+ 
+-    constructor(address _paymentToken, address _validationRegistry, address _settler) {
+-        if (_paymentToken == address(0) || _validationRegistry == address(0) || _settler == address(0)) {
++    constructor(
++        address _paymentToken,
++        address _validationRegistry,
++        address _settler,
++        address _erc6551Registry,
++        address _tbaImplementation,
++        address _agentIdentityRegistry
++    ) {
++        if (
++            _paymentToken == address(0) ||
++            _validationRegistry == address(0) ||
++            _settler == address(0) ||
++            _erc6551Registry == address(0) ||
++            _tbaImplementation == address(0) ||
++            _agentIdentityRegistry == address(0)
++        ) {
+             revert InvalidAddress();
+         }
+         paymentToken = IERC20(_paymentToken);
+         validationRegistry = IValidationRegistry(_validationRegistry);
+         settler = _settler;
++        erc6551Registry = _erc6551Registry;
++        tbaImplementation = _tbaImplementation;
++        agentIdentityRegistry = _agentIdentityRegistry;
+ 
+         DOMAIN_SEPARATOR = keccak256(
+             abi.encode(
+                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                 keccak256(bytes("PaymentEscrow")),
+                 keccak256(bytes("1")),
+                 block.chainid,
+                 address(this)
+             )
+         );
+@@ -153,20 +174,30 @@ contract PaymentEscrow {
+         bytes32 lockId,
+         bytes calldata proof,
+         address agentOwner
+     ) external onlySettler {
+         if (agentOwner == address(0)) revert InvalidAddress();
+ 
+         PaymentLock storage lock = _locks[lockId];
+         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
+         if (block.timestamp > lock.expiresAt) revert LockExpired();
+ 
++        // 专属 TBA 校验防御
++        address expectedTba = IERC6551Registry(erc6551Registry).account(
++            tbaImplementation,
++            bytes32(0),
++            block.chainid,
++            agentIdentityRegistry,
++            lock.agentId
++        );
++        if (agentOwner != expectedTba) revert InvalidAddress();
 +
-+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+         bool isValid = validationRegistry.validateProof(lock.agentId, "TEE", proof);
+         if (!isValid) revert ProofValidationFailed();
+ 
+         lock.status = PaymentStatus.Released;
+ 
+         paymentToken.safeTransfer(agentOwner, lock.amount);
+ 
+         emit PaymentReleased(lockId, agentOwner);
+     }
+ 
+@@ -220,20 +251,30 @@ contract PaymentEscrow {
+         bytes calldata signature,
+         address agentOwner
+     ) external onlySettler {
+         if (agentOwner == address(0)) revert InvalidAddress();
+ 
+         ChannelLock storage lock = channels[channelId];
+         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
+         if (block.timestamp > lock.expiresAt) revert ChannelExpired();
+         if (accumulatedAmount == 0 || accumulatedAmount > lock.maxAmount) revert InvalidAmount();
+ 
++        // 专属 TBA 校验防御
++        address expectedTba = IERC6551Registry(erc6551Registry).account(
++            tbaImplementation,
++            bytes32(0),
++            block.chainid,
++            agentIdentityRegistry,
++            lock.agentId
++        );
++        if (agentOwner != expectedTba) revert InvalidAddress();
 +
-+interface IValidationRegistry {
-+    function validateProof(
-+        uint256 agentId,
-+        string calldata validationType,
-+        bytes calldata proof
-+    ) external view returns (bool);
-+}
-+
-+contract PaymentEscrow {
-+    using SafeERC20 for IERC20;
-+
-+    enum PaymentStatus { None, Locked, Released, Refunded }
-+
-+    struct PaymentLock {
-+        address payer;
-+        uint256 agentId;
-+        uint256 amount;
-+        bytes32 requestHash;
-+        uint256 expiresAt;
-+        PaymentStatus status;
-+    }
-+
-+    IERC20 public immutable paymentToken;
-+    IValidationRegistry public immutable validationRegistry;
-+    address public immutable settler;
-+
-+    uint256 private _nonce;
-+    mapping(bytes32 => PaymentLock) private _locks;
-+
-+    event PaymentLocked(
-+        bytes32 indexed lockId,
-+        address indexed payer,
-+        uint256 indexed agentId,
-+        uint256 amount,
-+        bytes32 requestHash,
-+        uint256 expiresAt
-+    );
-+
-+    event PaymentReleased(bytes32 indexed lockId, address indexed agentOwner);
-+    event PaymentRefunded(bytes32 indexed lockId, address indexed payer);
-+
-+    error InvalidAmount();
-+    error NotSettler();
-+    error InvalidStatus();
-+    error LockExpired();
-+    error LockNotExpired();
-+    error ProofValidationFailed();
-+    error InvalidAddress();
-+    error InvalidDuration();
-+
-+    modifier onlySettler() {
-+        if (msg.sender != settler) revert NotSettler();
-+        _;
-+    }
-+
-+    constructor(address _paymentToken, address _validationRegistry, address _settler) {
-+        if (_paymentToken == address(0) || _validationRegistry == address(0) || _settler == address(0)) {
-+            revert InvalidAddress();
-+        }
-+        paymentToken = IERC20(_paymentToken);
-+        validationRegistry = IValidationRegistry(_validationRegistry);
-+        settler = _settler;
-+    }
-+
-+    function lockPayment(
-+        uint256 agentId,
-+        uint256 amount,
-+        bytes32 requestHash,
-+        uint256 duration
-+    ) external returns (bytes32 lockId) {
-+        if (amount == 0) revert InvalidAmount();
-+        if (duration == 0) revert InvalidDuration();
-+
-+        paymentToken.safeTransferFrom(msg.sender, address(this), amount);
-+
-+        lockId = keccak256(abi.encodePacked(
-+            msg.sender,
-+            agentId,
-+            amount,
-+            requestHash,
-+            block.timestamp,
-+            _nonce++
-+        ));
-+
-+        uint256 expiresAt = block.timestamp + duration;
-+
-+        _locks[lockId] = PaymentLock({
-+            payer: msg.sender,
-+            agentId: agentId,
-+            amount: amount,
-+            requestHash: requestHash,
-+            expiresAt: expiresAt,
-+            status: PaymentStatus.Locked
-+        });
-+
-+        emit PaymentLocked(lockId, msg.sender, agentId, amount, requestHash, expiresAt);
-+    }
-+
-+    function releasePayment(
-+        bytes32 lockId,
-+        bytes calldata proof,
-+        address agentOwner
-+    ) external onlySettler {
-+        if (agentOwner == address(0)) revert InvalidAddress();
-+
-+        PaymentLock storage lock = _locks[lockId];
-+        if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
-+        if (block.timestamp > lock.expiresAt) revert LockExpired();
-+
-+        bool isValid = validationRegistry.validateProof(lock.agentId, "TEE", proof);
-+        if (!isValid) revert ProofValidationFailed();
-+
-+        lock.status = PaymentStatus.Released;
-+
-+        paymentToken.safeTransfer(agentOwner, lock.amount);
-+
-+        emit PaymentReleased(lockId, agentOwner);
-+    }
-+
-+    function refund(bytes32 lockId) external {
-+        PaymentLock storage lock = _locks[lockId];
-+        if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
-+        if (block.timestamp <= lock.expiresAt) revert LockNotExpired();
-+
-+        lock.status = PaymentStatus.Refunded;
-+
-+        paymentToken.safeTransfer(lock.payer, lock.amount);
-+
-+        emit PaymentRefunded(lockId, lock.payer);
-+    }
-+
-+    function getLock(bytes32 lockId) external view returns (PaymentLock memory) {
-+        return _locks[lockId];
-+    }
-+}
-diff --git a/contracts/test/MockERC20.sol b/contracts/test/MockERC20.sol
-new file mode 100644
-index 0000000..2c52776
---- /dev/null
-+++ b/contracts/test/MockERC20.sol
-@@ -0,0 +1,12 @@
-+// SPDX-License-Identifier: MIT
-+pragma solidity ^0.8.20;
-+
-+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-+
-+contract MockERC20 is ERC20 {
-+    constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
-+
-+    function mint(address to, uint256 amount) external {
-+        _mint(to, amount);
-+    }
-+}
+         bytes32 hashStruct = keccak256(abi.encode(
+             CHANNEL_SETTLE_TYPEHASH,
+             channelId,
+             accumulatedAmount
+         ));
+         bytes32 digest = keccak256(abi.encodePacked(
+             "\x19\x01",
+             DOMAIN_SEPARATOR,
+             hashStruct
+         ));
 diff --git a/contracts/test/PaymentEscrowTest.t.sol b/contracts/test/PaymentEscrowTest.t.sol
-new file mode 100644
-index 0000000..10c3587
---- /dev/null
+index 09e3c8c..66d7a69 100644
+--- a/contracts/test/PaymentEscrowTest.t.sol
 +++ b/contracts/test/PaymentEscrowTest.t.sol
-@@ -0,0 +1,263 @@
-+// SPDX-License-Identifier: MIT
-+pragma solidity ^0.8.20;
+@@ -1,61 +1,136 @@
+ // SPDX-License-Identifier: MIT
+ pragma solidity ^0.8.20;
+ 
+ import "forge-std/Test.sol";
+ import "../src/payment/PaymentEscrow.sol";
+ import "../src/identity/ReputationRegistry.sol";
+ import "../src/identity/ValidationRegistry.sol";
+ import "./MockERC20.sol";
++import "../src/payment/AgentTokenBoundAccount.sol";
++import "../src/identity/AgentIdentityRegistry.sol";
+ 
+ contract MockValidator is IValidator {
+     bool private _shouldPass;
+ 
+     constructor(bool shouldPass) {
+         _shouldPass = shouldPass;
+     }
+ 
+     function setShouldPass(bool shouldPass) external {
+         _shouldPass = shouldPass;
+     }
+ 
+     function validate(uint256 /* agentId */, bytes calldata /* proof */) external view override returns (bool) {
+         return _shouldPass;
+     }
+ }
+ 
++contract MockERC6551Registry is IERC6551Registry {
 +
-+import "forge-std/Test.sol";
-+import "../src/payment/PaymentEscrow.sol";
-+import "../src/identity/ReputationRegistry.sol";
-+import "../src/identity/ValidationRegistry.sol";
-+import "./MockERC20.sol";
-+
-+contract MockValidator is IValidator {
-+    bool private _shouldPass;
-+
-+    constructor(bool shouldPass) {
-+        _shouldPass = shouldPass;
++    function createAccount(
++        address implementation,
++        bytes32 salt,
++        uint256 chainId,
++        address tokenContract,
++        uint256 tokenId
++    ) external override returns (address) {
++        address addr = account(implementation, salt, chainId, tokenContract, tokenId);
++        if (addr.code.length == 0) {
++            new AgentTokenBoundAccount{salt: salt}(chainId, tokenContract, tokenId);
++        }
++        return addr;
 +    }
 +
-+    function setShouldPass(bool shouldPass) external {
-+        _shouldPass = shouldPass;
-+    }
-+
-+    function validate(uint256 /* agentId */, bytes calldata /* proof */) external view override returns (bool) {
-+        return _shouldPass;
++    function account(
++        address /* implementation */,
++        bytes32 salt,
++        uint256 chainId,
++        address tokenContract,
++        uint256 tokenId
++    ) public view override returns (address) {
++        bytes32 codeHash = keccak256(
++            abi.encodePacked(
++                type(AgentTokenBoundAccount).creationCode,
++                abi.encode(chainId, tokenContract, tokenId)
++            )
++        );
++        
++        bytes32 data = keccak256(
++            abi.encodePacked(
++                bytes1(0xff),
++                address(this),
++                salt,
++                codeHash
++            )
++        );
++        return address(uint160(uint256(data)));
 +    }
 +}
 +
-+contract PaymentEscrowTest is Test {
-+    PaymentEscrow public escrow;
-+    ReputationRegistry public reputation;
-+    ValidationRegistry public validationRegistry;
-+    MockERC20 public usdc;
-+    MockValidator public validator;
+ contract PaymentEscrowTest is Test {
+     PaymentEscrow public escrow;
+     ReputationRegistry public reputation;
+     ValidationRegistry public validationRegistry;
+     MockERC20 public usdc;
+     MockValidator public validator;
+ 
++    MockERC6551Registry public registry;
++    AgentTokenBoundAccount public tbaImplementation;
++    AgentIdentityRegistry public agentIdentityRegistry;
 +
-+    address public settler = address(0x1);
-+    address public payer = address(0x2);
-+    address public agentOwner = address(0x3);
-+    uint256 public agentId = 88;
+     address public settler = address(0x1);
+     address public payer = address(0x2);
+     address public agentOwner = address(0x3);
+     uint256 public agentId = 88;
+ 
+     bytes32 public requestHash = keccak256("test_request");
+     bytes public dummyProof = "valid_tee_proof";
+ 
+     function setUp() public {
+         usdc = new MockERC20("USDC Mock", "USDC");
+         validationRegistry = new ValidationRegistry();
+-        
+-        escrow = new PaymentEscrow(address(usdc), address(validationRegistry), settler);
 +
-+    bytes32 public requestHash = keccak256("test_request");
-+    bytes public dummyProof = "valid_tee_proof";
++        registry = new MockERC6551Registry();
++        tbaImplementation = new AgentTokenBoundAccount(block.chainid, address(0), 0);
++        agentIdentityRegistry = new AgentIdentityRegistry();
 +
-+    function setUp() public {
-+        usdc = new MockERC20("USDC Mock", "USDC");
-+        validationRegistry = new ValidationRegistry();
-+        
-+        escrow = new PaymentEscrow(address(usdc), address(validationRegistry), settler);
-+        reputation = new ReputationRegistry(address(escrow));
++        escrow = new PaymentEscrow(
++            address(usdc),
++            address(validationRegistry),
++            settler,
++            address(registry),
++            address(tbaImplementation),
++            address(agentIdentityRegistry)
++        );
+         reputation = new ReputationRegistry(address(escrow));
+ 
+         // 注册 TEE 验证器
+         validator = new MockValidator(true);
+         validationRegistry.registerValidator("TEE", address(validator));
+ 
++        // 循环注册 Agent NFT 使得 agentId = 88 的 owner 是 address(0x3) (原本的 EOA agentOwner)
++        address nftOwner = address(0x3);
++        for (uint256 i = 1; i <= 88; i++) {
++            vm.prank(nftOwner);
++            agentIdentityRegistry.registerAgent("model", "endpoint", bytes32(0), "caps");
++        }
 +
-+        // 注册 TEE 验证器
-+        validator = new MockValidator(true);
-+        validationRegistry.registerValidator("TEE", address(validator));
++        // 部署专属 TBA 并赋值给 agentOwner
++        agentOwner = registry.createAccount(
++            address(tbaImplementation),
++            bytes32(0),
++            block.chainid,
++            address(agentIdentityRegistry),
++            agentId
++        );
 +
-+        // 给 payer 分发代币并授权
-+        usdc.mint(payer, 10000 * 10**6);
-+        vm.prank(payer);
+         // 给 payer 分发代币并授权
+         usdc.mint(payer, 10000 * 10**6);
+         vm.prank(payer);
+         usdc.approve(address(escrow), type(uint256).max);
+     }
+ 
+     // 1. 测试正常资金锁定与释放流程
+     function test_LockAndReleaseSuccess() public {
+         uint256 amount = 100 * 10**6;
+         uint256 duration = 3600;
+@@ -242,27 +317,36 @@ contract PaymentEscrowTest is Test {
+     // 11. 边界加固测试：验证 lockPayment 限制 duration > 0 (InvalidDuration)
+     function test_lockPaymentZeroDurationReverts() public {
+         vm.expectRevert(PaymentEscrow.InvalidDuration.selector);
+         vm.prank(payer);
+         escrow.lockPayment(agentId, 100 * 10**6, requestHash, 0);
+     }
+ 
+     // 12. 边界加固测试：验证构造函数空地址防御
+     function test_constructorZeroAddressReverts() public {
+         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+-        new PaymentEscrow(address(0), address(validationRegistry), settler);
++        new PaymentEscrow(address(0), address(validationRegistry), settler, address(registry), address(tbaImplementation), address(agentIdentityRegistry));
+ 
+         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+-        new PaymentEscrow(address(usdc), address(0), settler);
++        new PaymentEscrow(address(usdc), address(0), settler, address(registry), address(tbaImplementation), address(agentIdentityRegistry));
+ 
+         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+-        new PaymentEscrow(address(usdc), address(validationRegistry), address(0));
++        new PaymentEscrow(address(usdc), address(validationRegistry), address(0), address(registry), address(tbaImplementation), address(agentIdentityRegistry));
++
++        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
++        new PaymentEscrow(address(usdc), address(validationRegistry), settler, address(0), address(tbaImplementation), address(agentIdentityRegistry));
++
++        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
++        new PaymentEscrow(address(usdc), address(validationRegistry), settler, address(registry), address(0), address(agentIdentityRegistry));
++
++        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
++        new PaymentEscrow(address(usdc), address(validationRegistry), settler, address(registry), address(tbaImplementation), address(0));
+ 
+         vm.expectRevert(ReputationRegistry.InvalidAddress.selector);
+         new ReputationRegistry(address(0));
+     }
+ 
+     bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
+ 
+     // 13. 测试正常状态通道锁定与 EIP-712 批量结算流程
+     function test_ChannelBatchSettle() public {
+         uint256 payerPrivateKey = 0xA11CE;
+@@ -588,11 +672,144 @@ contract PaymentEscrowTest is Test {
+ 
+         // 第一遍成功结算
+         vm.prank(settler);
+         escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+ 
+         // 尝试进行二次结算
+         vm.expectRevert(PaymentEscrow.InvalidStatus.selector);
+         vm.prank(settler);
+         escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+     }
++
++    // 22. 测试批量结算资金流入 TBA 账户并且 payer 收到退款
++    function test_BatchSettleToTBARecipientSuccess() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
++
++        // 充值并授权
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
 +        usdc.approve(address(escrow), type(uint256).max);
-+    }
 +
-+    // 1. 测试正常资金锁定与释放流程
-+    function test_LockAndReleaseSuccess() public {
-+        uint256 amount = 100 * 10**6;
++        uint256 maxAmount = 500 * 10**6;
 +        uint256 duration = 3600;
 +
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, amount, requestHash, duration);
++        // 锁定通道
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, duration);
 +
-+        PaymentEscrow.PaymentLock memory lock = escrow.getLock(lockId);
-+        assertEq(lock.payer, payer);
-+        assertEq(lock.agentId, agentId);
-+        assertEq(lock.amount, amount);
-+        assertEq(lock.requestHash, requestHash);
-+        assertEq(lock.expiresAt, block.timestamp + duration);
-+        assertEq(uint256(lock.status), 1); // Locked
++        // 线下生成 EIP-712 签名
++        uint256 accumulatedAmount = 300 * 10**6;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
 +
-+        assertEq(usdc.balanceOf(address(escrow)), amount);
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
 +
-+        // settler 释放款项
++        uint256 agentOwnerBalanceBefore = usdc.balanceOf(agentOwner);
++        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
++
++        // settler 结算
 +        vm.prank(settler);
-+        escrow.releasePayment(lockId, dummyProof, agentOwner);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
 +
-+        lock = escrow.getLock(lockId);
-+        assertEq(uint256(lock.status), 2); // Released
-+        assertEq(usdc.balanceOf(agentOwner), amount);
++        // 验证资金：TBA 账户收到 300，payer 收到退款 200
++        assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + accumulatedAmount);
++        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + (maxAmount - accumulatedAmount));
 +    }
 +
-+    // 2. 测试非 Settler 越权释放拦截
-+    function test_ReleaseForbiddenForNonSettler() public {
-+        uint256 amount = 100 * 10**6;
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, amount, requestHash, 3600);
++    // 23. 测试非 TBA 结算接收人被 Revert 拦截
++    function test_BatchSettleToNonTBARecipientReverts() public {
++        uint256 payerPrivateKey = 0xA11CE;
++        address customPayer = vm.addr(payerPrivateKey);
 +
-+        vm.expectRevert(PaymentEscrow.NotSettler.selector);
-+        vm.prank(payer);
-+        escrow.releasePayment(lockId, dummyProof, agentOwner);
++        usdc.mint(customPayer, 1000 * 10**6);
++        vm.prank(customPayer);
++        usdc.approve(address(escrow), type(uint256).max);
++
++        vm.prank(customPayer);
++        bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
++
++        uint256 accumulatedAmount = 300 * 10**6;
++        bytes32 hashStruct = keccak256(abi.encode(
++            CHANNEL_SETTLE_TYPEHASH,
++            channelId,
++            accumulatedAmount
++        ));
++        bytes32 digest = keccak256(abi.encodePacked(
++            "\x19\x01",
++            escrow.DOMAIN_SEPARATOR(),
++            hashStruct
++        ));
++
++        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
++        bytes memory signature = abi.encodePacked(r, s, v);
++
++        // 传入一个普通 EOA 地址作为接收方，应该被 Revert
++        address nonTbaRecipient = address(0x999);
++        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
++        vm.prank(settler);
++        escrow.batchSettle(channelId, accumulatedAmount, signature, nonTbaRecipient);
 +    }
 +
-+    // 3. 测试超时释放拦截
-+    function test_ReleaseExpiredLockFails() public {
-+        uint256 amount = 100 * 10**6;
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, amount, requestHash, 3600);
++    // 24. 测试 TBA.execute 只有 NFT owner 可调用
++    function test_TBAExecuteOnlyOwner() public {
++        // 先往 TBA 账户中转入一些 USDC 作为余额
++        uint256 tbaBalance = 100 * 10**6;
++        usdc.mint(agentOwner, tbaBalance);
++        assertEq(usdc.balanceOf(agentOwner), tbaBalance);
 +
-+        // 快进时间到超时后
-+        skip(3601);
++        // NFT owner 是 address(0x3) (nftOwner)
++        address nftOwner = address(0x3);
++        address hacker = address(0x888);
 +
-+        vm.expectRevert(PaymentEscrow.LockExpired.selector);
-+        vm.prank(settler);
-+        escrow.releasePayment(lockId, dummyProof, agentOwner);
-+    }
++        // 构造 transfer 调用数据
++        bytes memory callData = abi.encodeWithSelector(
++            IERC20.transfer.selector,
++            address(0x555),
++            50 * 10**6
++        );
 +
-+    // 4. 测试无效 Proof 验证拦截
-+    function test_ReleaseInvalidProofFails() public {
-+        uint256 amount = 100 * 10**6;
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, amount, requestHash, 3600);
-+
-+        // 将验证器设置为失败
-+        validator.setShouldPass(false);
-+
-+        vm.expectRevert(PaymentEscrow.ProofValidationFailed.selector);
-+        vm.prank(settler);
-+        escrow.releasePayment(lockId, dummyProof, agentOwner);
-+    }
-+
-+    // 5. 测试退款：未超时拦截与超时退款成功
-+    function test_RefundSuccessAndLockNotExpiredRevert() public {
-+        uint256 amount = 100 * 10**6;
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, amount, requestHash, 3600);
-+
-+        // 未超时退款应被拦截
-+        vm.expectRevert(PaymentEscrow.LockNotExpired.selector);
-+        escrow.refund(lockId);
-+
-+        // 快进时间到超时后
-+        skip(3601);
-+
-+        uint256 payerBalanceBefore = usdc.balanceOf(payer);
-+        escrow.refund(lockId);
-+
-+        PaymentEscrow.PaymentLock memory lock = escrow.getLock(lockId);
-+        assertEq(uint256(lock.status), 3); // Refunded
-+        assertEq(usdc.balanceOf(payer), payerBalanceBefore + amount);
-+    }
-+
-+    // 6. 测试信誉评价整合与分页查询
-+    function test_ReputationRegistryFullFlow() public {
-+        vm.prank(payer);
-+        bytes32 lockId1 = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
-+
-+        bytes32 requestHash2 = keccak256("test_request2");
-+        vm.prank(payer);
-+        bytes32 lockId2 = escrow.lockPayment(agentId, 150 * 10**6, requestHash2, 3600);
-+
-+        // 释放这两个付款
-+        vm.prank(settler);
-+        escrow.releasePayment(lockId1, dummyProof, agentOwner);
-+        vm.prank(settler);
-+        escrow.releasePayment(lockId2, dummyProof, agentOwner);
-+
-+        // 添加评分
-+        vm.prank(payer);
-+        reputation.addFeedback(lockId1, 5, true);
-+        vm.prank(payer);
-+        reputation.addFeedback(lockId2, 4, true);
-+
-+        // 校验平均分和记录数
-+        (uint256 averageScore, uint256 totalReviews) = reputation.getReputation(agentId);
-+        assertEq(totalReviews, 2);
-+        assertEq(averageScore, 450); // (5 + 4) * 100 / 2 = 450
-+
-+        // 校验分页明细列表
-+        ReputationRegistry.FeedbackRecord[] memory records = reputation.getRecords(agentId, 0, 10);
-+        assertEq(records.length, 2);
-+        assertEq(records[0].score, 5);
-+        assertEq(records[0].lockId, lockId1);
-+        assertTrue(records[0].completed);
-+        assertEq(records[0].reviewer, payer);
-+
-+        // 测试分页越界及边界
-+        ReputationRegistry.FeedbackRecord[] memory paged1 = reputation.getRecords(agentId, 0, 1);
-+        assertEq(paged1.length, 1);
-+        assertEq(paged1[0].score, 5);
-+
-+        ReputationRegistry.FeedbackRecord[] memory paged2 = reputation.getRecords(agentId, 1, 1);
-+        assertEq(paged2.length, 1);
-+        assertEq(paged2[0].score, 4);
-+
-+        ReputationRegistry.FeedbackRecord[] memory pagedEmpty = reputation.getRecords(agentId, 2, 5);
-+        assertEq(pagedEmpty.length, 0);
-+    }
-+
-+    // 7. 逆向测试：验证对同一个 lockId 两次评价抛出 LockAlreadyEvaluated() 异常
-+    function test_addFeedbackDuplicateReverts() public {
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
-+
-+        vm.prank(settler);
-+        escrow.releasePayment(lockId, dummyProof, agentOwner);
-+
-+        vm.prank(payer);
-+        reputation.addFeedback(lockId, 5, true);
-+
-+        vm.expectRevert(ReputationRegistry.LockAlreadyEvaluated.selector);
-+        vm.prank(payer);
-+        reputation.addFeedback(lockId, 4, true);
-+    }
-+
-+    // 8. 逆向测试：验证非该锁的 payer 尝试评分会被拒绝并抛出 NotPayer()
-+    function test_addFeedbackUnauthorizedPayerReverts() public {
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
-+
-+        vm.prank(settler);
-+        escrow.releasePayment(lockId, dummyProof, agentOwner);
-+
-+        address hacker = address(0x999);
-+        vm.expectRevert(ReputationRegistry.NotPayer.selector);
++        // 非 NFT owner (hacker) 尝试 execute，应该 Revert
++        vm.expectRevert(AgentTokenBoundAccount.NotOwner.selector);
 +        vm.prank(hacker);
-+        reputation.addFeedback(lockId, 5, true);
++        AgentTokenBoundAccount(payable(agentOwner)).execute(address(usdc), 0, callData);
++
++        // NFT owner 尝试 execute，应该成功
++        vm.prank(nftOwner);
++        AgentTokenBoundAccount(payable(agentOwner)).execute(address(usdc), 0, callData);
++
++        assertEq(usdc.balanceOf(address(0x555)), 50 * 10**6);
++        assertEq(usdc.balanceOf(agentOwner), 50 * 10**6);
 +    }
 +
-+    // 9. 逆向测试：验证锁定但未释放的锁无法评分 (PaymentNotReleased)
-+    function test_addFeedbackNotReleasedReverts() public {
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
++    // 25. 测试 TBA execute 成功后能够使 state 递增
++    function test_TBAExecuteIncrementsState() public {
++        uint256 tbaBalance = 100 * 10**6;
++        usdc.mint(agentOwner, tbaBalance);
 +
-+        vm.expectRevert(ReputationRegistry.PaymentNotReleased.selector);
-+        vm.prank(payer);
-+        reputation.addFeedback(lockId, 5, true);
++        address nftOwner = address(0x3);
++        
++        bytes memory callData = abi.encodeWithSelector(
++            IERC20.transfer.selector,
++            address(0x555),
++            50 * 10**6
++        );
++
++        uint256 stateBefore = AgentTokenBoundAccount(payable(agentOwner)).state();
++
++        vm.prank(nftOwner);
++        AgentTokenBoundAccount(payable(agentOwner)).execute(address(usdc), 0, callData);
++
++        uint256 stateAfter = AgentTokenBoundAccount(payable(agentOwner)).state();
++
++        assertEq(stateAfter, stateBefore + 1);
 +    }
-+
-+    // 10. 逆向测试：验证 settler 传入零地址接收人会被拦截 (InvalidAddress)
-+    function test_releaseZeroAddressReverts() public {
-+        vm.prank(payer);
-+        bytes32 lockId = escrow.lockPayment(agentId, 100 * 10**6, requestHash, 3600);
-+
-+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-+        vm.prank(settler);
-+        escrow.releasePayment(lockId, dummyProof, address(0));
-+    }
-+
-+    // 11. 边界加固测试：验证 lockPayment 限制 duration > 0 (InvalidDuration)
-+    function test_lockPaymentZeroDurationReverts() public {
-+        vm.expectRevert(PaymentEscrow.InvalidDuration.selector);
-+        vm.prank(payer);
-+        escrow.lockPayment(agentId, 100 * 10**6, requestHash, 0);
-+    }
-+
-+    // 12. 边界加固测试：验证构造函数空地址防御
-+    function test_constructorZeroAddressReverts() public {
-+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-+        new PaymentEscrow(address(0), address(validationRegistry), settler);
-+
-+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-+        new PaymentEscrow(address(usdc), address(0), settler);
-+
-+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
-+        new PaymentEscrow(address(usdc), address(validationRegistry), address(0));
-+
-+        vm.expectRevert(ReputationRegistry.InvalidAddress.selector);
-+        new ReputationRegistry(address(0));
-+    }
-+}
+ }
