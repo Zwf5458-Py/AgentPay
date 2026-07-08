@@ -69,5 +69,24 @@
 ## 4. Git 提交记录
 
 所有代码改动已提交至当前 Git 本地分支，最新提交信息如下：
-*   **Latest Commit Hash**: `6d8d8e1f13aa0ca98966612221eff8eee291f795`
-*   **提交内容**: `test: add e2e integration test with self-contained mock services`
+*   **Latest Commit Hash**: `20928ccfcd306c9f671101126f63ae9a9fcb576d`
+*   **提交内容**: `fix: resolve maxPriceLimit edge cases, add E2E tests, and types`
+
+---
+
+## 5. 加固修复说明
+
+在首轮评审中发现 `maxPriceLimit` 存在空值合并缺陷，我们随即展开了修复与加固工作：
+
+1. **Nullish 合并漏洞修复** (`sdk/src/client.ts`)：
+   - 将 `maxPriceLimit` 初始化逻辑由 `||` 升级为 `??`，确保 `0n` 能够正确作为限制，而不会被短路为默认的 `5000n`。
+2. **防崩溃健壮性加固** (`sdk/src/client.ts`)：
+   - 在将响应头 `X-402-Price` 转换为 `bigint` 时，新增 `try-catch` 解析异常防护。若 Gateway 返回非法数值格式（如空值或非数字），可优雅拦截并抛出类型清晰的错误，防止 SDK 内部抛出 `SyntaxError` 崩溃。
+3. **安全审计与 TODO 规划** (`sdk/src/client.ts`)：
+   - 在生产环境分支中增加 TODO 代码注解，规划后续在真实的生产级智能账户授权签名中，采用 viem 的 `signTypedData` 进行 EIP-3009 结构化签名校验。
+4. **测试用例追加与覆盖** (`sdk/test/e2e.test.ts`)：
+   - 追加测试用例 `should throw error if maxPriceLimit is set to 0n`。
+   - 验证传入 `0n` 时能否正确抛出 `Price limit exceeded`，以此保障 `??` 漏洞修复的正确性。
+5. **依赖项修正与测试运行**：
+   - 引入 `@types/node` 开发依赖，以解决 strict TypeScript 编译环境下，测试文件中 node 原生 `http` 及 callback 参数隐式 `any` 的类型报错问题。
+   - 重新运行 `npm run test`，测试用例由 2 个扩充为 3 个，并全部 100% 通过（耗时 135ms）。
