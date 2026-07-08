@@ -36,3 +36,32 @@ r.Use(middleware.RateLimitMiddleware(limiter))
 ## 3. 测试与验证结果
 在 `gateway` 目录下执行 `go test -v ./...`。
 运行结果：已通过。
+
+## 4. 内存淘汰机制与 IP 欺骗防线加固修复
+
+### 4.1 内存淘汰机制实现
+为了消除在海量伪造 IP 攻击下的 OOM DoS 漏洞，对 `gateway/internal/middleware/rate_limit.go` 进行了结构重构：
+- 引入了 `limiterItem` 结构体：
+  ```go
+  type limiterItem struct {
+      limiter  *rate.Limiter
+      lastSeen time.Time
+  }
+  ```
+- 将 `IPRateLimiter` 内部的缓存类型由原本的 `rate.Limiter` 升级为 `limiterItem`。
+- 在 `GetLimiter(ip)` 每次获取/分配限流器时，均会自动更新 `lastSeen` 活跃时间戳为 `time.Now()`。
+- 实现后台清理 Worker 协程 `StartCleanup(ctx, interval, ttl)` 以及底层同步清理 `Cleanup(ttl)`。
+- 在 `gateway/cmd/gateway/main.go` 中，随网关服务启动时开启清理协程：`go limiter.StartCleanup(ctx, 1*time.Minute, 5*time.Minute)`，以 1 分钟为频率，清除已过期 5 分钟未活跃的 IP 限流器，达到垃圾回收效果，保证内存长效平稳。
+
+### 4.2 IP 欺骗防御加固
+为了防御恶意客户端伪造 `X-Forwarded-For` 绕过限流或者对他人进行恶意限流：
+- 修改 IP 提取函数 `getIP(r)`。
+- 默认情况下直接获取底层 TCP 连接的 IP（解析 `r.RemoteAddr` 并去除端口号）。
+- 仅在显式配置环境变量 `TRUST_PROXY=true` 时，才允许信赖 `X-Forwarded-For` 头并从中提取首个 IP 实体。
+
+### 4.3 单元测试扩充与验证
+- 在 `gateway/internal/middleware/x402_test.go` 中，新增单元测试 `TestRateLimitLimiter_CleanupTTL`。
+- 模拟创建一个 IP 限流项，并将 `lastSeen` 主动置为 10 分钟前。
+- 调用 `Cleanup(5 * time.Minute)` 后，断言该项已被彻底清除，IP 数量由 1 降为 0，成功验证了内存清理效果。
+- 经执行 `go test -v ./...` 检验，全部单元测试均 100% 成功通过。
+

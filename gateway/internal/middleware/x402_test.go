@@ -432,3 +432,29 @@ func TestRateLimitMiddleware_LimitExceeded(t *testing.T) {
 	}
 }
 
+func TestRateLimitLimiter_CleanupTTL(t *testing.T) {
+	// 配置限流速率为 2/s，桶大小为 3
+	limiter := middleware.NewIPRateLimiter(rate.Limit(2), 3)
+
+	ip := "192.168.1.50"
+
+	// 写入一个 IP 记录
+	limiter.GetLimiter(ip)
+
+	if limiter.GetIPsCount() != 1 {
+		t.Errorf("Expected IP count to be 1, got %d", limiter.GetIPsCount())
+	}
+
+	// 模拟写入一个 IP 记录，设置其 lastSeen 为 10 分钟前
+	limiter.SetLimiterLastSeen(ip, time.Now().Add(-10*time.Minute))
+
+	// 执行清理，清除过期时间大于 5 分钟的 IP
+	limiter.Cleanup(5 * time.Minute)
+
+	// 断言 map 确实删除了该超期 IP
+	if limiter.GetIPsCount() != 0 {
+		t.Errorf("Expected IP count to be 0 after cleanup, got %d", limiter.GetIPsCount())
+	}
+}
+
+

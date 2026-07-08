@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
@@ -38,8 +39,14 @@ func main() {
 
 	r := chi.NewRouter()
 
+	// 基础环境 Context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// 挂载限流中间件在最顶端，每秒充能 5 个，最大容纳 10 个
 	limiter := middleware.NewIPRateLimiter(rate.Limit(5), 10)
+	// 启动后台 Cleanup 协程，每隔 1 分钟执行一次，清除过期时间达 5 分钟的 IP 记录
+	go limiter.StartCleanup(ctx, 1*time.Minute, 5*time.Minute)
 	r.Use(middleware.RateLimitMiddleware(limiter))
 
 	// 基础中间件
@@ -56,8 +63,6 @@ func main() {
 	defer queueMgr.Close()
 
 	// 启动后台重试 Worker
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	queueMgr.StartWorker(ctx)
 
 	// 创建反向代理
