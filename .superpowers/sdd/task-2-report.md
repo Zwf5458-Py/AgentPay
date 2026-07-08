@@ -1,104 +1,59 @@
-# Task 2 Execution Report: 信誉与支付托管合约开发 (PaymentEscrow & ReputationRegistry)
+# Task 2 执行报告: ERC-6551 TBA 智能体收款执行账户部署与防御
 
-## 1. 任务概述
+## 1. 任务目标
+实现标准的 ERC-6551 智能体代币绑定账户（TBA）`AgentTokenBoundAccount.sol`，修改托管结算合约 `PaymentEscrow.sol` 并在结算中强制绑定专属 TBA 地址验证，拦截非 TBA 的越权接收地址，并提供 100% 通过的单元测试覆盖。
 
-本项目已成功在 `feat/payment-escrow-reputation` 本地开发分支下实现了非托管支付托管合约 `PaymentEscrow.sol` 与基于已结清付款验证的 Agent 信誉评价系统 `ReputationRegistry.sol`。同时编写了用于模拟 USDC 测试的 `MockERC20.sol`，并补充了完整的单元与集成测试 `PaymentEscrowTest.t.sol`。
+## 2. 涉及改动文件
+- **新增**: `contracts/src/interfaces/IERC6551Account.sol` (TBA 标准账户接口)
+- **新增**: `contracts/src/payment/AgentTokenBoundAccount.sol` (TBA 账户实现合约)
+- **修改**: `contracts/src/payment/PaymentEscrow.sol` (增加 TBA 校验防御)
+- **修改**: `contracts/test/PaymentEscrowTest.t.sol` (编写 Mock Registry 并新增 3 个 TBA 结算与权限测试)
+- **新增**: `docs/superpowers/plans/2026-07-08-tba-payment-defense-plan.md` (详细的开发实现计划)
 
-所有测试已在 Foundry (Forge) 环境下 100% 通过。
+## 3. 实现与架构设计
+### 3.1 ERC-6551 账户实现 (`AgentTokenBoundAccount.sol`)
+- 挂接并实现标准接口 `IERC6551Account` 的 `token()`, `state()`, `isValidSigner()`, `receive()`。
+- `token()` 返回创建时通过 `immutable` 构造参数存入的 NFT 绑定属性 `(chainIdVal, tokenContractVal, tokenIdVal)`。
+- 实现 `execute(address to, uint256 value, bytes calldata data)`：
+  - **安全校验**：仅允许此 TBA 绑定的 Agent NFT 的 owner (`tokenContractVal.ownerOf(tokenIdVal)`) 触发。非 owner 触发直接 revert `NotOwner()`，有效防范未授权资金移出。
+  - **调用执行**：通过底层的 `to.call{value: value}(data)` 执行具体外部调用，并安全返回执行结果字节码。
 
----
+### 3.2 托管结算绑定 TBA 防御 (`PaymentEscrow.sol`)
+- 添加状态变量：`erc6551Registry`，`tbaImplementation`，`agentIdentityRegistry`，并在构造函数中增加校验并进行初始化。
+- 在 `releasePayment` (单笔 TEE 结算) 与 `batchSettle` (状态通道批量 EIP-712 签名结算) 转账结算前，增加专属 TBA 防御防线：
+  - 调用 `IERC6551Registry(erc6551Registry).account(...)` 实时推导专属 TBA 账户地址。
+  - 校验结算时的接收者 `agentOwner` 必须等于该计算出来的专属 TBA 地址。如果不匹配，抛出 `InvalidAddress()` 异常拦截结算。
 
-## 2. 合约设计与实现细节
+### 3.3 单元测试覆盖 (`PaymentEscrowTest.t.sol`)
+- **Mock Registry 编写**：编写了符合标准接口的 `MockERC6551Registry` 合约，通过 Solidity 内置的 `create2` 字节码哈希计算算法，保证 `account` 视图返回的地址与 `createAccount` 实际部署的合约地址 100% 一致。
+- **重构 setUp**：在测试设置阶段部署了 `AgentIdentityRegistry` 作为 Agent NFT 注册器、`AgentTokenBoundAccount` 实现模板和 Mock Registry。同时预先为 `agentId = 88` 模拟部署了专属的 TBA 地址，并将 TBA 地址直接赋给测试的 `agentOwner`。这样原有的所有测试用例自然将资金流向 TBA 账户，平滑过渡。
+- **新增测试用例**：
+  1. `test_BatchSettleToTBARecipientSuccess`：校验批量结算时结算金额能正确划入对应的 TBA 账户，剩余资金返还 payer。
+  2. `test_BatchSettleToNonTBARecipientReverts`：校验当结算接收方传入普通 EOA 地址（非计算出来的 TBA 地址）时，直接 Revert 拦截。
+  3. `test_TBAExecuteOnlyOwner`：测试非 NFT owner 调用 TBA 的 `execute` 方法转移资产被 `NotOwner()` 拦截，而 NFT owner 调用则能成功通过。
 
-### 2.1 ReputationRegistry.sol (信誉评价合约)
-* **主要特性**:
-  - **防刷评分校验**：引入 `IPaymentEscrow` 接口，在 `addFeedback` 中调用 `paymentEscrow.hasPaid(msg.sender, agentId)` 验证当前调用者是否真正对该 Agent 进行过已被结算释放的付款。
-  - **评分去重与去刷**：将任务标识 `taskHash` (类型为 `bytes32`) 作为唯一键，维护映射 `evaluatedTasks[taskHash]`，在评价时严格拦截重复评价，确保一次付款对应一个具体任务的评价。
-  - **自定义错误保护**：
-    - `InvalidScore()`：评分超出 1-5 范围。
-    - `TaskAlreadyEvaluated()`：对同一个任务哈希重复评分。
-    - `NotPaid()`：没有在该 Agent 下完成过结算付款。
-  - **声誉查询**：`getReputation` 接口返回 `(averageScore, totalReviews)`，其中平均评分计算为 `(totalScore * 100) / totalReviews`，保留两位小数（如 4.5 分返回 450）。若评价数为 0，则安全返回 `(0, 0)`。
+## 4. 验证与测试结果
+在 `contracts` 目录下运行 `forge test` 的结果为：
+- 编译无警告或错误（除了无关的第三方库 ECDSA.sol）。
+- 2 个测试套件（`AgentIdentityTest` 和 `PaymentEscrowTest`）共计 31 个测试用例全部 **100% 跑通**，无任何失败记录。
 
-### 2.2 PaymentEscrow.sol (支付托管合约)
-* **主要特性**:
-  - **非托管锁定**：通过 `lockPayment` 将代币（USDC Mock）锁定在托管合约内，创建 `PaymentLock`，初始状态为 `Locked`，设定一个到期时间（当前时间 + 锁定持续时间），生成唯一的 `lockId` 并返回。
-  - **基于 TEE 的证明结算**：仅允许指定的结算地址 `settler` 调用 `releasePayment`。在该函数中校验锁的状态，并请求路由至 `validationRegistry` 调用 `validateProof(agentId, "TEE", proof)`。在校验通过且锁未超时时，将资金划转给指定的 `agentOwner`。同时，将该付款方的付款状态标记为已付款成功：`_hasPaid[payer][agentId] = true`。
-  - **超时退款**：提供 `refund` 接口，任何人都可以触发超时退款。它校验锁状态为 `Locked` 且当前已超时（`block.timestamp > expiresAt`），将资金全额退回给付款方 `payer` 并标记状态为 `Refunded`。
-  - **安全与权限控制**：
-    - `onlySettler` modifier 限制非 `settler` 释放资金。
-    - 状态机校验（`Locked` 状态才允许释放或退款）。
-    - 采用 OpenZeppelin 的 `SafeERC20` 保护代币转账安全。
+## 5. Git 提交记录
+- **Git Commit Hash**: `5474696169690af9db033e71e9d166963ea7871e`
+- **Git Commit 缩写**: `5474696`
+- **提交内容**: 包括本任务新增的 TBA 接口与实现、对 `PaymentEscrow` 的修改、对应的全面单元测试用例，以及开发计划文档。
 
----
-
-## 3. 测试覆盖与结果
-
-在 `contracts/test/PaymentEscrowTest.t.sol` 中编写了 6 个核心测试场景，包括：
-1. **`test_LockAndReleaseSuccess`**：测试正常的资金锁定、结算员验证 Proof 释放和付款记录状态变化。
-2. **`test_ReleaseForbiddenForNonSettler`**：测试非 Settler 越权释放资金会被抛出 `NotSettler()`。
-3. **`test_ReleaseExpiredLockFails`**：测试超时释放资金被拦截，抛出 `LockExpired()`。
-4. **`test_ReleaseInvalidProofFails`**：测试 TEE 验证失败时释放资金被拦截，抛出 `ProofValidationFailed()`。
-5. **`test_RefundSuccessAndLockNotExpiredRevert`**：测试未超时退款拦截 `LockNotExpired()` 与超时后成功退款的业务逻辑。
-6. **`test_ReputationRegistryFullFlow`**：测试信誉评价体系整合（未付款拦截、锁定未释放拦截、正常多次评价累计计算平均分、重复评分拦截、超限评分拦截）。
-
-### Forge 运行结果：
-```bash
-Ran 6 tests for test/PaymentEscrowTest.t.sol:PaymentEscrowTest
-[PASS] test_LockAndReleaseSuccess() (gas: 287630)
-[PASS] test_RefundSuccessAndLockNotExpiredRevert() (gas: 214342)
-[PASS] test_ReleaseExpiredLockFails() (gas: 225089)
-[PASS] test_ReleaseForbiddenForNonSettler() (gas: 221485)
-[PASS] test_ReleaseInvalidProofFails() (gas: 238976)
-[PASS] test_ReputationRegistryFullFlow() (gas: 553282)
-Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 8.28ms (4.71ms CPU time)
-
-Ran 2 test suites in 18.01ms (16.38ms CPU time): 13 tests passed, 0 failed, 0 skipped (13 total tests)
-```
-
----
-
-## 5. 安全加固与漏洞修复 (根据 task-2-fix-brief.md)
-
-### 5.1 移去 `_hasPaid` 机制与引入基于 `lockId` 的评分机制
-* **重构逻辑**: 彻底废除了 `PaymentEscrow.sol` 中的 `_hasPaid` 存储，防止了单次付款后 payer 对同一个 Agent 任意构造任务哈希无限刷声誉的漏洞。
-* **基于 `lockId` 的防刷绑定**：现在 `ReputationRegistry.sol` 的 `addFeedback` 传入 `lockId`，提取 `lock.payer == msg.sender` 进行权限校验，提取 `lock.status == IPaymentEscrow.PaymentStatus.Released` 验证只有已被释放资金的锁才允许评价。并且在 `ReputationRegistry` 中维护 `_evaluatedLocks[lockId] = true` 映射，实现评分的 1:1 事务绑定。
-
-### 5.2 安全防御强化
-* **零地址接收防御**: `releasePayment` 方法增加了对 `agentOwner == address(0)` 的校验，拦截零地址并抛出 `InvalidAddress()` 自定义错误。
-* **时序与参数加固**: `lockPayment` 方法增加了 `duration > 0` 的校验，为 0 时抛出 `InvalidDuration()`。构造函数对传入的外部合约地址增加了零地址判断，防止空地址初始化。
-* **分页机制优化**: `getRecords` 方法增加了 `offset` 和 `limit` 分页参数，加入了越界与长度保护，避免随着评分增多而导致 Gas Limit 耗尽。
-
-### 5.3 逆向测试追加与通过验证
-在 `PaymentEscrowTest.t.sol` 中追加了 6 个测试，全部跑通：
-* `test_addFeedbackDuplicateReverts` (验证重复评价 lockId 抛出 `LockAlreadyEvaluated`)
-* `test_addFeedbackUnauthorizedPayerReverts` (验证非 payer 对 lockId 评价抛出 `NotPayer`)
-* `test_addFeedbackNotReleasedReverts` (验证未释放的锁无法评分抛出 `PaymentNotReleased`)
-* `test_releaseZeroAddressReverts` (验证释放时传入零地址被拦截抛出 `InvalidAddress`)
-* `test_lockPaymentZeroDurationReverts` (验证锁仓 duration 必须大于 0，否则抛出 `InvalidDuration`)
-* `test_constructorZeroAddressReverts` (验证构造函数防御空地址，抛出 `InvalidAddress`)
-
-### 追加后完整测试运行结果 (12 tests for PaymentEscrowTest):
-```bash
-Ran 12 tests for test/PaymentEscrowTest.t.sol:PaymentEscrowTest
-[PASS] test_LockAndReleaseSuccess() (gas: 262687)
-[PASS] test_RefundSuccessAndLockNotExpiredRevert() (gas: 214319)
-[PASS] test_ReleaseExpiredLockFails() (gas: 225122)
-[PASS] test_ReleaseForbiddenForNonSettler() (gas: 221395)
-[PASS] test_ReleaseInvalidProofFails() (gas: 239009)
-[PASS] test_ReputationRegistryFullFlow() (gas: 689796)
-[PASS] test_addFeedbackDuplicateReverts() (gas: 398287)
-[PASS] test_addFeedbackNotReleasedReverts() (gas: 228166)
-[PASS] test_addFeedbackUnauthorizedPayerReverts() (gas: 260795)
-[PASS] test_constructorZeroAddressReverts() (gas: 149397)
-[PASS] test_lockPaymentZeroDurationReverts() (gas: 16989)
-[PASS] test_releaseZeroAddressReverts() (gas: 221385)
-```
-
----
-
-## 6. Git 提交信息
-
-* **本地开发分支**: `feat/payment-escrow-reputation`
-* **修复后最新 Commit Hash**: `bd43c9956a477c507706aaf5d1fe91328a1c065e`
+## 6. 缺陷修复与优化加固记录 (2026-07-08 追加)
+针对 ERC-6551 规范一致性缺陷及 Escrow 静态配置优化，我们执行了以下修复与重构：
+1. **修复 TBA state() 规范一致性缺陷**：
+   - 在 `AgentTokenBoundAccount.sol` 中添加私有状态变量 `uint256 private _state;`，重构 `state()` 视图方法由 `pure` 变为 `view` 返回 `_state` 值。
+   - 在 `execute` 方法成功执行外部调用后自增 `_state`：`_state++`，以符合 ERC-6551 标准对状态改变的更新规范。
+2. **优化外部调用错误回滚冒泡**：
+   - 重构 `AgentTokenBoundAccount.sol` 的 `execute` 方法中外部调用失败的拦截。在 `!success` 时，通过 Solidity 内建 inline assembly 提取底层调用抛出的原始 revert 数据，并向上冒泡（Bubble Up）还原抛出，解决了直接 revert 缺乏细节报错信息的问题。
+3. **托管地址配置 Immutable 优化**：
+   - 将 `PaymentEscrow.sol` 中的 `erc6551Registry`、`tbaImplementation` 及 `agentIdentityRegistry` 状态变量均改写为 `immutable` 类型，并在构造函数中直接配置，优化了每次读取专属 TBA 时的 SLOAD 消耗，在单测交易执行中证明了节约 gas 的效果。
+4. **清理冗余变量与追加测试用例**：
+   - 清理了 `PaymentEscrowTest.t.sol` 测试合约中的 Mock Registry 未使用的 `_accounts` 状态变量。
+   - 追加测试用例 `test_TBAExecuteIncrementsState()`：验证 NFT owner 拥有者在 TBA 执行 `execute` 划转资金成功后，TBA 的 `state()` 相比执行前确切递增了 1。
+5. **验证结果**：
+   - 重新执行 `forge test -v`，编译警告被全部消除，所有 32 个测试全部通过（32 passed）。
 

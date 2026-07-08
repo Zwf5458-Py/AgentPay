@@ -40,9 +40,9 @@ contract PaymentEscrow {
     IERC20 public immutable paymentToken;
     IValidationRegistry public immutable validationRegistry;
     address public immutable settler;
-    address public erc6551Registry;
-    address public tbaImplementation;
-    address public agentIdentityRegistry;
+    address public immutable erc6551Registry;
+    address public immutable tbaImplementation;
+    address public immutable agentIdentityRegistry;
 
     uint256 private _nonce;
     mapping(bytes32 => PaymentLock) private _locks;

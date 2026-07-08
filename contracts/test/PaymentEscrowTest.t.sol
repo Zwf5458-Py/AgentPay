@@ -26,7 +26,6 @@ contract MockValidator is IValidator {
 }
 
 contract MockERC6551Registry is IERC6551Registry {
-    mapping(address => mapping(bytes32 => mapping(uint256 => mapping(address => mapping(uint256 => address))))) private _accounts;
 
     function createAccount(
         address implementation,
@@ -789,5 +788,28 @@ contract PaymentEscrowTest is Test {
 
         assertEq(usdc.balanceOf(address(0x555)), 50 * 10**6);
         assertEq(usdc.balanceOf(agentOwner), 50 * 10**6);
+    }
+
+    // 25. 测试 TBA execute 成功后能够使 state 递增
+    function test_TBAExecuteIncrementsState() public {
+        uint256 tbaBalance = 100 * 10**6;
+        usdc.mint(agentOwner, tbaBalance);
+
+        address nftOwner = address(0x3);
+        
+        bytes memory callData = abi.encodeWithSelector(
+            IERC20.transfer.selector,
+            address(0x555),
+            50 * 10**6
+        );
+
+        uint256 stateBefore = AgentTokenBoundAccount(payable(agentOwner)).state();
+
+        vm.prank(nftOwner);
+        AgentTokenBoundAccount(payable(agentOwner)).execute(address(usdc), 0, callData);
+
+        uint256 stateAfter = AgentTokenBoundAccount(payable(agentOwner)).state();
+
+        assertEq(stateAfter, stateBefore + 1);
     }
 }

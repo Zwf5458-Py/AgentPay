@@ -8,9 +8,9 @@ contract AgentTokenBoundAccount is IERC6551Account {
     uint256 public immutable chainIdVal;
     address public immutable tokenContractVal;
     uint256 public immutable tokenIdVal;
+    uint256 private _state;
 
     error NotOwner();
-    error CallFailed();
 
     constructor(uint256 _chainId, address _tokenContract, uint256 _tokenId) {
         chainIdVal = _chainId;
@@ -33,8 +33,8 @@ contract AgentTokenBoundAccount is IERC6551Account {
         return (chainIdVal, tokenContractVal, tokenIdVal);
     }
 
-    function state() external pure override returns (uint256) {
-        return 0;
+    function state() external view override returns (uint256) {
+        return _state;
     }
 
     function isValidSigner(address signer, bytes calldata)
@@ -60,8 +60,12 @@ contract AgentTokenBoundAccount is IERC6551Account {
 
         (bool success, bytes memory result) = to.call{value: value}(data);
         if (!success) {
-            revert CallFailed();
+            assembly {
+                revert(add(result, 32), mload(result))
+            }
         }
+
+        _state++;
 
         return result;
     }
