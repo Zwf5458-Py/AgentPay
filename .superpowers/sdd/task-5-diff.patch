@@ -174,10 +174,10 @@ index 0000000..18103b5
 +}
 diff --git a/gateway/internal/middleware/x402_test.go b/gateway/internal/middleware/x402_test.go
 new file mode 100644
-index 0000000..469e99d
+index 0000000..e00936f
 --- /dev/null
 +++ b/gateway/internal/middleware/x402_test.go
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,287 @@
 +package middleware_test
 +
 +import (
@@ -411,17 +411,72 @@ index 0000000..469e99d
 +		t.Error("Expected non-empty escrowAddress")
 +	}
 +}
++
++func TestProxyReverse_SettleRetry(t *testing.T) {
++	// 模拟下游 Agent 服务
++	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("X-Agent-Proof", "MockProofForRetry")
++		w.WriteHeader(http.StatusOK)
++		w.Write([]byte(`{"output":"mocked output"}`))
++	}))
++	defer agentServer.Close()
++
++	// 模拟一个总是失败的 AA Bridge 服务 (返回 500)
++	var mu sync.Mutex
++	attempts := 0
++	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		mu.Lock()
++		attempts++
++		mu.Unlock()
++		w.WriteHeader(http.StatusInternalServerError)
++		w.Write([]byte(`{"error":"bridge internal error"}`))
++	}))
++	defer bridgeServer.Close()
++
++	// 初始化 Gateway 反向代理，指向会失败的 AA Bridge
++	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle")
++	if err != nil {
++		t.Fatalf("Failed to create reverse proxy: %v", err)
++	}
++
++	handler := middleware.X402Middleware(gatewayProxy)
++
++	req := httptest.NewRequest("POST", "/agent/execute", nil)
++	req.Header.Set("Authorization", "Bearer mock-session-token")
++	req.Header.Set("X-Payment-Lock-Id", "lock-fail-retry")
++	rr := httptest.NewRecorder()
++
++	handler.ServeHTTP(rr, req)
++
++	if rr.Code != http.StatusOK {
++		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
++	}
++
++	// 异步重试最长需要 2 秒（每次重试间隔 1 秒，共 3 次请求）
++	// 我们等待 3.5 秒确保重试流程全部走完
++	time.Sleep(3500 * time.Millisecond)
++
++	mu.Lock()
++	finalAttempts := attempts
++	mu.Unlock()
++
++	// 应该在失败后尝试了 3 次
++	if finalAttempts != 3 {
++		t.Errorf("Expected exactly 3 settle attempts, got %d", finalAttempts)
++	}
++}
 diff --git a/gateway/internal/proxy/reverse.go b/gateway/internal/proxy/reverse.go
 new file mode 100644
-index 0000000..39feb3b
+index 0000000..a3f795d
 --- /dev/null
 +++ b/gateway/internal/proxy/reverse.go
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,147 @@
 +package proxy
 +
 +import (
 +	"bytes"
 +	"encoding/json"
++	"fmt"
 +	"io"
 +	"log"
 +	"net/http"
@@ -439,6 +494,7 @@ index 0000000..39feb3b
 +	aaBridgeURL   string
 +	agentOwner    string
 +	escrowAddress string
++	Client        *http.Client // 复用 HTTP Client，避免并发端口耗尽
 +}
 +
 +// NewReverseProxy 构造反向代理实例
@@ -463,6 +519,9 @@ index 0000000..39feb3b
 +		aaBridgeURL:   aaBridgeURL,
 +		agentOwner:    agentOwner,
 +		escrowAddress: escrowAddress,
++		Client: &http.Client{
++			Timeout: 10 * time.Second,
++		},
 +	}
 +
 +	proxy := httputil.NewSingleHostReverseProxy(url)
@@ -495,6 +554,13 @@ index 0000000..39feb3b
 +}
 +
 +func (w *ReverseProxyWrapper) settle(lockID, proof string) {
++	// 1. Panic 安全屏障，决不引发主网关进程崩溃
++	defer func() {
++		if r := recover(); r != nil {
++			log.Printf("[Proxy Settle] Recovered from panic: %v", r)
++		}
++	}()
++
 +	bodyMap := map[string]string{
 +		"lockId":        lockID,
 +		"proof":         proof,
@@ -507,21 +573,48 @@ index 0000000..39feb3b
 +		return
 +	}
 +
-+	req, err := http.NewRequest("POST", w.aaBridgeURL, bytes.NewBuffer(bodyBytes))
-+	if err != nil {
-+		log.Printf("[Proxy Settle] Error creating settle request: %v", err)
++	maxRetries := 3
++	var lastErr error
++	var resp *http.Response
++
++	// 2. 退避重试机制
++	for attempt := 1; attempt <= maxRetries; attempt++ {
++		req, err := http.NewRequest("POST", w.aaBridgeURL, bytes.NewBuffer(bodyBytes))
++		if err != nil {
++			log.Printf("[Proxy Settle] Error creating settle request (attempt %d/%d): %v", attempt, maxRetries, err)
++			return
++		}
++		req.Header.Set("Content-Type", "application/json")
++
++		// 3. 复用结构体自带的 Client 进行网络调用
++		resp, err = w.Client.Do(req)
++		if err != nil {
++			lastErr = err
++			log.Printf("[Proxy Settle] Connection failed (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, err)
++			if attempt < maxRetries {
++				time.Sleep(1 * time.Second)
++			}
++			continue
++		}
++
++		if resp.StatusCode != http.StatusOK {
++			respBody, _ := io.ReadAll(resp.Body)
++			resp.Body.Close()
++			lastErr = fmt.Errorf("HTTP status %s: %s", resp.Status, string(respBody))
++			log.Printf("[Proxy Settle] Bridge returned non-200 (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, lastErr)
++			if attempt < maxRetries {
++				time.Sleep(1 * time.Second)
++			}
++			continue
++		}
++
++		// 成功响应
++		respBody, _ := io.ReadAll(resp.Body)
++		resp.Body.Close()
++		log.Printf("[Proxy Settle] AA Bridge response for lockId %s: Status: %s, Body: %s", lockID, resp.Status, string(respBody))
 +		return
 +	}
-+	req.Header.Set("Content-Type", "application/json")
 +
-+	client := &http.Client{Timeout: 10 * time.Second}
-+	resp, err := client.Do(req)
-+	if err != nil {
-+		log.Printf("[Proxy Settle] Error executing settle request for lockId %s: %v", lockID, err)
-+		return
-+	}
-+	defer resp.Body.Close()
-+
-+	respBody, _ := io.ReadAll(resp.Body)
-+	log.Printf("[Proxy Settle] AA Bridge response for lockId %s: Status: %s, Body: %s", lockID, resp.Status, string(respBody))
++	// 3次重试后依然失败，记录致命报警日志
++	log.Printf("[Proxy Settle] [CRITICAL ERROR] Failed to settle payment for lockId %s after %d attempts. Last error: %v", lockID, maxRetries, lastErr)
 +}
