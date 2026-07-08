@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"golang.org/x/time/rate"
 
 	"gateway/internal/middleware"
 	"gateway/internal/proxy"
@@ -36,6 +37,10 @@ func main() {
 	log.Printf("AA Bridge Settle URL: %s", aaBridgeURL)
 
 	r := chi.NewRouter()
+
+	// 挂载限流中间件在最顶端，每秒充能 5 个，最大容纳 10 个
+	limiter := middleware.NewIPRateLimiter(rate.Limit(5), 10)
+	r.Use(middleware.RateLimitMiddleware(limiter))
 
 	// 基础中间件
 	r.Use(chiMiddleware.Logger)

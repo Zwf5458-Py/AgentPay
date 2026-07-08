@@ -16,6 +16,8 @@ import (
 	"gateway/internal/middleware"
 	"gateway/internal/proxy"
 	"gateway/internal/queue"
+
+	"golang.org/x/time/rate"
 )
 
 func TestX402Middleware_NoToken(t *testing.T) {
@@ -383,3 +385,50 @@ func TestProxyReverse_BridgeOutageSelfHealing(t *testing.T) {
 		t.Errorf("Expected secret 'test-secret', got %q", receivedSecret)
 	}
 }
+
+func TestRateLimitMiddleware_LimitExceeded(t *testing.T) {
+	// 配置 IPRateLimiter 限制速率为 2/s，桶大小为 3
+	limiter := middleware.NewIPRateLimiter(rate.Limit(2), 3)
+
+	// 创建一个路由器处理器：限流中间件包裹 X402 中间件
+	// 前 3 次请求由于没有携带 Authorization 头，但能通过限流器，所以会被 X402 拦截并返回 402
+	// 第 4 次和第 5 次请求由于超出速率限制，会被限流中间件拦截并返回 429
+	handler := middleware.RateLimitMiddleware(limiter)(middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	for i := 1; i <= 5; i++ {
+		req := httptest.NewRequest("POST", "/agent/execute", nil)
+		req.RemoteAddr = "192.168.1.100:12345" // 统一客户端 IP
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if i <= 3 {
+			// 前 3 次请求返回 HTTP 402
+			if rr.Code != http.StatusPaymentRequired {
+				t.Errorf("Request %d: expected status code %d, got %d", i, http.StatusPaymentRequired, rr.Code)
+			}
+		} else {
+			// 第 4 次和第 5 次请求返回 HTTP 429
+			if rr.Code != http.StatusTooManyRequests {
+				t.Errorf("Request %d: expected status code %d, got %d", i, http.StatusTooManyRequests, rr.Code)
+			}
+
+			// 验证 Response Body 匹配 rate_limit_exceeded
+			var resp middleware.ErrorResponse
+			err := json.Unmarshal(rr.Body.Bytes(), &resp)
+			if err != nil {
+				t.Fatalf("Request %d: failed to unmarshal response body: %v", i, err)
+			}
+
+			if resp.Error != "rate_limit_exceeded" {
+				t.Errorf("Request %d: expected error field 'rate_limit_exceeded', got %q", i, resp.Error)
+			}
+			if resp.Message != "too many requests" {
+				t.Errorf("Request %d: expected message 'too many requests', got %q", i, resp.Message)
+			}
+		}
+	}
+}
+
