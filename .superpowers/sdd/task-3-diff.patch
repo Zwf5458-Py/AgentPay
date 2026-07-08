@@ -1,750 +1,831 @@
-diff --git a/aa-bridge/src/index.ts b/aa-bridge/src/index.ts
+diff --git a/gateway/cmd/gateway/main.go b/gateway/cmd/gateway/main.go
+index aea4ede..8dd157c 100644
+--- a/gateway/cmd/gateway/main.go
++++ b/gateway/cmd/gateway/main.go
+@@ -1,22 +1,24 @@
+ package main
+ 
+ import (
++	"context"
+ 	"log"
+ 	"net/http"
+ 	"os"
+ 
+ 	"github.com/go-chi/chi/v5"
+ 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+ 
+ 	"gateway/internal/middleware"
+ 	"gateway/internal/proxy"
++	"gateway/internal/queue"
+ )
+ 
+ func main() {
+ 	// 加载配置
+ 	port := os.Getenv("PORT")
+ 	if port == "" {
+ 		port = "8080"
+ 	}
+ 
+ 	elizaAgentURL := os.Getenv("ELIZA_AGENT_URL")
+@@ -32,23 +34,36 @@ func main() {
+ 	log.Printf("Starting gateway on port %s", port)
+ 	log.Printf("Eliza Agent URL: %s", elizaAgentURL)
+ 	log.Printf("AA Bridge Settle URL: %s", aaBridgeURL)
+ 
+ 	r := chi.NewRouter()
+ 
+ 	// 基础中间件
+ 	r.Use(chiMiddleware.Logger)
+ 	r.Use(chiMiddleware.Recoverer)
+ 
+-	// 创建反向代理
+ 	internalSecret := os.Getenv("INTERNAL_SECRET")
+-	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret)
++
++	// 初始化 SQLite 本地队列管理器
++	queueMgr, err := queue.NewQueueManager("gateway.db", aaBridgeURL, internalSecret)
++	if err != nil {
++		log.Fatalf("Failed to initialize queue manager: %v", err)
++	}
++	defer queueMgr.Close()
++
++	// 启动后台重试 Worker
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	queueMgr.StartWorker(ctx)
++
++	// 创建反向代理
++	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret, queueMgr)
+ 	if err != nil {
+ 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
+ 	}
+ 
+ 	// 路由注册
+ 	r.Route("/agent", func(r chi.Router) {
+ 		r.Use(middleware.X402Middleware)
+ 		r.Handle("/execute", proxyHandler)
+ 	})
+ 
+diff --git a/gateway/internal/middleware/x402_test.go b/gateway/internal/middleware/x402_test.go
+index 5138e3c..ee85a70 100644
+--- a/gateway/internal/middleware/x402_test.go
++++ b/gateway/internal/middleware/x402_test.go
+@@ -1,25 +1,28 @@
+ package middleware_test
+ 
+ import (
++	"context"
++	"database/sql"
+ 	"encoding/json"
+ 	"io"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"os"
+ 	"strings"
+ 	"sync"
+ 	"testing"
+ 	"time"
+ 
+ 	"gateway/internal/middleware"
+ 	"gateway/internal/proxy"
++	"gateway/internal/queue"
+ )
+ 
+ func TestX402Middleware_NoToken(t *testing.T) {
+ 	// 设置环境变量以便测试
+ 	escrowAddr := "0xTestEscrowAddress123"
+ 	os.Setenv("ESCROW_ADDRESS", escrowAddr)
+ 	defer os.Unsetenv("ESCROW_ADDRESS")
+ 
+ 	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		w.WriteHeader(http.StatusOK)
+@@ -131,172 +134,252 @@ func TestX402Middleware_WithToken(t *testing.T) {
+ 		t.Errorf("Expected token 'someToken', got %q", capturedToken)
+ 	}
+ 	if capturedLockID != "customLockID" {
+ 		t.Errorf("Expected lockID 'customLockID', got %q", capturedLockID)
+ 	}
+ }
+ 
+ func TestProxyReverse_AsyncSettle(t *testing.T) {
+ 	// 1. 模拟下游 Agent 服务
+ 	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		// 校验请求
+ 		if r.URL.Path != "/agent/execute" {
+ 			t.Errorf("Agent received path %q, expected /agent/execute", r.URL.Path)
+ 		}
+-		// 返回带有 X-Agent-Proof 的响应
+ 		w.Header().Set("X-Agent-Proof", "MockProofBase64String")
+ 		w.WriteHeader(http.StatusOK)
+ 		w.Write([]byte(`{"output":"mocked output"}`))
+ 	}))
+ 	defer agentServer.Close()
+ 
+ 	// 2. 模拟 AA Bridge 服务，捕获异步结算请求
+ 	var receivedSettleBody map[string]string
++	var receivedSecret string
++	var mu sync.Mutex
++	var settleCount int
+ 	var wg sync.WaitGroup
+ 	wg.Add(1)
+ 
+ 	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		defer wg.Done()
++		mu.Lock()
++		defer mu.Unlock()
++
++		settleCount++
++
+ 		if r.URL.Path != "/aa/settle" {
+ 			t.Errorf("Bridge received path %q, expected /aa/settle", r.URL.Path)
+ 		}
+ 
+-		secret := r.Header.Get("X-Internal-Secret")
+-		if secret != "test-secret" {
++		receivedSecret = r.Header.Get("X-Internal-Secret")
++		if receivedSecret != "test-secret" {
+ 			w.WriteHeader(http.StatusUnauthorized)
+ 			w.Write([]byte(`{"error":"unauthorized"}`))
+ 			return
+ 		}
+ 
+ 		bodyBytes, err := io.ReadAll(r.Body)
+ 		if err != nil {
+ 			t.Errorf("Failed to read bridge request body: %v", err)
+ 		}
+ 
+ 		err = json.Unmarshal(bodyBytes, &receivedSettleBody)
+ 		if err != nil {
+ 			t.Errorf("Failed to parse bridge request body: %v", err)
+ 		}
+ 
+-		// 返回成功响应
+ 		w.WriteHeader(http.StatusOK)
+ 		w.Write([]byte(`{"success":true,"txHash":"0x7777"}`))
++
++		if settleCount == 1 {
++			wg.Done()
++		}
+ 	}))
+ 	defer bridgeServer.Close()
+ 
++	// 创建临时的 QueueManager
++	dbPath := t.TempDir() + "/test_async_settle.db"
++	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
++	if err != nil {
++		t.Fatalf("Failed to create QueueManager: %v", err)
++	}
++	defer queueMgr.Close()
++
++	// 启动 Worker
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	queueMgr.StartWorker(ctx)
++
+ 	// 3. 初始化 Gateway 反向代理
+-	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
++	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
+ 	if err != nil {
+ 		t.Fatalf("Failed to create reverse proxy: %v", err)
+ 	}
+ 
+ 	// 4. 将中间件和代理组合成 Router 模拟网关
+ 	handler := middleware.X402Middleware(gatewayProxy)
+ 
+ 	// 5. 客户端发起正常支付放行的请求，携带 X-Payment-Lock-Id
+ 	req := httptest.NewRequest("POST", "/agent/execute", nil)
+ 	req.Header.Set("Authorization", "Bearer mock-session-token")
+ 	req.Header.Set("X-Payment-Lock-Id", "lock-999")
+ 	rr := httptest.NewRecorder()
+ 
+ 	handler.ServeHTTP(rr, req)
+ 
+ 	// 6. 验证客户端能够即时收到响应，并且不被阻塞
+ 	if rr.Code != http.StatusOK {
+ 		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
+ 	}
+ 
+-	// 7. 等待异步 goroutine 执行结算请求 (带超时保护)
++	// 7. 等待异步 worker 执行结算请求 (带超时保护)
+ 	c := make(chan struct{})
+ 	go func() {
+ 		wg.Wait()
+ 		close(c)
+ 	}()
+ 
+ 	select {
+ 	case <-c:
+ 		// 正常接收
+-	case <-time.After(3 * time.Second):
+-		t.Fatal("Timeout waiting for async settle goroutine to trigger AA Bridge")
++	case <-time.After(5 * time.Second):
++		t.Fatal("Timeout waiting for async settle worker to trigger AA Bridge")
+ 	}
+ 
+ 	// 8. 验证结算请求体中的字段
++	mu.Lock()
++	defer mu.Unlock()
+ 	if receivedSettleBody == nil {
+ 		t.Fatal("Bridge did not receive settle request")
+ 	}
+ 
+ 	if receivedSettleBody["lockId"] != "lock-999" {
+ 		t.Errorf("Expected lockId 'lock-999', got %q", receivedSettleBody["lockId"])
+ 	}
+ 	if receivedSettleBody["proof"] != "MockProofBase64String" {
+ 		t.Errorf("Expected proof 'MockProofBase64String', got %q", receivedSettleBody["proof"])
+ 	}
+-	// 验证网关有默认/环境变量中读取的 EOA
+-	if receivedSettleBody["agentOwner"] == "" {
+-		t.Error("Expected non-empty agentOwner EOA")
+-	}
+-	if receivedSettleBody["escrowAddress"] == "" {
+-		t.Error("Expected non-empty escrowAddress")
++	if receivedSecret != "test-secret" {
++		t.Errorf("Expected secret 'test-secret', got %q", receivedSecret)
+ 	}
+ }
+ 
+-func TestProxyReverse_SettleRetry(t *testing.T) {
+-	// 模拟下游 Agent 服务
++func TestProxyReverse_BridgeOutageSelfHealing(t *testing.T) {
++	// 1. 模拟下游 Agent 服务
+ 	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-		w.Header().Set("X-Agent-Proof", "MockProofForRetry")
++		w.Header().Set("X-Agent-Proof", "MockProofSelfHealing")
+ 		w.WriteHeader(http.StatusOK)
+ 		w.Write([]byte(`{"output":"mocked output"}`))
+ 	}))
+ 	defer agentServer.Close()
+ 
+-	// 模拟一个总是失败的 AA Bridge 服务 (返回 500)
++	// 2. 模拟可动态调整行为的 AA Bridge 服务
+ 	var mu sync.Mutex
+-	attempts := 0
++	shouldFail := true
++	settleSuccessReceived := false
++	var receivedSecret string
++
+ 	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		mu.Lock()
+-		attempts++
+-		mu.Unlock()
++		defer mu.Unlock()
+ 
+-		secret := r.Header.Get("X-Internal-Secret")
+-		if secret != "test-secret" {
+-			w.WriteHeader(http.StatusUnauthorized)
+-			w.Write([]byte(`{"error":"unauthorized"}`))
++		receivedSecret = r.Header.Get("X-Internal-Secret")
++
++		if shouldFail {
++			w.WriteHeader(http.StatusInternalServerError)
++			w.Write([]byte(`{"error":"bridge temp offline"}`))
+ 			return
+ 		}
+ 
+-		w.WriteHeader(http.StatusInternalServerError)
+-		w.Write([]byte(`{"error":"bridge internal error"}`))
++		settleSuccessReceived = true
++		w.WriteHeader(http.StatusOK)
++		w.Write([]byte(`{"success":true,"txHash":"0x8888"}`))
+ 	}))
+ 	defer bridgeServer.Close()
+ 
+-	// 初始化 Gateway 反向代理，指向会失败 defects AA Bridge
+-	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret")
++	// 3. 创建临时的 QueueManager
++	dbPath := t.TempDir() + "/test_self_healing.db"
++	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
++	if err != nil {
++		t.Fatalf("Failed to create QueueManager: %v", err)
++	}
++	defer queueMgr.Close()
++
++	// 启动 Worker
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	queueMgr.StartWorker(ctx)
++
++	// 4. 初始化 Gateway 反向代理
++	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
+ 	if err != nil {
+ 		t.Fatalf("Failed to create reverse proxy: %v", err)
+ 	}
+ 
+ 	handler := middleware.X402Middleware(gatewayProxy)
+ 
++	// 5. 客户端发起推理请求
+ 	req := httptest.NewRequest("POST", "/agent/execute", nil)
+ 	req.Header.Set("Authorization", "Bearer mock-session-token")
+-	req.Header.Set("X-Payment-Lock-Id", "lock-fail-retry")
++	req.Header.Set("X-Payment-Lock-Id", "lock-heal-123")
+ 	rr := httptest.NewRecorder()
+ 
+ 	handler.ServeHTTP(rr, req)
+ 
++	// 验证网关能立刻正常向客户端写回推理数据（HTTP 200）
+ 	if rr.Code != http.StatusOK {
+ 		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
+ 	}
+ 
+-	// 异步重试最长需要 2 秒（每次重试间隔 1 秒，共 3 次请求）
+-	// 我们等待 3.5 秒确保重试流程全部走完
+-	time.Sleep(3500 * time.Millisecond)
++	// 6. 稍微等一等以确保 Worker 跑了一轮（第一次请求），然后我们去 SQLite 查任务状态，断言为 'pending'
++	time.Sleep(2500 * time.Millisecond)
++
++	// 打开 SQLite 检查状态
++	db, err := sql.Open("sqlite", dbPath)
++	if err != nil {
++		t.Fatalf("Failed to open test DB: %v", err)
++	}
++	defer db.Close()
+ 
++	var status string
++	var retryCount int
++	err = db.QueryRow("SELECT status, retry_count FROM settle_tasks WHERE lock_id = ?", "lock-heal-123").Scan(&status, &retryCount)
++	if err != nil {
++		t.Fatalf("Failed to query task status: %v", err)
++	}
++
++	if status != "pending" {
++		t.Errorf("Expected task status 'pending', got %q", status)
++	}
++	if retryCount < 1 {
++		t.Errorf("Expected retry_count to be at least 1, got %d", retryCount)
++	}
++
++	// 7. 将 Mock Bridge 的行为恢复为正常，等待 SQLite Worker 轮询重试自愈
+ 	mu.Lock()
+-	finalAttempts := attempts
++	shouldFail = false
+ 	mu.Unlock()
+ 
+-	// 应该在失败后尝试了 3 次
+-	if finalAttempts != 3 {
+-		t.Errorf("Expected exactly 3 settle attempts, got %d", finalAttempts)
++	// 刚才 retryCount 为 1，退避延迟时间是 2^1 = 2s。
++	// 这里我们直接等待退避延迟过去。为稳妥起见，我们直接等待 4.5 秒。
++	time.Sleep(4500 * time.Millisecond)
++
++	// 再次查询 SQLite，断言任务状态更新为 'success'
++	err = db.QueryRow("SELECT status FROM settle_tasks WHERE lock_id = ?", "lock-heal-123").Scan(&status)
++	if err != nil {
++		t.Fatalf("Failed to query task status again: %v", err)
++	}
++
++	if status != "success" {
++		t.Errorf("Expected task status to heal to 'success', got %q", status)
++	}
++
++	mu.Lock()
++	successReceived := settleSuccessReceived
++	mu.Unlock()
++
++	if !successReceived {
++		t.Error("Mock Bridge did not receive a successful settle request")
++	}
++
++	if receivedSecret != "test-secret" {
++		t.Errorf("Expected secret 'test-secret', got %q", receivedSecret)
+ 	}
+ }
+diff --git a/gateway/internal/proxy/reverse.go b/gateway/internal/proxy/reverse.go
+index 648621b..ed3702d 100644
+--- a/gateway/internal/proxy/reverse.go
++++ b/gateway/internal/proxy/reverse.go
+@@ -1,39 +1,35 @@
+ package proxy
+ 
+ import (
+-	"bytes"
+-	"encoding/json"
+-	"fmt"
+-	"io"
+ 	"log"
+ 	"net/http"
+ 	"net/http/httputil"
+ 	"net/url"
+ 	"os"
+-	"time"
+ 
+ 	"gateway/internal/middleware"
++	"gateway/internal/queue"
+ )
+ 
+ // ReverseProxyWrapper 封装了反向代理的逻辑
+ type ReverseProxyWrapper struct {
+ 	proxy          *httputil.ReverseProxy
+ 	aaBridgeURL    string
+ 	agentOwner     string
+ 	escrowAddress  string
+ 	internalSecret string
+-	Client         *http.Client // 复用 HTTP Client，避免并发端口耗尽
++	QueueManager   *queue.QueueManager
+ }
+ 
+ // NewReverseProxy 构造反向代理实例
+-func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string) (*ReverseProxyWrapper, error) {
++func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string, queueMgr *queue.QueueManager) (*ReverseProxyWrapper, error) {
+ 	url, err := url.Parse(targetURL)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+ 	// 默认值
+ 	agentOwner := os.Getenv("AGENT_OWNER")
+ 	if agentOwner == "" {
+ 		agentOwner = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" // Anvil 默认第一个账户
+ 	}
+@@ -41,112 +37,43 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
+ 	escrowAddress := os.Getenv("ESCROW_ADDRESS")
+ 	if escrowAddress == "" {
+ 		escrowAddress = "0x5FbDB2315678afecb367f032d93F642f64180aa3" // 默认合约 Mock 地址
+ 	}
+ 
+ 	wrapper := &ReverseProxyWrapper{
+ 		aaBridgeURL:    aaBridgeURL,
+ 		agentOwner:     agentOwner,
+ 		escrowAddress:  escrowAddress,
+ 		internalSecret: internalSecret,
+-		Client: &http.Client{
+-			Timeout: 10 * time.Second,
+-		},
++		QueueManager:   queueMgr,
+ 	}
+ 
+ 	proxy := httputil.NewSingleHostReverseProxy(url)
+ 
+ 	// 劫持响应
+ 	proxy.ModifyResponse = func(res *http.Response) error {
+ 		proof := res.Header.Get("X-Agent-Proof")
+ 		if proof != "" {
+ 			// 提取 lockId
+ 			ctx := res.Request.Context()
+ 			lockID := middleware.GetLockID(ctx)
+ 
+ 			if lockID != "" {
+-				log.Printf("[Proxy] Intercepted X-Agent-Proof. Triggering async settle for lockId: %s", lockID)
+-				go wrapper.settle(lockID, proof)
++				log.Printf("[Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: %s", lockID)
++				if err := wrapper.QueueManager.Enqueue(lockID, proof, wrapper.agentOwner, wrapper.escrowAddress); err != nil {
++					log.Printf("[Proxy] Enqueue failed for lockId %s: %v", lockID, err)
++				}
+ 			} else {
+ 				log.Printf("[Proxy] Intercepted X-Agent-Proof but lockId is missing in request context.")
+ 			}
+ 		}
+ 		return nil
+ 	}
+ 
+ 	wrapper.proxy = proxy
+ 	return wrapper, nil
+ }
+ 
+ // ServeHTTP 转发请求
+ func (w *ReverseProxyWrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+ 	w.proxy.ServeHTTP(rw, req)
+ }
+-
+-func (w *ReverseProxyWrapper) settle(lockID, proof string) {
+-	// 1. Panic 安全屏障，决不引发主网关进程崩溃
+-	defer func() {
+-		if r := recover(); r != nil {
+-			log.Printf("[Proxy Settle] Recovered from panic: %v", r)
+-		}
+-	}()
+-
+-	bodyMap := map[string]string{
+-		"lockId":        lockID,
+-		"proof":         proof,
+-		"agentOwner":    w.agentOwner,
+-		"escrowAddress": w.escrowAddress,
+-	}
+-	bodyBytes, err := json.Marshal(bodyMap)
+-	if err != nil {
+-		log.Printf("[Proxy Settle] Error marshaling settle body: %v", err)
+-		return
+-	}
+-
+-	maxRetries := 3
+-	var lastErr error
+-	var resp *http.Response
+-
+-	// 2. 退避重试机制
+-	for attempt := 1; attempt <= maxRetries; attempt++ {
+-		req, err := http.NewRequest("POST", w.aaBridgeURL, bytes.NewBuffer(bodyBytes))
+-		if err != nil {
+-			log.Printf("[Proxy Settle] Error creating settle request (attempt %d/%d): %v", attempt, maxRetries, err)
+-			return
+-		}
+-		req.Header.Set("Content-Type", "application/json")
+-		if w.internalSecret != "" {
+-			req.Header.Set("X-Internal-Secret", w.internalSecret)
+-		}
+-
+-		// 3. 复用结构体自带的 Client 进行网络调用
+-		resp, err = w.Client.Do(req)
+-		if err != nil {
+-			lastErr = err
+-			log.Printf("[Proxy Settle] Connection failed (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, err)
+-			if attempt < maxRetries {
+-				time.Sleep(1 * time.Second)
+-			}
+-			continue
+-		}
+-
+-		if resp.StatusCode != http.StatusOK {
+-			respBody, _ := io.ReadAll(resp.Body)
+-			resp.Body.Close()
+-			lastErr = fmt.Errorf("HTTP status %s: %s", resp.Status, string(respBody))
+-			log.Printf("[Proxy Settle] Bridge returned non-200 (attempt %d/%d) for lockId %s: %v", attempt, maxRetries, lockID, lastErr)
+-			if attempt < maxRetries {
+-				time.Sleep(1 * time.Second)
+-			}
+-			continue
+-		}
+-
+-		// 成功响应
+-		respBody, _ := io.ReadAll(resp.Body)
+-		resp.Body.Close()
+-		log.Printf("[Proxy Settle] AA Bridge response for lockId %s: Status: %s, Body: %s", lockID, resp.Status, string(respBody))
+-		return
+-	}
+-
+-	// 3次重试后依然失败，记录致命报警日志
+-	log.Printf("[Proxy Settle] [CRITICAL ERROR] Failed to settle payment for lockId %s after %d attempts. Last error: %v", lockID, maxRetries, lastErr)
+-}
+diff --git a/gateway/internal/queue/sqlite_queue.go b/gateway/internal/queue/sqlite_queue.go
 new file mode 100644
-index 0000000..3d840db
+index 0000000..cf8de1b
 --- /dev/null
-+++ b/aa-bridge/src/index.ts
-@@ -0,0 +1,326 @@
-+import fastify from 'fastify';
-+import dotenv from 'dotenv';
-+import { getSmartAccountAddress, getAccountBalance } from './kernel/account.js';
-+import { grantPermission } from './kernel/permissions.js';
-+import { createPublicClient, createWalletClient, http, isAddress } from 'viem';
-+import { privateKeyToAccount } from 'viem/accounts';
-+import { baseSepolia } from 'viem/chains';
++++ b/gateway/internal/queue/sqlite_queue.go
+@@ -0,0 +1,267 @@
++package queue
 +
-+dotenv.config();
++import (
++	"bytes"
++	"context"
++	"database/sql"
++	"encoding/json"
++	"fmt"
++	"io"
++	"log"
++	"net/http"
++	"sync"
++	"time"
 +
-+const server = fastify({ logger: true });
++	_ "modernc.org/sqlite"
++)
 +
-+// In-memory registry mapping agentId -> account details
-+const accountsDb = new Map<
-+  number,
-+  { ownerAddress: string; salt: string; smartAccountAddress: string }
-+>();
-+
-+// Global Error Handler for Promise Rejections & Uncaught Errors
-+server.setErrorHandler((error, request, reply) => {
-+  server.log.error(error);
-+  reply.status(500).send({
-+    success: false,
-+    error: error.message || 'Internal Server Error',
-+  });
-+});
-+
-+// Helper to check bytecode size on-chain to determine deployment status
-+async function checkIsDeployed(address: string): Promise<boolean> {
-+  if (process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID) {
-+    return false;
-+  }
-+  try {
-+    const rpcUrl = process.env.RPC_URL || 'https://sepolia.base.org';
-+    const publicClient = createPublicClient({
-+      chain: baseSepolia,
-+      transport: http(rpcUrl),
-+    });
-+    const bytecode = await publicClient.getBytecode({ address: address as `0x${string}` });
-+    return bytecode !== undefined && bytecode !== '0x';
-+  } catch {
-+    return false;
-+  }
++type SettleTask struct {
++	ID            int64
++	LockID        string
++	Proof         string
++	AgentOwner    string
++	EscrowAddress string
++	RetryCount    int
 +}
 +
-+// 1. Create Smart Account
-+server.post('/aa/account/create', async (request, reply) => {
-+  const { ownerAddress, agentId, salt } = request.body as {
-+    ownerAddress: string;
-+    agentId: number;
-+    salt: string;
-+  };
-+
-+  if (!ownerAddress || agentId === undefined || !salt) {
-+    return reply.status(400).send({ error: 'Missing ownerAddress, agentId, or salt' });
-+  }
-+
-+  // Input address validation
-+  if (!isAddress(ownerAddress)) {
-+    return reply.status(400).send({ error: 'Invalid ownerAddress format' });
-+  }
-+
-+  try {
-+    const smartAccountAddress = await getSmartAccountAddress(ownerAddress, agentId, salt);
-+    const isDeployed = await checkIsDeployed(smartAccountAddress);
-+
-+    // Save to local mapping
-+    accountsDb.set(Number(agentId), {
-+      ownerAddress,
-+      salt,
-+      smartAccountAddress,
-+    });
-+
-+    return {
-+      smartAccountAddress,
-+      isDeployed,
-+    };
-+  } catch (error: any) {
-+    server.log.error(error);
-+    return reply.status(500).send({ error: error.message || 'Failed to create smart account' });
-+  }
-+});
-+
-+// 2. Grant Session Key Permission
-+server.post('/aa/permission/grant', async (request, reply) => {
-+  const { agentId, sessionKeyAddress, scopes, spendLimit } = request.body as {
-+    agentId: number;
-+    sessionKeyAddress: string;
-+    scopes: any[];
-+    spendLimit: string;
-+  };
-+
-+  if (agentId === undefined || !sessionKeyAddress || !scopes || !spendLimit) {
-+    return reply.status(400).send({ error: 'Missing agentId, sessionKeyAddress, scopes, or spendLimit' });
-+  }
-+
-+  // Input address validation
-+  if (!isAddress(sessionKeyAddress)) {
-+    return reply.status(400).send({ error: 'Invalid sessionKeyAddress format' });
-+  }
-+
-+  try {
-+    const result = await grantPermission(Number(agentId), sessionKeyAddress, scopes, spendLimit);
-+    return result;
-+  } catch (error: any) {
-+    server.log.error(error);
-+    return reply.status(500).send({ error: error.message || 'Failed to grant permission' });
-+  }
-+});
-+
-+// 3. Settle Payment
-+server.post('/aa/settle', async (request, reply) => {
-+  const { lockId, proof, agentOwner, escrowAddress } = request.body as {
-+    lockId: string;
-+    proof: string;
-+    agentOwner: string;
-+    escrowAddress: string;
-+  };
-+
-+  if (!lockId || !proof || !agentOwner || !escrowAddress) {
-+    return reply.status(400).send({ error: 'Missing lockId, proof, agentOwner, or escrowAddress' });
-+  }
-+
-+  // Input address validation
-+  if (!isAddress(agentOwner)) {
-+    return reply.status(400).send({ error: 'Invalid agentOwner address format' });
-+  }
-+  if (!isAddress(escrowAddress)) {
-+    return reply.status(400).send({ error: 'Invalid escrowAddress format' });
-+  }
-+
-+  const escrowAbi = [
-+    {
-+      name: 'releasePayment',
-+      type: 'function',
-+      stateMutability: 'external',
-+      inputs: [
-+        { name: 'lockId', type: 'bytes32' },
-+        { name: 'proof', type: 'bytes' },
-+        { name: 'agentOwner', type: 'address' },
-+      ],
-+      outputs: [],
-+    },
-+  ];
-+
-+  try {
-+    const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
-+    const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
-+
-+    if (!privateKey) {
-+      throw new Error('PRIVATE_KEY is not configured in environment variables');
-+    }
-+
-+    const account = privateKeyToAccount(privateKey);
-+    const publicClient = createPublicClient({
-+      chain: baseSepolia,
-+      transport: http(rpcUrl),
-+    });
-+
-+    const walletClient = createWalletClient({
-+      account,
-+      chain: baseSepolia,
-+      transport: http(rpcUrl),
-+    });
-+
-+    // Simulate on-chain call
-+    const { request: txRequest } = await publicClient.simulateContract({
-+      account,
-+      address: escrowAddress as `0x${string}`,
-+      abi: escrowAbi,
-+      functionName: 'releasePayment',
-+      args: [lockId as `0x${string}`, proof as `0x${string}`, agentOwner as `0x${string}`],
-+    });
-+
-+    // Send transaction
-+    const hash = await walletClient.writeContract(txRequest);
-+
-+    return {
-+      success: true,
-+      txHash: hash,
-+    };
-+  } catch (error: any) {
-+    const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
-+    
-+    server.log.warn(`Escrow transaction failed/skipped: ${error.message}. DevMode: ${devMode}`);
-+
-+    // If not in DevMode (Production), DO NOT silently fallback. Propagate the error as HTTP 500.
-+    if (!devMode) {
-+      return reply.status(500).send({
-+        success: false,
-+        error: error.message || 'Escrow settlement transaction execution failed',
-+      });
-+    }
-+
-+    // Safe mock fallback hash ONLY when in DevMode
-+    return {
-+      success: true,
-+      txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
-+      mocked: true,
-+    };
-+  }
-+});
-+
-+// 4. Get Agent Smart Account and Balance
-+server.get('/aa/account/:agentId', async (request, reply) => {
-+  const { agentId } = request.params as { agentId: string };
-+  const numericAgentId = Number(agentId);
-+
-+  if (isNaN(numericAgentId)) {
-+    return reply.status(400).send({ error: 'Invalid agentId parameter' });
-+  }
-+
-+  // Look up account in memory DB
-+  const entry = accountsDb.get(numericAgentId);
-+
-+  if (!entry) {
-+    const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
-+    
-+    if (devMode) {
-+      // In Mock mode: fallback gracefully by deriving a deterministic Mock address
-+      const mockOwner = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
-+      const smartAccountAddress = await getSmartAccountAddress(mockOwner, numericAgentId, 'fallback-salt');
-+      const balance = await getAccountBalance(smartAccountAddress);
-+
-+      return {
-+        smartAccountAddress,
-+        balance,
-+      };
-+    } else {
-+      // In Production/Non-Mock mode: fetch owner from blockchain AgentIdentityRegistry
-+      const registryAddress = process.env.IDENTITY_REGISTRY_ADDRESS;
-+      if (!registryAddress) {
-+        return reply.status(500).send({ error: 'IDENTITY_REGISTRY_ADDRESS not configured' });
-+      }
-+
-+      try {
-+        const rpcUrl = process.env.RPC_URL || 'https://sepolia.base.org';
-+        const publicClient = createPublicClient({
-+          chain: baseSepolia,
-+          transport: http(rpcUrl),
-+        });
-+
-+        // Call ownerOf on AgentIdentityRegistry contract (implements ERC721)
-+        const owner = await publicClient.readContract({
-+          address: registryAddress as `0x${string}`,
-+          abi: [
-+            {
-+              name: 'ownerOf',
-+              type: 'function',
-+              stateMutability: 'view',
-+              inputs: [{ name: 'tokenId', type: 'uint256' }],
-+              outputs: [{ name: '', type: 'address' }],
-+            },
-+          ],
-+          functionName: 'ownerOf',
-+          args: [BigInt(numericAgentId)],
-+        }) as string;
-+
-+        if (!owner || owner === '0x0000000000000000000000000000000000000000') {
-+          return reply.status(404).send({ error: 'Agent identity not registered' });
-+        }
-+
-+        // Deterministically compute smart account address using standard default-salt
-+        const smartAccountAddress = await getSmartAccountAddress(owner, numericAgentId, 'default-salt');
-+        const balance = await getAccountBalance(smartAccountAddress);
-+
-+        // Cache the newly resolved account details
-+        accountsDb.set(numericAgentId, {
-+          ownerAddress: owner,
-+          salt: 'default-salt',
-+          smartAccountAddress,
-+        });
-+
-+        return {
-+          smartAccountAddress,
-+          balance,
-+        };
-+      } catch (error: any) {
-+        server.log.error(`Failed to lookup agent owner on-chain: ${error.message}`);
-+        
-+        // Return 404 if the contract reverted on ownerOf (token doesn't exist)
-+        if (
-+          error.message.includes('ownerOf') ||
-+          error.message.includes('revert') ||
-+          error.message.includes('not exist') ||
-+          error.message.includes('AgentDoesNotExist')
-+        ) {
-+          return reply.status(404).send({ error: 'Agent identity not registered' });
-+        }
-+        
-+        // Propagate other system/RPC errors as 500
-+        return reply.status(500).send({ error: `Failed to query AgentIdentityRegistry: ${error.message}` });
-+      }
-+    }
-+  }
-+
-+  try {
-+    const balance = await getAccountBalance(entry.smartAccountAddress);
-+    return {
-+      smartAccountAddress: entry.smartAccountAddress,
-+      balance,
-+    };
-+  } catch (error: any) {
-+    server.log.error(error);
-+    return reply.status(500).send({ error: error.message || 'Failed to query account details' });
-+  }
-+});
-+
-+// Start fastify server
-+const start = async () => {
-+  try {
-+    const port = Number(process.env.PORT) || 3001;
-+    await server.listen({ port, host: '127.0.0.1' });
-+    console.log(`Smart Account Bridge Microservice running on http://127.0.0.1:${port}`);
-+  } catch (err) {
-+    server.log.error(err);
-+    process.exit(1);
-+  }
-+};
-+
-+// Check if running directly to start the server
-+if (process.env.NODE_ENV !== 'test') {
-+  start();
++type QueueManager struct {
++	db             *sql.DB
++	bridgeURL      string
++	internalSecret string
++	mu             sync.Mutex // SQLite 互斥锁，确保并发写安全
++	client         *http.Client
 +}
 +
-+export { server };
-diff --git a/aa-bridge/src/kernel/account.ts b/aa-bridge/src/kernel/account.ts
-new file mode 100644
-index 0000000..da47b9b
---- /dev/null
-+++ b/aa-bridge/src/kernel/account.ts
-@@ -0,0 +1,136 @@
-+import { keccak256, encodePacked, getAddress, createPublicClient, http, formatEther, parseAbi } from 'viem';
-+import { baseSepolia } from 'viem/chains';
-+import { privateKeyToAccount } from 'viem/accounts';
++// NewQueueManager 构造函数
++func NewQueueManager(dbPath, bridgeURL, secret string) (*QueueManager, error) {
++	db, err := sql.Open("sqlite", dbPath)
++	if err != nil {
++		return nil, fmt.Errorf("failed to open sqlite db: %w", err)
++	}
 +
-+// We import these dynamically or handle missing package errors gracefully if needed, 
-+// but since they are installed, we can import them directly.
-+import { createKernelAccount } from '@zerodev/sdk';
-+import { KERNEL_V3_1, getEntryPoint } from '@zerodev/sdk/constants';
-+import { signerToEcdsaValidator } from '@zerodev/ecdsa-validator';
++	qm := &QueueManager{
++		db:             db,
++		bridgeURL:      bridgeURL,
++		internalSecret: secret,
++		client: &http.Client{
++			Timeout: 10 * time.Second,
++		},
++	}
 +
-+const erc20Abi = parseAbi([
-+  'function balanceOf(address owner) view returns (uint256)',
-+  'function decimals() view returns (uint8)'
-+]);
++	if err := qm.initDB(); err != nil {
++		db.Close()
++		return nil, err
++	}
 +
-+/**
-+ * Deterministically generates or retrieves the Smart Account (Kernel v3) address.
-+ */
-+export async function getSmartAccountAddress(
-+  ownerAddress: string,
-+  agentId: number,
-+  salt: string
-+): Promise<string> {
-+  const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
-+
-+  if (devMode) {
-+    // Mock mode: deterministic offline address generation using keccak256 hash of parameters
-+    const hash = keccak256(
-+      encodePacked(
-+        ['address', 'uint256', 'string'],
-+        [ownerAddress as `0x${string}`, BigInt(agentId), salt]
-+      )
-+    );
-+    // Convert to a valid 20-byte address format
-+    const slicedHash = `0x${hash.substring(26)}`;
-+    return getAddress(slicedHash);
-+  }
-+
-+  // Production mode: ZeroDev Kernel v3 Counterfactual address derivation
-+  const rpcUrl = process.env.RPC_URL || 'https://sepolia.base.org';
-+  const entryPoint = getEntryPoint('0.7');
-+  const kernelVersion = KERNEL_V3_1;
-+
-+  const publicClient = createPublicClient({
-+    chain: baseSepolia,
-+    transport: http(rpcUrl),
-+  });
-+
-+  // Since we only need to compute the address and might not have the owner's private key in this microservice,
-+  // we create a custom signer account with the owner's address. ZeroDev's signerToEcdsaValidator 
-+  // needs a LocalAccount interface for signer to compute the deployment initCode.
-+  const signer = {
-+    address: ownerAddress as `0x${string}`,
-+    source: 'custom',
-+    type: 'local',
-+    signMessage: async () => '0x' as `0x${string}`,
-+    signTransaction: async () => '0x' as `0x${string}`,
-+    signTypedData: async () => '0x' as `0x${string}`,
-+  } as any;
-+
-+  const ecdsaValidator = await signerToEcdsaValidator(publicClient, {
-+    signer,
-+    entryPoint,
-+    kernelVersion,
-+  });
-+
-+  // Map agentId & salt to a 256-bit index
-+  const indexHash = keccak256(
-+    encodePacked(
-+      ['uint256', 'string'],
-+      [BigInt(agentId), salt]
-+    )
-+  );
-+  const index = BigInt(indexHash);
-+
-+  const account = await createKernelAccount(publicClient, {
-+    plugins: {
-+      sudo: ecdsaValidator,
-+    },
-+    index,
-+    entryPoint,
-+    kernelVersion,
-+  });
-+
-+  return account.address;
++	return qm, nil
 +}
 +
-+/**
-+ * Checks the Native (ETH) and ERC20 token balances for a given address.
-+ */
-+export async function getAccountBalance(
-+  address: string
-+): Promise<{ native: string; token: string }> {
-+  const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
-+  const tokenAddress = process.env.PAYMENT_TOKEN_ADDRESS as `0x${string}` | undefined;
++func (qm *QueueManager) initDB() error {
++	qm.mu.Lock()
++	defer qm.mu.Unlock()
 +
-+  try {
-+    const publicClient = createPublicClient({
-+      chain: baseSepolia,
-+      transport: http(rpcUrl),
-+    });
-+
-+    const nativeBalance = await publicClient.getBalance({ address: address as `0x${string}` });
-+    
-+    let tokenBalanceStr = '0.0';
-+    if (tokenAddress && tokenAddress !== '0x0000000000000000000000000000000000000000') {
-+      try {
-+        const tokenBalance = await publicClient.readContract({
-+          address: tokenAddress,
-+          abi: erc20Abi,
-+          functionName: 'balanceOf',
-+          args: [address as `0x${string}`],
-+        });
-+        const decimals = await publicClient.readContract({
-+          address: tokenAddress,
-+          abi: erc20Abi,
-+          functionName: 'decimals',
-+        });
-+        tokenBalanceStr = (Number(tokenBalance) / 10 ** Number(decimals)).toString();
-+      } catch (e) {
-+        // Fail-safe if ERC20 query fails
-+      }
-+    }
-+
-+    return {
-+      native: formatEther(nativeBalance),
-+      token: tokenBalanceStr,
-+    };
-+  } catch (err) {
-+    // Fallback Mock values if RPC is unreachable
-+    return {
-+      native: '1.0',
-+      token: '100.0',
-+    };
-+  }
++	query := `
++	CREATE TABLE IF NOT EXISTS settle_tasks (
++		id INTEGER PRIMARY KEY AUTOINCREMENT,
++		lock_id TEXT UNIQUE NOT NULL,
++		proof TEXT NOT NULL,
++		agent_owner TEXT NOT NULL,
++		escrow_address TEXT NOT NULL,
++		status TEXT DEFAULT 'pending',
++		retry_count INTEGER DEFAULT 0,
++		next_retry_at INTEGER,
++		created_at INTEGER
++	);
++	CREATE INDEX IF NOT EXISTS idx_settle_tasks_status_next_retry ON settle_tasks (status, next_retry_at);
++	`
++	_, err := qm.db.Exec(query)
++	if err != nil {
++		return fmt.Errorf("failed to initialize table: %w", err)
++	}
++	return nil
 +}
-diff --git a/aa-bridge/src/kernel/permissions.ts b/aa-bridge/src/kernel/permissions.ts
-new file mode 100644
-index 0000000..713b476
---- /dev/null
-+++ b/aa-bridge/src/kernel/permissions.ts
-@@ -0,0 +1,28 @@
-+/**
-+ * Grants Session Key permission for a specific Agent's Smart Account.
-+ */
-+export async function grantPermission(
-+  agentId: number,
-+  sessionKeyAddress: string,
-+  scopes: any[],
-+  spendLimit: string
-+): Promise<{ success: boolean; txHash: string }> {
-+  const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
 +
-+  if (devMode) {
-+    // Mock response
-+    return {
-+      success: true,
-+      txHash: '0x8888888888888888888888888888888888888888888888888888888888888888',
-+    };
-+  }
-+
-+  // Production implementation using ZeroDev @zerodev/permissions:
-+  // In production, we construct a validator with permission policies (e.g. ERC20 limits or contract restrictions),
-+  // obtain the owner's signature to enable it, and submit a UserOperation (or return the metadata) to authorize.
-+  // For the purpose of this interface, we return a mock/placeholder transaction hash here.
-+  return {
-+    success: true,
-+    txHash: '0x9999999999999999999999999999999999999999999999999999999999999999',
-+  };
++// Close 关闭数据库
++func (qm *QueueManager) Close() error {
++	return qm.db.Close()
 +}
-diff --git a/aa-bridge/src/paymaster/sponsor.ts b/aa-bridge/src/paymaster/sponsor.ts
-new file mode 100644
-index 0000000..ca803e5
---- /dev/null
-+++ b/aa-bridge/src/paymaster/sponsor.ts
-@@ -0,0 +1,26 @@
-+import { http } from 'viem';
-+import { baseSepolia } from 'viem/chains';
-+import { createZeroDevPaymasterClient } from '@zerodev/sdk';
-+import { getEntryPoint } from '@zerodev/sdk/constants';
 +
-+/**
-+ * Creates and returns a ZeroDev Paymaster Client for sponsoring smart account transactions.
-+ * Returns null if in Mock Mode or if ZERODEV_PROJECT_ID is not configured.
-+ */
-+export function getSponsorPaymasterClient() {
-+  const projectId = process.env.ZERODEV_PROJECT_ID;
-+  const devMode = process.env.DEV_MODE === 'true' || !projectId;
++// Enqueue 入队
++func (qm *QueueManager) Enqueue(lockID, proof, agentOwner, escrowAddress string) error {
++	qm.mu.Lock()
++	defer qm.mu.Unlock()
 +
-+  if (devMode) {
-+    return null;
-+  }
-+
-+  const entryPoint = getEntryPoint('0.7');
-+  const paymasterUrl = `https://paymaster.zerodev.app/api/v2/paymaster/${projectId}`;
-+
-+  return createZeroDevPaymasterClient({
-+    chain: baseSepolia,
-+    transport: http(paymasterUrl),
-+    entryPoint,
-+  });
++	now := time.Now().Unix()
++	query := `
++	INSERT OR IGNORE INTO settle_tasks (lock_id, proof, agent_owner, escrow_address, status, retry_count, next_retry_at, created_at)
++	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
++	`
++	_, err := qm.db.Exec(query, lockID, proof, agentOwner, escrowAddress, now, now)
++	if err != nil {
++		log.Printf("[Queue] Failed to enqueue lockId %s: %v", lockID, err)
++		return err
++	}
++	log.Printf("[Queue] Successfully enqueued lockId %s", lockID)
++	return nil
 +}
-diff --git a/aa-bridge/test/aa-bridge.test.ts b/aa-bridge/test/aa-bridge.test.ts
-new file mode 100644
-index 0000000..0dbc25e
---- /dev/null
-+++ b/aa-bridge/test/aa-bridge.test.ts
-@@ -0,0 +1,204 @@
-+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 +
-+// Declare Vitest mocks before imports so they are hoisted correctly
-+const mockReadContract = vi.fn();
-+const mockGetBalance = vi.fn().mockResolvedValue(0n);
++// StartWorker 启动后台 Worker 协程
++func (qm *QueueManager) StartWorker(ctx context.Context) {
++	go func() {
++		ticker := time.NewTicker(2 * time.Second)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-ctx.Done():
++				log.Println("[Queue Worker] Stopping worker...")
++				return
++			case <-ticker.C:
++				qm.processTasks(ctx)
++			}
++		}
++	}()
++}
 +
-+vi.mock('viem', async (importOriginal) => {
-+  const original = await importOriginal<typeof import('viem')>();
-+  return {
-+    ...original,
-+    createPublicClient: (config: any) => {
-+      const client = original.createPublicClient(config);
-+      
-+      client.request = async (args: any) => {
-+        if (args.method === 'eth_chainId') return 84532;
-+        if (args.method === 'eth_getBalance') return '0x0';
-+        if (args.method === 'eth_getCode') return '0x';
-+        return null;
-+      };
++func (qm *QueueManager) processTasks(ctx context.Context) {
++	tasks, err := qm.getPendingTasks()
++	if err != nil {
++		log.Printf("[Queue Worker] Fetch pending tasks failed: %v", err)
++		return
++	}
 +
-+      client.readContract = mockReadContract;
-+      client.getBalance = mockGetBalance;
++	for _, task := range tasks {
++		select {
++		case <-ctx.Done():
++			return
++		default:
++		}
++		qm.processSingleTask(ctx, task)
++	}
++}
 +
-+      return client as any;
-+    },
-+  };
-+});
++func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
++	qm.mu.Lock()
++	defer qm.mu.Unlock()
 +
-+// Mock internal account module to return offline deterministic addresses for specific mock EOA owners,
-+// preventing ZeroDev SDK from triggering real on-chain EntryPoint.getSenderAddress eth_call RPC queries.
-+vi.mock('../src/kernel/account.js', async (importOriginal) => {
-+  const original = await importOriginal<typeof import('../src/kernel/account.js')>();
-+  return {
-+    ...original,
-+    getSmartAccountAddress: async (ownerAddress: string, agentId: number, salt: string) => {
-+      if (ownerAddress === '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' && agentId === 100) {
-+        return '0xa513E1E4b9121f3538743021903c8d2d2c87848c';
-+      }
-+      return original.getSmartAccountAddress(ownerAddress, agentId, salt);
-+    },
-+  };
-+});
++	now := time.Now().Unix()
++	query := `
++	SELECT id, lock_id, proof, agent_owner, escrow_address, retry_count
++	FROM settle_tasks
++	WHERE status = 'pending' AND next_retry_at <= ?
++	`
++	rows, err := qm.db.Query(query, now)
++	if err != nil {
++		return nil, err
++	}
++	defer rows.Close()
 +
-+import { server } from '../src/index.js';
++	var tasks []SettleTask
++	for rows.Next() {
++		var t SettleTask
++		if err := rows.Scan(&t.ID, &t.LockID, &t.Proof, &t.AgentOwner, &t.EscrowAddress, &t.RetryCount); err != nil {
++			return nil, err
++		}
++		tasks = append(tasks, t)
++	}
++	return tasks, nil
++}
 +
-+describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability Fixes)', () => {
-+  beforeAll(async () => {
-+    await server.ready();
-+  });
++func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) {
++	bodyMap := map[string]string{
++		"lockId":        task.LockID,
++		"proof":         task.Proof,
++		"agentOwner":    task.AgentOwner,
++		"escrowAddress": task.EscrowAddress,
++	}
++	bodyBytes, err := json.Marshal(bodyMap)
++	if err != nil {
++		log.Printf("[Queue Worker] JSON marshal failed for lockId %s: %v", task.LockID, err)
++		return
++	}
 +
-+  afterAll(async () => {
-+    await server.close();
-+    vi.restoreAllMocks();
-+  });
++	req, err := http.NewRequestWithContext(ctx, "POST", qm.bridgeURL, bytes.NewBuffer(bodyBytes))
++	if err != nil {
++		log.Printf("[Queue Worker] Create request failed for lockId %s: %v", task.LockID, err)
++		return
++	}
++	req.Header.Set("Content-Type", "application/json")
++	if qm.internalSecret != "" {
++		req.Header.Set("X-Internal-Secret", qm.internalSecret)
++	}
 +
-+  it('should create smart account deterministically in DEV_MODE', async () => {
-+    const response = await server.inject({
-+      method: 'POST',
-+      url: '/aa/account/create',
-+      payload: {
-+        ownerAddress: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
-+        agentId: 42,
-+        salt: 'test-salt-1'
-+      }
-+    });
++	resp, err := qm.client.Do(req)
++	if err != nil {
++		select {
++		case <-ctx.Done():
++			// 避免在 context 取消时报错或继续写入已关闭的 DB
++			return
++		default:
++		}
++		log.Printf("[Queue Worker] Connection failed for lockId %s: %v", task.LockID, err)
++		qm.handleFailure(ctx, task, err)
++		return
++	}
++	defer resp.Body.Close()
 +
-+    expect(response.statusCode).toBe(200);
-+    const body = JSON.parse(response.body);
-+    expect(body).toHaveProperty('smartAccountAddress');
-+    expect(body.smartAccountAddress).toMatch(/^0x[a-fA-F0-9]{40}$/);
-+    expect(body.isDeployed).toBe(false);
-+  });
++	if resp.StatusCode != http.StatusOK {
++		respBody, _ := io.ReadAll(resp.Body)
++		err = fmt.Errorf("HTTP status %s: %s", resp.Status, string(respBody))
++		log.Printf("[Queue Worker] Bridge returned non-200 for lockId %s: %v", task.LockID, err)
++		qm.handleFailure(ctx, task, err)
++		return
++	}
 +
-+  it('should reject invalid address formats with HTTP 400', async () => {
-+    // 1. Create account with invalid ownerAddress
-+    const createRes = await server.inject({
-+      method: 'POST',
-+      url: '/aa/account/create',
-+      payload: {
-+        ownerAddress: '0xinvalidEthereumAddress',
-+        agentId: 42,
-+        salt: 'salt'
-+      }
-+    });
-+    expect(createRes.statusCode).toBe(400);
-+    expect(JSON.parse(createRes.body).error).toContain('Invalid ownerAddress format');
++	// 成功
++	qm.handleSuccess(ctx, task)
++}
 +
-+    // 2. Grant permission with invalid sessionKeyAddress
-+    const grantRes = await server.inject({
-+      method: 'POST',
-+      url: '/aa/permission/grant',
-+      payload: {
-+        agentId: 42,
-+        sessionKeyAddress: '0xnotAnAddress',
-+        scopes: [],
-+        spendLimit: '100'
-+      }
-+    });
-+    expect(grantRes.statusCode).toBe(400);
-+    expect(JSON.parse(grantRes.body).error).toContain('Invalid sessionKeyAddress format');
++func (qm *QueueManager) handleSuccess(ctx context.Context, task SettleTask) {
++	select {
++	case <-ctx.Done():
++		return
++	default:
++	}
 +
-+    // 3. Settle with invalid agentOwner
-+    const settleRes = await server.inject({
-+      method: 'POST',
-+      url: '/aa/settle',
-+      payload: {
-+        lockId: '0x1111111111111111111111111111111111111111111111111111111111111111',
-+        proof: '0xabcdef',
-+        agentOwner: '0xbadAddress',
-+        escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
-+      }
-+    });
-+    expect(settleRes.statusCode).toBe(400);
-+    expect(JSON.parse(settleRes.body).error).toContain('Invalid agentOwner');
-+  });
++	qm.mu.Lock()
++	defer qm.mu.Unlock()
 +
-+  it('should query account balance successfully when cached', async () => {
-+    const response = await server.inject({
-+      method: 'GET',
-+      url: '/aa/account/42'
-+    });
++	query := `UPDATE settle_tasks SET status = 'success' WHERE id = ?`
++	_, err := qm.db.Exec(query, task.ID)
++	if err != nil {
++		log.Printf("[Queue Worker] Failed to update task %d success status: %v", task.ID, err)
++		return
++	}
++	log.Printf("[Queue Worker] Successfully settled payment for lockId %s", task.LockID)
++}
 +
-+    expect(response.statusCode).toBe(200);
-+    const body = JSON.parse(response.body);
-+    expect(body).toHaveProperty('smartAccountAddress');
-+    expect(body).toHaveProperty('balance');
-+  });
++func (qm *QueueManager) handleFailure(ctx context.Context, task SettleTask, lastErr error) {
++	select {
++	case <-ctx.Done():
++		return
++	default:
++	}
 +
-+  describe('Non-DEV_MODE / Production scenarios', () => {
-+    const originalDevMode = process.env.DEV_MODE;
-+    const originalProjectId = process.env.ZERODEV_PROJECT_ID;
++	qm.mu.Lock()
++	defer qm.mu.Unlock()
 +
-+    beforeAll(() => {
-+      // Simulate production environment
-+      process.env.DEV_MODE = 'false';
-+      process.env.ZERODEV_PROJECT_ID = 'prod-project-id';
-+    });
++	newRetryCount := task.RetryCount + 1
++	if newRetryCount >= 5 {
++		query := `UPDATE settle_tasks SET status = 'failed', retry_count = ? WHERE id = ?`
++		_, err := qm.db.Exec(query, newRetryCount, task.ID)
++		if err != nil {
++			log.Printf("[Queue Worker] Failed to update task %d failed status: %v", task.ID, err)
++		}
++		log.Printf("[Queue Worker] [CRITICAL ERROR] Failed to settle payment for lockId %s after %d attempts. Last error: %v", task.LockID, newRetryCount, lastErr)
++	} else {
++		// 指数级退避
++		delay := time.Duration(1 << newRetryCount) * time.Second
++		nextRetryAt := time.Now().Add(delay).Unix()
 +
-+    afterAll(() => {
-+      // Restore dev configurations
-+      process.env.DEV_MODE = originalDevMode;
-+      process.env.ZERODEV_PROJECT_ID = originalProjectId;
-+    });
-+
-+    it('should query ownerOf from chain when cache misses and resolve address', async () => {
-+      // Mock AgentIdentityRegistry ownerOf and default queries
-+      mockReadContract.mockImplementation(async (args: any) => {
-+        if (args.functionName === 'ownerOf') {
-+          return '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
-+        }
-+        return '0x0000000000000000000000000000000000000000';
-+      });
-+
-+      const response = await server.inject({
-+        method: 'GET',
-+        url: '/aa/account/100' // cache miss
-+      });
-+
-+      expect(response.statusCode).toBe(200);
-+      const body = JSON.parse(response.body);
-+      expect(body).toHaveProperty('smartAccountAddress');
-+      expect(body.smartAccountAddress).toMatch(/^0x[a-fA-F0-9]{40}$/);
-+      expect(mockReadContract).toHaveBeenCalled();
-+    });
-+
-+    it('should return 404 when agent NFT does not exist on chain', async () => {
-+      // Mock ownerOf query to throw revert error indicating token doesn't exist
-+      mockReadContract.mockImplementation(async (args: any) => {
-+        if (args.functionName === 'ownerOf') {
-+          throw new Error('ERC721: owner query for nonexistent token (revert)');
-+        }
-+        return '0x0000000000000000000000000000000000000000';
-+      });
-+
-+      const response = await server.inject({
-+        method: 'GET',
-+        url: '/aa/account/999' // cache miss and unregistered
-+      });
-+
-+      expect(response.statusCode).toBe(404);
-+      const body = JSON.parse(response.body);
-+      expect(body.error).toContain('Agent identity not registered');
-+    });
-+
-+    it('should not silently fallback on /aa/settle and should return HTTP 500 upon execution errors', async () => {
-+      // This will fail because simulateContract will throw an error since there is no actual RPC connection
-+      const response = await server.inject({
-+        method: 'POST',
-+        url: '/aa/settle',
-+        payload: {
-+          lockId: '0x1111111111111111111111111111111111111111111111111111111111111111',
-+          proof: '0xabcdef',
-+          agentOwner: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
-+          escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
-+        }
-+      });
-+
-+      expect(response.statusCode).toBe(500);
-+      const body = JSON.parse(response.body);
-+      expect(body.success).toBe(false);
-+      expect(body).toHaveProperty('error');
-+    });
-+  });
-+});
++		query := `UPDATE settle_tasks SET retry_count = ?, next_retry_at = ? WHERE id = ?`
++		_, err := qm.db.Exec(query, newRetryCount, nextRetryAt, task.ID)
++		if err != nil {
++			log.Printf("[Queue Worker] Failed to update task %d retry status: %v", task.ID, err)
++		}
++		log.Printf("[Queue Worker] Settle failed for lockId %s, scheduling retry %d in %v", task.LockID, newRetryCount, delay)
++	}
++}

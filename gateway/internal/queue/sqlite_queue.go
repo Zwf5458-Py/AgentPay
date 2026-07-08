@@ -30,6 +30,7 @@ type QueueManager struct {
 	internalSecret string
 	mu             sync.Mutex // SQLite 互斥锁，确保并发写安全
 	client         *http.Client
+	wg             sync.WaitGroup // 追踪协程以实现优雅退出
 }
 
 // NewQueueManager 构造函数
@@ -37,6 +38,19 @@ func NewQueueManager(dbPath, bridgeURL, secret string) (*QueueManager, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite db: %w", err)
+	}
+
+	// 限制最大打开连接数为 1，彻底杜绝并发文件锁死
+	db.SetMaxOpenConns(1)
+
+	// 配置性能优化与忙碌重试
+	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set journal_mode WAL: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
 	}
 
 	qm := &QueueManager{
@@ -81,8 +95,9 @@ func (qm *QueueManager) initDB() error {
 	return nil
 }
 
-// Close 关闭数据库
+// Close 关闭数据库，阻塞等待重试协程安全退出
 func (qm *QueueManager) Close() error {
+	qm.wg.Wait()
 	return qm.db.Close()
 }
 
@@ -107,7 +122,9 @@ func (qm *QueueManager) Enqueue(lockID, proof, agentOwner, escrowAddress string)
 
 // StartWorker 启动后台 Worker 协程
 func (qm *QueueManager) StartWorker(ctx context.Context) {
+	qm.wg.Add(1)
 	go func() {
+		defer qm.wg.Done()
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {

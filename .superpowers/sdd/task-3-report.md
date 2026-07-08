@@ -97,3 +97,47 @@ PASS
 ok  	gateway/internal/middleware	9.538s
 ```
 **结果**：测试 100% 成功通过，Bridge 掉线自愈行为完全符合预期，且在优雅停止 Worker 期间没有任何冗余数据库报错，确保了生产级健壮性。
+
+---
+
+## 4. 并发控制与优雅退出加固 (Task 3 Fix)
+为了彻底避免高并发场景下 SQLite 文件锁冲突（`database is locked`）以及在进程/测试退出时因并发关闭造成的 `sql: database is closed` 隐患，我们追加了以下加固配置：
+
+### 4.1 SQLite 并发连接与吞吐配置优化
+- **单连接控制**：挂载 `db.SetMaxOpenConns(1)` 强制 SQLite 在写时使用单一连接，防止并发写入导致的文件争抢。
+- **预写日志（WAL 模式）**：在建表前执行 `PRAGMA journal_mode=WAL;`，极大提升了多线程读取时的并发读取吞吐性能。
+- **忙碌等待（Busy Timeout）**：执行 `PRAGMA busy_timeout=5000;`，设置在遭遇写入冲突时自动等待并重试最多 5 秒，提高了并发写操作的宽容度。
+
+### 4.2 协程优雅退出同步机制
+- **使用 `sync.WaitGroup` 追踪生命周期**：在 `QueueManager` 中增加 `wg sync.WaitGroup`，并在拉起重试协程前执行 `qm.wg.Add(1)`，退出时调用 `defer qm.wg.Done()`。
+- **加固 `Close()` 方法**：将原有的 `Close()` 方法修改为首先等待 WaitGroup 结束（`qm.wg.Wait()`），待重试 Worker 收到 context 信号并确认退出后，再最终关闭底层 `sql.DB` 的连接句柄。这确保了在测试或网关退出时，不会出现重试线程正在写数据库却遇到句柄已被提前关闭的问题。
+
+### 4.3 加固后的单元测试输出
+在 `gateway` 目录下执行单元测试：
+```bash
+go test -v ./...
+```
+测试输出：
+```
+=== RUN   TestX402Middleware_NoToken
+--- PASS: TestX402Middleware_NoToken (0.00s)
+=== RUN   TestX402Middleware_WithToken
+--- PASS: TestX402Middleware_WithToken (0.00s)
+=== RUN   TestProxyReverse_AsyncSettle
+2026/07/08 18:22:05 [Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: lock-999
+2026/07/08 18:22:05 [Queue] Successfully enqueued lockId lock-999
+2026/07/08 18:22:07 [Queue Worker] Stopping worker...
+--- PASS: TestProxyReverse_AsyncSettle (2.01s)
+=== RUN   TestProxyReverse_BridgeOutageSelfHealing
+2026/07/08 18:22:07 [Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: lock-heal-123
+2026/07/08 18:22:07 [Queue] Successfully enqueued lockId lock-heal-123
+2026/07/08 18:22:09 [Queue Worker] Bridge returned non-200 for lockId lock-heal-123: HTTP status 500 Internal Server Error: {"error":"bridge temp offline"}
+2026/07/08 18:22:09 [Queue Worker] Settle failed for lockId lock-heal-123, scheduling retry 1 in 2s
+2026/07/08 18:22:11 [Queue Worker] Successfully settled payment for lockId lock-heal-123
+2026/07/08 18:22:14 [Queue Worker] Stopping worker...
+--- PASS: TestProxyReverse_BridgeOutageSelfHealing (7.01s)
+PASS
+ok  	gateway/internal/middleware	10.227s
+```
+**加固结论**：测试再次 100% 成功通过，并且重试协程和 DB 在退出时的生命周期步调完全一致，消除了全部潜在的连接泄漏和退出时报错。
+
