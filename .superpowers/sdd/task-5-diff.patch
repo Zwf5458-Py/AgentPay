@@ -1,5 +1,5 @@
 diff --git a/aa-bridge/src/index.ts b/aa-bridge/src/index.ts
-index 7449c83..27da340 100644
+index 7449c83..80be4f4 100644
 --- a/aa-bridge/src/index.ts
 +++ b/aa-bridge/src/index.ts
 @@ -1,15 +1,15 @@
@@ -19,7 +19,8 @@ index 7449c83..27da340 100644
  // In-memory registry mapping agentId -> account details
  const accountsDb = new Map<
    number,
-@@ -123,108 +123,362 @@ server.post('/aa/permission/grant', async (request, reply) => {
+@@ -122,109 +122,377 @@ server.post('/aa/permission/grant', async (request, reply) => {
+   try {
      const result = await grantPermission(Number(agentId), sessionKeyAddress, scopes, spendLimit);
      return result;
    } catch (error: any) {
@@ -29,13 +30,31 @@ index 7449c83..27da340 100644
  });
  
  // 3. Settle Payment
- server.post('/aa/settle', async (request, reply) => {
+-server.post('/aa/settle', async (request, reply) => {
 -  const { lockId, proof, agentOwner, escrowAddress } = request.body as {
 -    lockId: string;
 -    proof: string;
 -    agentOwner: string;
 -    escrowAddress: string;
 -  };
+-
+-  if (!lockId || !proof || !agentOwner || !escrowAddress) {
+-    return reply.status(400).send({ error: 'Missing lockId, proof, agentOwner, or escrowAddress' });
++server.post('/aa/settle', {
++  schema: {
++    body: {
++      type: 'object',
++      properties: {
++        lockId: { type: 'string' },
++        proof: { type: 'string' },
++        channelId: { type: 'string' },
++        accumulatedAmount: { type: 'string' },
++        signature: { type: 'string' },
++        agentId: { type: 'integer' }
++      }
++    }
+   }
++}, async (request, reply) => {
 +  const body = request.body as any;
 +
 +  if (body && body.channelId !== undefined) {
@@ -47,13 +66,6 @@ index 7449c83..27da340 100644
 +      escrowAddress?: string;
 +    };
  
--  if (!lockId || !proof || !agentOwner || !escrowAddress) {
--    return reply.status(400).send({ error: 'Missing lockId, proof, agentOwner, or escrowAddress' });
--  }
-+    if (!channelId || accumulatedAmount === undefined || !signature || agentId === undefined) {
-+      return reply.status(400).send({ error: 'Missing channelId, accumulatedAmount, signature, or agentId' });
-+    }
- 
 -  // Input address validation
 -  if (!isAddress(agentOwner)) {
 -    return reply.status(400).send({ error: 'Invalid agentOwner address format' });
@@ -61,9 +73,8 @@ index 7449c83..27da340 100644
 -  if (!isAddress(escrowAddress)) {
 -    return reply.status(400).send({ error: 'Invalid escrowAddress format' });
 -  }
-+    const resolvedEscrowAddress = escrowAddress || process.env.ESCROW_ADDRESS;
-+    if (!resolvedEscrowAddress || !isAddress(resolvedEscrowAddress)) {
-+      return reply.status(400).send({ error: 'Invalid or missing escrowAddress' });
++    if (!channelId || accumulatedAmount === undefined || !signature || agentId === undefined) {
++      return reply.status(400).send({ error: 'Missing channelId, accumulatedAmount, signature, or agentId' });
 +    }
  
 -  const escrowAbi = [
@@ -79,6 +90,14 @@ index 7449c83..27da340 100644
 -      outputs: [],
 -    },
 -  ];
++    const resolvedEscrowAddress = escrowAddress || process.env.ESCROW_ADDRESS;
++    if (!resolvedEscrowAddress || !isAddress(resolvedEscrowAddress)) {
++      return reply.status(400).send({ error: 'Invalid or missing escrowAddress' });
++    }
+ 
+-  try {
+-    const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
+-    const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
 +    const escrowAbi = [
 +      {
 +        name: 'tbaImplementation',
@@ -144,37 +163,28 @@ index 7449c83..27da340 100644
 +      },
 +    ];
  
--  try {
--    const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
--    const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
-+    const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
- 
 -    if (!privateKey) {
 -      throw new Error('PRIVATE_KEY is not configured in environment variables');
 -    }
-+    try {
-+      const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
-+      const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
++    const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
  
 -    const account = privateKeyToAccount(privateKey);
 -    const publicClient = createPublicClient({
 -      chain: baseSepolia,
 -      transport: http(rpcUrl),
 -    });
-+      if (!privateKey) {
-+        throw new Error('PRIVATE_KEY is not configured in environment variables');
-+      }
++    try {
++      const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
++      const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
  
 -    const walletClient = createWalletClient({
 -      account,
 -      chain: baseSepolia,
 -      transport: http(rpcUrl),
 -    });
-+      const account = privateKeyToAccount(privateKey);
-+      const publicClient = createPublicClient({
-+        chain: baseSepolia,
-+        transport: http(rpcUrl),
-+      });
++      if (!privateKey) {
++        throw new Error('PRIVATE_KEY is not configured in environment variables');
++      }
  
 -    // Simulate on-chain call
 -    const { request: txRequest } = await publicClient.simulateContract({
@@ -184,18 +194,19 @@ index 7449c83..27da340 100644
 -      functionName: 'releasePayment',
 -      args: [lockId as `0x${string}`, proof as `0x${string}`, agentOwner as `0x${string}`],
 -    });
-+      const walletClient = createWalletClient({
-+        account,
++      const account = privateKeyToAccount(privateKey);
++      const publicClient = createPublicClient({
 +        chain: baseSepolia,
 +        transport: http(rpcUrl),
 +      });
  
 -    // Send transaction
 -    const hash = await walletClient.writeContract(txRequest);
-+      // 1. 获取 TBA 相关的合约地址
-+      let tbaImplementationAddress: string;
-+      let erc6551RegistryAddress: string;
-+      let agentIdentityRegistryAddress: string;
++      const walletClient = createWalletClient({
++        account,
++        chain: baseSepolia,
++        transport: http(rpcUrl),
++      });
  
 -    return {
 -      success: true,
@@ -205,6 +216,11 @@ index 7449c83..27da340 100644
 -    const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
 -    
 -    server.log.warn(`Escrow transaction failed/skipped: ${error.message}. DevMode: ${devMode}`);
++      // 1. 获取 TBA 相关的合约地址
++      let tbaImplementationAddress: string;
++      let erc6551RegistryAddress: string;
++      let agentIdentityRegistryAddress: string;
++
 +      try {
 +        tbaImplementationAddress = await publicClient.readContract({
 +          address: resolvedEscrowAddress as `0x${string}`,
@@ -273,12 +289,7 @@ index 7449c83..27da340 100644
 +          isDeployed = false;
 +        }
 +      }
- 
--    // If not in DevMode (Production), DO NOT silently fallback. Propagate the error as HTTP 500.
--    if (!devMode) {
--      return reply.status(500).send({
--        success: false,
--        error: error.message || 'Escrow settlement transaction execution failed',
++
 +      // 4. 若未部署，调用 createAccount 自动部署
 +      if (!isDeployed && !devMode) {
 +        const { request: deployRequest } = await publicClient.simulateContract({
@@ -299,7 +310,12 @@ index 7449c83..27da340 100644
 +      } else if (!isDeployed && devMode) {
 +        server.log.info(`Mock environment: Simulated deployment of TBA for agent ${agentId} at address ${computedTBA}`);
 +      }
-+
+ 
+-    // If not in DevMode (Production), DO NOT silently fallback. Propagate the error as HTTP 500.
+-    if (!devMode) {
+-      return reply.status(500).send({
+-        success: false,
+-        error: error.message || 'Escrow settlement transaction execution failed',
 +      // 5. 调用 batchSettle
 +      const bytes32ChannelId = pad(stringToHex(channelId), { size: 32 });
 +
@@ -526,10 +542,10 @@ index 0f57a9e..551ff2b 100644
      });
  
 diff --git a/sdk/src/client.ts b/sdk/src/client.ts
-index c9cfe24..1167e2b 100644
+index c9cfe24..3c7ea1f 100644
 --- a/sdk/src/client.ts
 +++ b/sdk/src/client.ts
-@@ -5,88 +5,133 @@ export interface AgentPayClientConfig {
+@@ -5,88 +5,142 @@ export interface AgentPayClientConfig {
    maxPriceLimit?: bigint;
    privateKey?: `0x${string}`;
    env?: 'development' | 'production';
@@ -541,6 +557,7 @@ index c9cfe24..1167e2b 100644
    private privateKey?: `0x${string}`;
    private env: 'development' | 'production';
 +  private channels = new Map<number, { id: string; confirmedSpend: bigint; accumulatedSpend: bigint; lastPrice: bigint }>();
++  private channelLocks = new Map<number, Promise<any>>();
  
    constructor(config: AgentPayClientConfig = {}) {
      this.gatewayUrl = config.gatewayUrl || 'http://127.0.0.1:8080';
@@ -550,6 +567,14 @@ index c9cfe24..1167e2b 100644
    }
  
    public async execute(agentId: number, input: string): Promise<any> {
++    const currentLock = this.channelLocks.get(agentId) || Promise.resolve();
++    const nextLock = currentLock.then(() => this.executeInternal(agentId, input));
++    // 捕获异常防止后续排队发生死锁阻塞
++    this.channelLocks.set(agentId, nextLock.catch(() => {}));
++    return nextLock;
++  }
++
++  private async executeInternal(agentId: number, input: string): Promise<any> {
      if (typeof input !== 'string' || input.trim() === '') {
        throw new Error('Invalid input. Must be a non-empty string.');
      }
@@ -631,15 +656,8 @@ index c9cfe24..1167e2b 100644
 +
 +        if (!priceStr || !paymentAddress) {
 +          throw new Error('Invalid HTTP 402 response from Gateway: missing headers');
-         }
--        // TODO: Implement EIP-3009 EIP-712 typing signature verification using viem.signTypedData
--        // 模拟/简化的 production 签名，可以带上生成的 mock lockId
--        const mockLockId = `lock-${Date.now()}`;
--        authorizationHeader = `Bearer ${mockLockId}:production-eip3009-signed-token`;
--      }
- 
--      // 二次请求
--      response = await this.sendRequest(agentId, input, authorizationHeader);
++        }
++
 +        if (!isAddress(paymentAddress)) {
 +          throw new Error('Invalid payment address in HTTP 402 headers');
 +        }
@@ -669,8 +687,15 @@ index c9cfe24..1167e2b 100644
 +          // 模拟/简化的 production 签名，可以带上生成的 mock lockId
 +          const mockLockId = `lock-${Date.now()}`;
 +          authorizationHeader = `Bearer ${mockLockId}:production-eip3009-signed-token`;
-+        }
-+
+         }
+-        // TODO: Implement EIP-3009 EIP-712 typing signature verification using viem.signTypedData
+-        // 模拟/简化的 production 签名，可以带上生成的 mock lockId
+-        const mockLockId = `lock-${Date.now()}`;
+-        authorizationHeader = `Bearer ${mockLockId}:production-eip3009-signed-token`;
+-      }
+ 
+-      // 二次请求
+-      response = await this.sendRequest(agentId, input, authorizationHeader);
 +        // 二次请求
 +        response = await this.sendRequest(agentId, input, authorizationHeader);
 +      }
@@ -697,7 +722,7 @@ index c9cfe24..1167e2b 100644
        headers['Authorization'] = authHeader;
      }
 diff --git a/sdk/test/e2e.test.ts b/sdk/test/e2e.test.ts
-index f6fca72..f812344 100644
+index f6fca72..a3eea16 100644
 --- a/sdk/test/e2e.test.ts
 +++ b/sdk/test/e2e.test.ts
 @@ -3,20 +3,21 @@ import http from 'http';
@@ -838,7 +863,8 @@ index f6fca72..f812344 100644
 +                res.writeHead(200, { 'Content-Type': 'application/json' });
 +                res.end(agentBody);
 +              });
-+            });
+             });
+-          });
 +            agentReq.write(reqBody);
 +            agentReq.end();
 +          } else {
@@ -900,17 +926,16 @@ index f6fca72..f812344 100644
 +                  }));
 +                  bridgeReq.end();
 +                }
-+
-+                res.writeHead(200, { 'Content-Type': 'application/json' });
-+                res.end(agentBody);
-+              });
-             });
--          });
  
 -          agentReq.write(reqBody);
 -          agentReq.end();
 -        });
 -      }
++                res.writeHead(200, { 'Content-Type': 'application/json' });
++                res.end(agentBody);
++              });
++            });
++
 +            agentReq.write(reqBody);
 +            agentReq.end();
 +          }
@@ -926,7 +951,7 @@ index f6fca72..f812344 100644
    await Promise.all([
      new Promise<void>(resolve => mockBridge.listen(BRIDGE_PORT, '127.0.0.1', resolve)),
      new Promise<void>(resolve => mockAgent.listen(AGENT_PORT, '127.0.0.1', resolve)),
-@@ -175,20 +256,60 @@ describe('AgentPay SDK E2E Integration Test', () => {
+@@ -175,20 +256,52 @@ describe('AgentPay SDK E2E Integration Test', () => {
      // Wait for the async settlement post requests to fully finish processing
      await new Promise(resolve => setTimeout(resolve, 100));
  
@@ -950,27 +975,19 @@ index f6fca72..f812344 100644
 +      env: 'development'
 +    });
 +
-+    // 第一次调用 (agentId 888)
-+    const result1 = await client.execute(888, 'Channel Call 1');
++    // 并发触发两个请求
++    const [result1, result2] = await Promise.all([
++      client.execute(888, 'Channel Call 1'),
++      client.execute(888, 'Channel Call 2')
++    ]);
++
 +    expect(result1.output).toBe('Processed by AgentPay AI: Channel Call 1');
-+
-+    // 等待异步网关转发和桥结算完成
-+    await new Promise(resolve => setTimeout(resolve, 100));
-+
-+    expect(gatewayRequestCount).toBe(2); // 第一笔会经历 1 次 402 + 1 次重试 (2)
-+    expect(agentRequestCount).toBe(1);
-+    expect(bridgeRequestCount).toBe(1);
-+    expect(bridgeLastBody.channelId).toBe('channel-888');
-+    expect(bridgeLastBody.accumulatedAmount).toBe('1000');
-+
-+    // 第二次调用 (agentId 888)
-+    const result2 = await client.execute(888, 'Channel Call 2');
 +    expect(result2.output).toBe('Processed by AgentPay AI: Channel Call 2');
 +
 +    // 等待异步网关转发和桥结算完成
 +    await new Promise(resolve => setTimeout(resolve, 100));
 +
-+    expect(gatewayRequestCount).toBe(3); // 第二笔直接带上累计金额 2000 发送 (3)
++    expect(gatewayRequestCount).toBe(3); // 第一笔 1 次 402 + 1 次重试，第二笔排队执行直接携带累计额通过，共 3 次请求
 +    expect(agentRequestCount).toBe(2);
 +    expect(bridgeRequestCount).toBe(2);
 +    expect(bridgeLastBody.channelId).toBe('channel-888');
