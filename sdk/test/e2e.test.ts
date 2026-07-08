@@ -181,4 +181,14 @@ describe('AgentPay SDK E2E Integration Test', () => {
 
     await expect(client.execute(1, 'Exp')).rejects.toThrow('Price limit exceeded');
   });
+
+  it('should throw error if maxPriceLimit is set to 0n', async () => {
+    const client = new AgentPayClient({
+      gatewayUrl: `http://127.0.0.1:${GATEWAY_PORT}`,
+      maxPriceLimit: 0n,
+      env: 'development'
+    });
+
+    await expect(client.execute(1, 'Test 0n Limit')).rejects.toThrow('Price limit exceeded');
+  });
 });

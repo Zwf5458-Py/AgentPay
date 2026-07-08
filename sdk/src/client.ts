@@ -15,7 +15,7 @@ export class AgentPayClient {
 
   constructor(config: AgentPayClientConfig = {}) {
     this.gatewayUrl = config.gatewayUrl || 'http://127.0.0.1:8080';
-    this.maxPriceLimit = config.maxPriceLimit || 5000n;
+    this.maxPriceLimit = config.maxPriceLimit ?? 5000n;
     this.privateKey = config.privateKey;
     this.env = config.env || 'production';
   }
@@ -44,7 +44,13 @@ export class AgentPayClient {
         throw new Error('Invalid payment address in HTTP 402 headers');
       }
 
-      const price = BigInt(priceStr);
+      let price: bigint;
+      try {
+        price = BigInt(priceStr);
+      } catch (err) {
+        throw new Error(`Invalid HTTP 402 price format from Gateway: ${priceStr}`);
+      }
+
       if (price > this.maxPriceLimit) {
         throw new Error(`Price limit exceeded: Price is ${price}, max limit is ${this.maxPriceLimit}`);
       }
@@ -59,6 +65,7 @@ export class AgentPayClient {
         if (!this.privateKey) {
           throw new Error('Private key is required for production signing');
         }
+        // TODO: Implement EIP-3009 EIP-712 typing signature verification using viem.signTypedData
         // 模拟/简化的 production 签名，可以带上生成的 mock lockId
         const mockLockId = `lock-${Date.now()}`;
         authorizationHeader = `Bearer ${mockLockId}:production-eip3009-signed-token`;
