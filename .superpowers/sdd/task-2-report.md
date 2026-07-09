@@ -1,59 +1,87 @@
-# Task 2 执行报告: ERC-6551 TBA 智能体收款执行账户部署与防御
+# Task 2 Completion Report: Go 反向代理中签署并分发清算凭证 (Settle Receipt)
 
-## 1. 任务目标
-实现标准的 ERC-6551 智能体代币绑定账户（TBA）`AgentTokenBoundAccount.sol`，修改托管结算合约 `PaymentEscrow.sol` 并在结算中强制绑定专属 TBA 地址验证，拦截非 TBA 的越权接收地址，并提供 100% 通过的单元测试覆盖。
+## 任务状态与结果
+所有任务要求已成功执行。已按照 TDD（测试驱动开发）的最佳实践完成开发：
 
-## 2. 涉及改动文件
-- **新增**: `contracts/src/interfaces/IERC6551Account.sol` (TBA 标准账户接口)
-- **新增**: `contracts/src/payment/AgentTokenBoundAccount.sol` (TBA 账户实现合约)
-- **修改**: `contracts/src/payment/PaymentEscrow.sol` (增加 TBA 校验防御)
-- **修改**: `contracts/test/PaymentEscrowTest.t.sol` (编写 Mock Registry 并新增 3 个 TBA 结算与权限测试)
-- **新增**: `docs/superpowers/plans/2026-07-08-tba-payment-defense-plan.md` (详细的开发实现计划)
+1. **测试先行**：
+   - 创建了 `gateway/internal/proxy/proxy_hold_test.go` 并加入了两个关键测试用例：
+     - `TestProxy_SettleReceipt`：用于验证在配置了 `GATEWAY_PRIVATE_KEY` 环境变量时，网关能成功生成并校验合法的以太坊 Settle Receipt。
+     - `TestProxy_SettleReceipt_MockKey`：用于验证在未配置 `GATEWAY_PRIVATE_KEY` 时，网关能在内存中自动随机生成临时 ECDSA 密钥（自愈/开发模式），且签名格式与以太坊标准无缝对齐。
+2. **测试失败验证**：
+   - 在未修改反向代理逻辑时执行了 `go test -v ./internal/proxy -run TestProxy_SettleReceipt`，确认测试因缺少 `X-402-Settle-Receipt` 头部而完全失败（FAIL）。
+3. **功能实现**：
+   - 依赖项升级：在 `gateway/go.mod` 中引入了标准的以太坊开发包 `github.com/ethereum/go-ethereum`，以便使用最标准的以太坊 SECP256k1 椭圆曲线签名生成算法（以支持后续 solidity 智能合约的乐观清算 `ecrecover` 校验）。
+   - 私钥管理与自愈：升级了 `NewReverseProxy` 构造方法，使其支持从环境变量 `GATEWAY_PRIVATE_KEY` 中读取十六进制私钥。如果未配置或读取错误，则自动回退至使用 `crypto.GenerateKey()` 动态在内存中生成临时密钥以利于本地开发与自动化测试自愈。
+   - 实际开销捕获与校验：
+     - 提取被代理响应头中的 `X-Agent-Cost` 以获得下游 Eliza 处理任务的实际开销。若该字段缺失或不可解析，默认回退至 `1000` 微额度单价。
+     - 增加安全边界校验：限制实际扣减额 `actualCost` 不得大于客户端本轮预授权冻结的 `HoldAmount`，若超标则强制截断限制在 `HoldAmount`。
+   - 以太坊 Settle Receipt 签名生成：
+     - 拼接要签名的纯文本：`<channelId>:<holdAmount>:<actualCost>:<nonce>`。
+     - 使用以太坊个人消息前缀（`\x19Ethereum Signed Message:\n<length>`）拼接后计算其 `Keccak256` 哈希。
+     - 使用网关私钥签名生成 65 字节签名数据，并将 V 值对齐为以太坊标准的 `V = V + 27`。
+     - 将签名使用 Hex 编码（带 `0x` 前缀），在响应头中附加 `X-402-Settle-Receipt: <channelId>:<holdAmount>:<actualCost>:<nonce>:<receipt_sig>`。
+4. **测试通过验证**：
+   - 执行了 `go test -v ./internal/proxy` 确认新增的两个代理清算测试全部通过（PASS）。
+   - 执行了 `go test -v ./...` 确认整个 `gateway` 项目所有测试 100% 成功通过，未引入任何 Regression 故障。
+5. **Git 提交**：
+   - 已将修改的文件（`reverse.go`、`proxy_hold_test.go`、`go.mod`、`go.sum`）完美提交至 Git。
 
-## 3. 实现与架构设计
-### 3.1 ERC-6551 账户实现 (`AgentTokenBoundAccount.sol`)
-- 挂接并实现标准接口 `IERC6551Account` 的 `token()`, `state()`, `isValidSigner()`, `receive()`。
-- `token()` 返回创建时通过 `immutable` 构造参数存入的 NFT 绑定属性 `(chainIdVal, tokenContractVal, tokenIdVal)`。
-- 实现 `execute(address to, uint256 value, bytes calldata data)`：
-  - **安全校验**：仅允许此 TBA 绑定的 Agent NFT 的 owner (`tokenContractVal.ownerOf(tokenIdVal)`) 触发。非 owner 触发直接 revert `NotOwner()`，有效防范未授权资金移出。
-  - **调用执行**：通过底层的 `to.call{value: value}(data)` 执行具体外部调用，并安全返回执行结果字节码。
+---
 
-### 3.2 托管结算绑定 TBA 防御 (`PaymentEscrow.sol`)
-- 添加状态变量：`erc6551Registry`，`tbaImplementation`，`agentIdentityRegistry`，并在构造函数中增加校验并进行初始化。
-- 在 `releasePayment` (单笔 TEE 结算) 与 `batchSettle` (状态通道批量 EIP-712 签名结算) 转账结算前，增加专属 TBA 防御防线：
-  - 调用 `IERC6551Registry(erc6551Registry).account(...)` 实时推导专属 TBA 账户地址。
-  - 校验结算时的接收者 `agentOwner` 必须等于该计算出来的专属 TBA 地址。如果不匹配，抛出 `InvalidAddress()` 异常拦截结算。
+## Git 提交详情
+- **Commit Hash**: `f32b17c6`
+- **Commit Message**: `feat: generate and append settle receipt signature in proxy`
+- **修改文件**:
+  - `gateway/internal/proxy/reverse.go`
+  - `gateway/internal/proxy/proxy_hold_test.go`
+  - `gateway/go.mod`
+  - `gateway/go.sum`
 
-### 3.3 单元测试覆盖 (`PaymentEscrowTest.t.sol`)
-- **Mock Registry 编写**：编写了符合标准接口的 `MockERC6551Registry` 合约，通过 Solidity 内置的 `create2` 字节码哈希计算算法，保证 `account` 视图返回的地址与 `createAccount` 实际部署的合约地址 100% 一致。
-- **重构 setUp**：在测试设置阶段部署了 `AgentIdentityRegistry` 作为 Agent NFT 注册器、`AgentTokenBoundAccount` 实现模板和 Mock Registry。同时预先为 `agentId = 88` 模拟部署了专属的 TBA 地址，并将 TBA 地址直接赋给测试的 `agentOwner`。这样原有的所有测试用例自然将资金流向 TBA 账户，平滑过渡。
-- **新增测试用例**：
-  1. `test_BatchSettleToTBARecipientSuccess`：校验批量结算时结算金额能正确划入对应的 TBA 账户，剩余资金返还 payer。
-  2. `test_BatchSettleToNonTBARecipientReverts`：校验当结算接收方传入普通 EOA 地址（非计算出来的 TBA 地址）时，直接 Revert 拦截。
-  3. `test_TBAExecuteOnlyOwner`：测试非 NFT owner 调用 TBA 的 `execute` 方法转移资产被 `NotOwner()` 拦截，而 NFT owner 调用则能成功通过。
+---
 
-## 4. 验证与测试结果
-在 `contracts` 目录下运行 `forge test` 的结果为：
-- 编译无警告或错误（除了无关的第三方库 ECDSA.sol）。
-- 2 个测试套件（`AgentIdentityTest` 和 `PaymentEscrowTest`）共计 31 个测试用例全部 **100% 跑通**，无任何失败记录。
+## 单元测试执行摘要
+- **测试命令**: `go test -v ./internal/proxy`
+- **运行结果**: `PASS`
+- **耗时**: `0.568s`
+- **测试用例列表**:
+  - `TestProxy_SettleReceipt` (PASS，在配置了私钥环境变量下验证，签名恢复校验成功)
+  - `TestProxy_SettleReceipt_MockKey` (PASS，在未配置私钥环境下验证内存自愈临时私钥，签名恢复校验成功)
 
-## 5. Git 提交记录
-- **Git Commit Hash**: `5474696169690af9db033e71e9d166963ea7871e`
-- **Git Commit 缩写**: `5474696`
-- **提交内容**: 包括本任务新增的 TBA 接口与实现、对 `PaymentEscrow` 的修改、对应的全面单元测试用例，以及开发计划文档。
+- **全项目测试命令**: `go test -v ./...`
+- **运行结果**: `PASS`
+- **耗时**: `10.142s` (cached for proxy)
 
-## 6. 缺陷修复与优化加固记录 (2026-07-08 追加)
-针对 ERC-6551 规范一致性缺陷及 Escrow 静态配置优化，我们执行了以下修复与重构：
-1. **修复 TBA state() 规范一致性缺陷**：
-   - 在 `AgentTokenBoundAccount.sol` 中添加私有状态变量 `uint256 private _state;`，重构 `state()` 视图方法由 `pure` 变为 `view` 返回 `_state` 值。
-   - 在 `execute` 方法成功执行外部调用后自增 `_state`：`_state++`，以符合 ERC-6551 标准对状态改变的更新规范。
-2. **优化外部调用错误回滚冒泡**：
-   - 重构 `AgentTokenBoundAccount.sol` 的 `execute` 方法中外部调用失败的拦截。在 `!success` 时，通过 Solidity 内建 inline assembly 提取底层调用抛出的原始 revert 数据，并向上冒泡（Bubble Up）还原抛出，解决了直接 revert 缺乏细节报错信息的问题。
-3. **托管地址配置 Immutable 优化**：
-   - 将 `PaymentEscrow.sol` 中的 `erc6551Registry`、`tbaImplementation` 及 `agentIdentityRegistry` 状态变量均改写为 `immutable` 类型，并在构造函数中直接配置，优化了每次读取专属 TBA 时的 SLOAD 消耗，在单测交易执行中证明了节约 gas 的效果。
-4. **清理冗余变量与追加测试用例**：
-   - 清理了 `PaymentEscrowTest.t.sol` 测试合约中的 Mock Registry 未使用的 `_accounts` 状态变量。
-   - 追加测试用例 `test_TBAExecuteIncrementsState()`：验证 NFT owner 拥有者在 TBA 执行 `execute` 划转资金成功后，TBA 的 `state()` 相比执行前确切递增了 1。
-5. **验证结果**：
-   - 重新执行 `forge test -v`，编译警告被全部消除，所有 32 个测试全部通过（32 passed）。
+---
+
+## 修复补充报告：Reviewer 发现的修复实施
+
+根据 Reviewer 提出的缺陷，我们实施了以下两个重要修复：
+
+### 1. 强制私钥加载错误 (Enforce Private Key Errors)
+- **改进逻辑**：如果配置了环境变量 `GATEWAY_PRIVATE_KEY`（非空），但是十六进制解码或 `HexToECDSA` 解析出错，反向代理初始化不再默认 fallback 生成随机内存密钥，而是直接返回 error 终止服务启动。
+- **单元测试**：新增 `TestProxy_InvalidPrivateKeyError`，专门模拟设置非法私钥格式并确认 `NewReverseProxy` 正确抛出带有 `"failed to parse GATEWAY_PRIVATE_KEY"` 字样的 error。
+
+### 2. 下游缺失 `X-Agent-Cost` 头部警告 (Warn/Debug on Missing X-Agent-Cost Header)
+- **改进逻辑**：在代理响应拦截器的 `ModifyResponse` 中，如果下游响应中缺乏 `X-Agent-Cost` 头部或解析失败并退回到 `1000` 额度时，会输出 log 日志：`"No X-Agent-Cost header found in downstream response, defaulting to cost 1000"`。
+- **单元测试**：新增 `TestProxy_MissingAgentCost`，模拟下游没有配置该响应头的情景，并断言清算凭证最终实际开销仍然能够成功回退默认 `1000` 且程序运行正常。
+
+---
+
+## Git 提交详情 (修复)
+- **Commit Hash**: `7136b195ff5020afc7bb8dc629f6820295fdf8bc`
+- **Commit Message**: `fix(proxy): enforce private key error and log warn on missing X-Agent-Cost header`
+- **修改文件**:
+  - `gateway/internal/proxy/reverse.go`
+  - `gateway/internal/proxy/proxy_hold_test.go`
+
+---
+
+## 单元测试执行摘要 (修复)
+- **测试命令**: `go test -v ./internal/proxy/...`
+- **运行结果**: `PASS`
+- **测试用例列表 (共 4 个测试用例)**:
+  - `TestProxy_SettleReceipt` (PASS, 0.01s)
+  - `TestProxy_SettleReceipt_MockKey` (PASS, 0.01s)
+  - `TestProxy_InvalidPrivateKeyError` (PASS, 0.00s)
+  - `TestProxy_MissingAgentCost` (PASS, 0.00s)
 
