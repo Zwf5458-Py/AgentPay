@@ -11,8 +11,11 @@ import (
 type contextKey string
 
 const (
-	TokenContextKey  contextKey = "x402_token"
-	LockIDContextKey contextKey = "x402_lock_id"
+	TokenContextKey      contextKey = "x402_token"
+	LockIDContextKey     contextKey = "x402_lock_id"
+	HoldAmountContextKey contextKey = "x402_hold_amount"
+	ChannelIDContextKey  contextKey = "x402_channel_id"
+	SignatureContextKey  contextKey = "x402_signature"
 )
 
 type ErrorResponse struct {
@@ -38,6 +41,28 @@ func X402Middleware(next http.Handler) http.Handler {
 		token = strings.TrimSpace(token)
 		if token == "" {
 			trigger402(w)
+			return
+		}
+
+		// 尝试解析 EIP-712 Hold 格式：Bearer <channelId>:<holdAmount>:<nonce>:<expiration>:<sig>
+		parts := strings.Split(token, ":")
+		if len(parts) == 5 {
+			channelID := parts[0]
+			holdAmount := parts[1]
+			sig := parts[4]
+
+			if lockID == "" {
+				lockID = channelID
+			}
+
+			ctx := r.Context()
+			ctx = context.WithValue(ctx, TokenContextKey, token)
+			ctx = context.WithValue(ctx, LockIDContextKey, lockID)
+			ctx = context.WithValue(ctx, HoldAmountContextKey, holdAmount)
+			ctx = context.WithValue(ctx, ChannelIDContextKey, channelID)
+			ctx = context.WithValue(ctx, SignatureContextKey, sig)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
@@ -78,6 +103,30 @@ func GetToken(ctx context.Context) string {
 	return ""
 }
 
+// GetHoldAmount 从 context 中获取 holdAmount
+func GetHoldAmount(ctx context.Context) string {
+	if val, ok := ctx.Value(HoldAmountContextKey).(string); ok {
+		return val
+	}
+	return ""
+}
+
+// GetChannelID 从 context 中获取 channelId
+func GetChannelID(ctx context.Context) string {
+	if val, ok := ctx.Value(ChannelIDContextKey).(string); ok {
+		return val
+	}
+	return ""
+}
+
+// GetSignature 从 context 中获取 signature
+func GetSignature(ctx context.Context) string {
+	if val, ok := ctx.Value(SignatureContextKey).(string); ok {
+		return val
+	}
+	return ""
+}
+
 func trigger402(w http.ResponseWriter) {
 	// 获取 ESCROW_ADDRESS 环境变量，默认为 Mock 合约地址
 	escrowAddr := os.Getenv("ESCROW_ADDRESS")
@@ -90,6 +139,8 @@ func trigger402(w http.ResponseWriter) {
 	w.Header().Set("X-402-Chain", "base-sepolia")
 	w.Header().Set("X-402-Payment-Address", escrowAddr)
 	w.Header().Set("X-402-Version", "1")
+	w.Header().Set("X-402-Payment-Type", "channel")
+	w.Header().Set("X-402-Hold-Amount", "50000")
 	w.Header().Set("Content-Type", "application/json")
 
 	w.WriteHeader(http.StatusPaymentRequired) // 402

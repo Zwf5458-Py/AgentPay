@@ -572,4 +572,70 @@ func TestDebugTasks(t *testing.T) {
 	}
 }
 
+func TestX402Middleware_HoldAmount(t *testing.T) {
+	// 1. 测试不带 Auth 头时，必须返回 402 并携带 X-402-Payment-Type: channel 和 X-402-Hold-Amount: 50000
+	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/agent/execute", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	// 验证 402 状态码
+	if rr.Code != http.StatusPaymentRequired {
+		t.Errorf("Expected status code %d, got %d", http.StatusPaymentRequired, rr.Code)
+	}
+
+	// 验证新增的 Headers
+	paymentType := rr.Header().Get("X-402-Payment-Type")
+	if paymentType != "channel" {
+		t.Errorf("Expected X-402-Payment-Type to be 'channel', got %q", paymentType)
+	}
+
+	holdAmount := rr.Header().Get("X-402-Hold-Amount")
+	if holdAmount != "50000" {
+		t.Errorf("Expected X-402-Hold-Amount to be '50000', got %q", holdAmount)
+	}
+
+	// 2. 测试带上 EIP-712 Hold 格式 Auth 头时放行并正确注入 Context
+	var capturedHoldAmount string
+	var capturedChannelID string
+	var capturedSignature string
+
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHoldAmount = middleware.GetHoldAmount(r.Context())
+		capturedChannelID = middleware.GetChannelID(r.Context())
+		capturedSignature = middleware.GetSignature(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler = middleware.X402Middleware(nextHandler)
+
+	req = httptest.NewRequest("GET", "/agent/execute", nil)
+	// Bearer <channelId>:<holdAmount>:<nonce>:<expiration>:<sig>
+	req.Header.Set("Authorization", "Bearer 0xChannel123:50000:nonce456:exp789:0xSigabc")
+	rr = httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	if capturedHoldAmount != "50000" {
+		t.Errorf("Expected captured hold amount '50000', got %q", capturedHoldAmount)
+	}
+
+	if capturedChannelID != "0xChannel123" {
+		t.Errorf("Expected captured channel ID '0xChannel123', got %q", capturedChannelID)
+	}
+
+	if capturedSignature != "0xSigabc" {
+		t.Errorf("Expected captured signature '0xSigabc', got %q", capturedSignature)
+	}
+}
+
+
 
