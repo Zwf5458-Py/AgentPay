@@ -18,7 +18,8 @@ AgentPay 是一个专为 AI 智能体（AI Agents）设计的高并发、低延�
 │             Go Gateway (微支付协商限流网关)              │
 │    - Token Bucket Rate Limiter (IP 限流防御)           │
 │    - X-402 Challenge intercept (捕获与重定向)           │
-│    - SQLite Persistent Queue (防宕机任务持久化)          │
+│    - SQLite Persistent Queue (防阻断任务持久化)          │
+│    - EIP-712 ChannelHold Auth & Receipt Settle         │
 └──────────────────────────┬─────────────────────────────┘
                            │ 2. 异步投递结算任务 (CORS / Secret)
                            ▼
@@ -41,26 +42,30 @@ AgentPay 是一个专为 AI 智能体（AI Agents）设计的高并发、低延�
 ## 2. 核心特性
 
 - **X-402 协议自愈与状态通道集成**：当客户端发起没有授权的请求时，网关返回 HTTP 402 挑战。客户端 SDK 自动在链上锁定资金，本地通过 Promise 排队锁累加消费额度并自签名，网关识别放行，实现“即付即用，单次扣费”。
-- **高性能 Go 持久化队列**：Go Gateway 采用 SQLite 作为本地持久化任务队列（使用 CGO-free 纯 Go 驱动，WAL 模式以及连接数控制防死锁），网关拦截 proof 后只入库即返回，消除阻塞，并由后台协程 Worker 配合指数级退避算法执行异步链上结算。
+- **EIP-712 链下信贷锁定与清算自愈 (Pre-auth Hold & Settle Receipt)**：
+  - 针对高并发与高价值 Agent 任务，网关对未授权请求发起大额 Hold 挑战（如 0.05 USDC 的微额度）。
+  - 智能体 SDK 本地生成 EIP-712 `ChannelHold` 签名。网关使用 `crypto.SigToPub` 进行密码学签名恢复和有效性验证（包括 Expiration 过期校验与格式审计）。
+  - 任务完成后，网关用 ECDSA 密钥签署最终的 `Settle Receipt` 凭证回传，客户端核实后自动将确认额修正回落为 `lastConfirmedSpend + actualCost`，实现全链下零 Gas 费的信贷解冻。
+- **高性能 Go 持久化队列**：Go Gateway 采用 SQLite 作为本地持久化任务队列（使用 CGO-free 纯 Go 驱动，WAL 模式以及连接数控制防死锁），网关拦截 proof 后只入库即返回，消除阻塞，并由后台协程 Worker 配合指数级退避算法执行异步链上结算。支持通过 `channelID:nonce` 复合主键防范并发 SQLite 写入的主键冲突。
 - **动态 TBA 收款安全防线**：AA Bridge 在结算时通过合约动态派生计算专属 TBA 收款地址。若收款地址未部署则自动上链部署，且托管合约限制释放时接收方必须完全等于派生 TBA，锁死资金流向。
 - **抗 DDOS 与 IP 欺骗限流中间件**：网关最外层配备令牌桶限流，超限返回 429。内置 5 分钟 TTL 定期垃圾回收，防范海量随机 IP 伪造攻击造成的内存泄漏；仅在 `TRUST_PROXY=true` 时才采信 `X-Forwarded-For`。
-- **高质感调试沙盒 (Playground)**：提供开箱即用、拥有毛玻璃科技感美学的 `playground.html` 单页。内置了并发排队锁，支持纯前端 Mock 演示与本地后端直连联调。
+- **高质感调试沙盒 (Playground)**：提供开箱即用、拥有毛玻璃科技感美学的 `playground.html` 单页。内置了并发排队锁，展示信贷锁定 Hold Amount 和 Settle Receipt 自愈过程，支持纯前端 Mock 演示与本地后端直连联调。
 
 ---
 
 ## 3. 技术栈与模块目录
 
 - **`contracts/`**：以太坊智能合约部分，基于 Foundry 编译测试。
-  - `PaymentEscrow.sol`：状态通道累积清算与超时清退合约。
+  - `PaymentEscrow.sol`：状态通道累计清算与超时清退合约。
   - `AgentTokenBoundAccount.sol`：满足 6551 规范的智能体收款控制账户。
 - **`gateway/`**：微支付协商网关，基于 Go 开发。
-  - 核心功能：限流、X-402 拦截拦截、SQLite 持久化任务队列。
+  - 核心功能：限流、X-402 预授权校验拦截、Settle Receipt 签名生成、SQLite 持久化任务队列。
 - **`aa-bridge/`**：零知识账户桥接器，基于 Fastify + Viem + TypeScript 开发。
   - 核心功能：TBA 地址反查与自动部署，发起合约交互结算。
 - **`agent/`**：模拟智能体推理计算，基于 Fastify + TypeScript 开发。
   - 核心功能：生成符合 ERC-8004 的推理证明 Header `X-Agent-Proof`。
 - **`sdk/`**：客户端 TS SDK。
-  - 核心功能：402 拦截重试、并发串行排队锁、累加签名生成。
+  - 核心功能：402 拦截重试、并发串行排队锁（具有 `.finally()` 销毁防 Promise 内存泄露设计）、EIP-712 预授权本地签名、清算凭证解密更新。
 
 ---
 
@@ -116,14 +121,17 @@ docker compose up --build
 2. **访问面板**：
    在浏览器中打开：`http://localhost:8000/playground.html`。
 3. **双轨测试模式**：
-   - **Mock 演示模式**：开启时无需启动任何后端进程，双击 `Execute` 或 `Concurrent Execute` 即可在控制台和 Timeline 时序图中动态查看 402 自愈与 Promise 并发排队锁的运作过程。
+   - **Mock 演示模式**：开启时无需启动任何后端进程，双击 `Execute` 或 `Concurrent Execute` 即可在控制台和 Timeline 时序图中动态查看 402 自愈与 Promise 并发排队锁、信贷预授权锁定、清算凭证解冻自愈的运作过程。
    - **本地直连调试**：开启时，面板红绿灯会自动检测本地 8080 和 3001 的健康状况。点击 Execute 会发送真实请求，中间面板的 SQLite 后台队列监视表每隔 2 秒自动刷新。
 
 ---
 
 ## 6. 协议清算逻辑细节
 
-状态通道清算采用 EIP-712 规范，类型散列配置如下：
-$$\text{computedHash} = \text{keccak256}(\text{abi.encode}(\text{CHANNEL\_SETTLE\_TYPEHASH}, \text{channelId}, \text{accumulatedAmount}))$$
+### 6.1 预授权信贷挑战 (Channel Hold)
+状态通道预授权采用 EIP-712 规范，类型散列配置如下：
+$$\text{computedHash} = \text{keccak256}(\text{abi.encode}(\text{ChannelHold(bytes32 channelId,uint256 holdAmount,uint256 nonce,uint256 expiration)}, \text{channelId}, \text{holdAmount}, \text{nonce}, \text{expiration}))$$
 
-在结算阶段，合约的 `batchSettle` 会通过 `ECDSA.recover` 还原签名人，确保其必须为该通道的锁定发起人（Payer），从而防范 Settler 冒签，并将款项无误转给该 Agent 对应的专属 TBA。
+### 6.2 链上批量清算 (Batch Settle)
+在结算阶段，合约的 `batchSettle` 会通过 `ECDSA.recover` 还原签名人，确保其必须为该通道的锁定发起人（Payer），从而防范 Settler 冒签，并将款项无误转给该 Agent 对应的专属 TBA：
+$$\text{computedHash} = \text{keccak256}(\text{abi.encode}(\text{CHANNEL\_SETTLE\_TYPEHASH}, \text{channelId}, \text{accumulatedAmount}))$$

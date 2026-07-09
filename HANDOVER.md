@@ -1,14 +1,14 @@
-# AgentPay 二期优化与 Web 调试沙盒交接总结报告 (Handover Report)
+# AgentPay 三期优化：免 Gas 费高频微支付网关交接总结报告 (Handover Report)
 
-本交接文档汇总了截止到当前会话所有已完成的二期架构优化、安全加固及 Web 调试沙盒的交付状况。新会话启动后，可直接读取本文件恢复完整的开发上下文。
+本交接文档汇总了截止到当前会话已完成的免 Gas 费高频微支付网关（信贷预授权锁定与清算自愈）的交付状况。新会话启动后，可直接读取本文件恢复完整的开发上下文。
 
 ---
 
 ## 1. 全局开发状态与最新提交
 
 - **当前分支**: `main`
-- **代码状态**: 所有优化、加固与 Web 调试面板功能已全部开发完毕，测试 100% 通过，分支安全合并归档。
-- **最新 Git Commit Hash**: `9e9339c7662515f280ed86b68f3f4ff38e7ee8ec`
+- **代码状态**: 所有加固和新特性开发已全部完成，单元测试 100% 通过，分支安全提交归档。
+- **最新 Git Commit Hash**: `7186e0128e30a949ff80ff71ce8a9c7f13ae7f2f`
 - **已合并功能版块**:
   1. 智能合约层状态通道扩展与 EIP-712 批量清算 (Task 1)
   2. ERC-6551 TBA 收款安全防御拦截与 immutable 地址优化 (Task 2)
@@ -17,47 +17,44 @@
   5. TS 客户端 SDK 状态通道余额自愈与并发排队锁 (Task 5)
   6. 后端 CORS 跨域放行、Go 网关 `/debug/tasks` SQLite 查询接口 (Playground Task 1-2)
   7. 根目录下 Vanilla HTML5/CSS/JS 高质感毛玻璃调试面板 `playground.html` (Playground Task 3)
+  8. **智能体免 Gas 费高频微支付网关（信贷预授权锁定与清算自愈）(本期加固核心)**：
+     - Go 中间件 EIP-712 `ChannelHold` 签名校验与过期时间拦截（Task 1）
+     - Go 反向代理 Settle Receipt 签名生成、负数防御、溢出保护与生产硬防线（Task 2）
+     - TS SDK 预授权 EIP-712 签名、网关凭证校验自愈与并发 Promise 内存泄露治理（Task 3）
+     - 沙盒 Playground 预授权锁定和解冻动效与高精度 USDC 渲染展示（Task 4）
 
 ---
 
 ## 2. 核心技术架构与安全加固逻辑 (供下一任 Agent 恢复知识)
 
-新代理在继续迭代时需防范以下已固化的安全边界设计：
+新代理在继续迭代时需防范并知悉以下已固化的安全边界与架构设计：
 
-### 2.1 EIP-712 状态通道与自愈重试
-- 状态通道在链下采用累进签名机制。客户端 SDK 内置 Map 缓存 confirmedSpend 额度。遭遇 402 时，额度递增，使用 EIP-712 生成新签名，重新在 Authorization 标头中携带 `Bearer <channelId>:<accumulatedSpend>:<sig>`。
-- **并发排队锁**：在客户端 SDK (`src/client.ts`) 以及沙盒前端 (`playground.html`) 均实现基于 Promise 链的 `channelLocks` 排队锁。并发请求（如 `Promise.all`）被强制串行处理，防范了额度重放冲突；同时通过 `.catch` 确保发生网络错误时，锁正常释放，不锁死队列。
+### 2.1 EIP-712 链下信贷锁定与乐观惩罚机制 (A2A 预授权)
+- **触发挑战**：网关在处理请求前进行校验。若无授权，拦截并返回 `HTTP 402` 并返回头 `X-402-Payment-Type: channel` 和 `X-402-Hold-Amount: 50000` (单次最大信贷锁额度)。
+- **客户端本地签名**：TS SDK 利用 viem 及其本地私钥对 `ChannelHold` 结构进行 EIP-712 签名。包含：`channelId` (bytes32)、`holdAmount` (uint256)、`nonce` (uint256)、`expiration` (uint256)。格式化标头：`Authorization: Bearer <channelId>:<holdAmount>:<nonce>:<expiration>:<sig>`。
+- **网关密码学解签校验**：在 `middleware/x402.go` 中，网关采用 `crypto.SigToPub` 从 `sig` 中恢复出以太坊地址。如果签名恢复失败、已过期（`expiration < time.Now().Unix()`）、格式畸形或恢复地址与配置的 `CLIENT_ADDRESS` 不符，直接予以熔断拦截。
+- **清算凭证与自愈**：下游执行完成后，网关通过 ECDSA 私钥生成以太坊标准个人消息签名（Settle Receipt）写回 `X-402-Settle-Receipt` 头。TS SDK 校验 receipt 签名无误后，自动回落并修正本地 `confirmedSpend = lastConfirmedSpend + actualCost`，防范过度扣款并解冻未消费的资金。
 
-### 2.2 ERC-6551 TBA 收款相等性防御
-- `PaymentEscrow.sol` 限制结算释放时接收方必须完全等于派生 TBA 地址：
-  $$\text{computedTBA} = \text{IERC6551Registry}(\text{erc6551Registry}).account(\text{tbaImplementation}, \text{salt}, \text{chainId}, \text{agentNFT}, \text{agentId});$$
-  强制校验防篡改；`PaymentEscrow` 内的 Registry 等配置地址均标记为 `immutable` 节省 SLOAD Gas。
-- TBA 账户 (`AgentTokenBoundAccount.sol`) 的 `execute` 方法外部成功调用后 `state()` 私有变量动态自增（完全符合 6551 规范），调用失败使用 assembly inline `revert(add(result, 32), mload(result))` 冒泡原始错误。
-
-### 2.3 SQLite 任务持久化队列安全性
-- Go 网关引入无 CGO 依赖的 `modernc.org/sqlite`。
-- 配置 `SetMaxOpenConns(1)`、`journal_mode=WAL` 及 `busy_timeout=5000` 防并发写入冲突死锁。
-- 后台重试 Worker 接入 `sync.WaitGroup` 生命周期追踪。在 `Close()` 时阻塞等待 Worker 彻底退出再关闭底层 DB 连接，解决了 `sql: database is closed` 优雅退出错误。
-- 任务重试采用指数级退避算法：$delay = 2^{retry\_count}$ 秒，最大重试 5 次。
-
-### 2.4 限流与 IP 提取防御
-- Chi 最外层限流（Rate=5, Burst=10），限流器与 `lastSeen` 绑定，网关开启后台 Cleanup 协程，每分钟剔除 5 分钟未活跃的 IP 释放内存，防御 OOM。
-- 默认只提取 `r.RemoteAddr` 剥离端口作为真实 IP，仅在 `TRUST_PROXY=true` 时信任 `X-Forwarded-For`。
+### 2.2 防御与资源加固
+- **生产环境私钥硬熔断**：在生产环境下（`env == "production"`），若漏配或写错 `GATEWAY_PRIVATE_KEY` 导致解析出错，网关拒绝隐式 fallback 生成随机密钥启动，直接报错异常退出，防止垫付资金链上清算失败。
+- **防溢出与负数扣减校验**：反向代理层严格过滤负数开销，并限制 `actualCost <= holdVal`。下游 Agent 返回负数或解析失败时，强制兜底回退费用为 `1000` 并输出警告。
+- **主键唯一化防冲突**：入队结算 SQLite 队列时，采用 `fmt.Sprintf("%s:%s", channelID, nonce)` 拼接成唯一的 `lockID`，彻底解决单通道多轮并发在 `lock_id UNIQUE` 约束下的主键冲突。
+- **TS SDK Promise 内存泄漏治理**：SDK 引入活跃请求计数器。当排队 Promise 结束后计数降为 0（队列已清空），主动从 Map 中 `delete` 对应的 Promise 节点，打断链式引用链，使 GC 能正常释放 Resolved 节点。
 
 ---
 
-## 3. 全链路测试覆盖率状况
+## 3. 全链路测试验证状况
 
-目前系统测试处于 100% 成功状态。交接后如有改动，可通过以下命令验证：
+目前系统测试处于 **100% 成功** 状态。交接后如有改动，可通过以下命令验证：
 
 1. **智能合约测试**:
    `cd contracts && forge test -v` (32 个用例全部 PASS)
 2. **Go Gateway 网关测试**:
-   `cd gateway && go test -v ./...` (8 个用例全部 PASS，涵盖限流、CORS、debug 路由)
+   `cd gateway && go test -v ./...` (14 个用例全部 PASS，涵盖 EIP-712 验签、限流、CORS、debug 路由)
 3. **AA Bridge 桥接层测试**:
    `cd aa-bridge && npm run test` (10 个用例全部 PASS，涵盖 CORS 预检放行)
 4. **TS Client SDK 测试**:
-   `cd sdk && npm run test` (5 个 E2E 用例全部 PASS，涵盖 Promise.all 并发锁校验)
+   `cd sdk && npm run test` (6 个用例全部 PASS，涵盖 EIP-712 签名/恢复自愈验证与并发排队锁校验)
 
 ---
 
@@ -65,11 +62,9 @@
 
 当下一个开发会话启动后，建议推进以下工作：
 
-1. **Docker-Compose 本地沙盒实测**：
-   - 运行 `docker compose up --build` 启动全链路容器。
-   - 运行 `python3 -m http.server 8000`。
-   - 浏览器打开 `http://localhost:8000/playground.html` 切换为 **Live直连模式**，测试真实环境下的自愈和后台 SQLite 状态表格刷新。
-2. **生产环境网络部署与 Anvil 分叉适配**：
-   - 目前 AA Bridge 在 `DEV_MODE=false` 时，调用 `publicClient.getBytecode` 来检测 TBA 状态；建议在新对话中配置真实的 Base Sepolia 环境变量（ZERODEV_PROJECT_ID、PRIVATE_KEY、RPC_URL），使用真实网路进行非 Mock 交易验证。
-3. **接入真实的智能体 Eliza AI 插件**：
-   - 目前 `/agent/execute` 仅返回模拟答复。后续可以让 Eliza Agent 真实通过 `/agent/execute` 承载复杂的推理，并在 Response Header 中附带 Base64 编码的 `X-Agent-Proof` 签名挑战。
+1. **时间容差与重放防范细化**：
+   - 目前过期时间校验为单边强制拦截，建议在 `x402.go` 中引入 5-10 秒的时钟漂移偏差容忍度（Skew Tolerance），防止客户端与网关时钟不完全同步导致频繁报错；同时可以加入过期上限拦截，如 `expiration > now + 3600*2` 视为非法，防重放期过长。
+2. **SQLite 历史数据清理机制**：
+   - 随着通道使用频次增高，SQLite 中的 `settle_tasks` 任务数量会无限增大。可以在 `QueueManager` 内部添加定时 Cleanup 任务，定期删除 `status = 'success'` 且超过 30 天的历史记录。
+3. **Eliza AI 实物插件完整闭环**：
+   - 对接 Eliza 智能体真实推理计算，并在 Response Header 中附带 Base64 编码的 `X-Agent-Proof` 签名挑战。
