@@ -320,4 +320,120 @@ func TestProxy_MissingAgentCost(t *testing.T) {
 	}
 }
 
+func TestProxy_SettleReceipt_NegativeCost(t *testing.T) {
+	os.Unsetenv("GATEWAY_PRIVATE_KEY")
 
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Agent-Proof", "MockProofNegativeCost")
+		w.Header().Set("X-Agent-Cost", "-500")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"output":"agent replied"}`))
+	}))
+	defer agentServer.Close()
+
+	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true}`))
+	}))
+	defer bridgeServer.Close()
+
+	dbPath := t.TempDir() + "/test_proxy_negative_cost.db"
+	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
+	if err != nil {
+		t.Fatalf("Failed to create QueueManager: %v", err)
+	}
+	defer queueMgr.Close()
+
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
+	if err != nil {
+		t.Fatalf("Failed to create reverse proxy: %v", err)
+	}
+
+	handler := middleware.X402Middleware(gatewayProxy)
+
+	req := httptest.NewRequest("POST", "/agent/execute", nil)
+	futureExp := time.Now().Unix() + 3600
+	futureExpStr := strconv.FormatInt(futureExp, 10)
+	req.Header.Set("Authorization", "Bearer 0xChannelMock:20000:999:"+futureExpStr+":0xSigabc")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	receipt := rr.Header().Get("X-402-Settle-Receipt")
+	if receipt == "" {
+		t.Fatal("Expected X-402-Settle-Receipt header, but got none")
+	}
+
+	parts := strings.Split(receipt, ":")
+	if len(parts) != 5 {
+		t.Fatalf("Expected 5 parts in SettleReceipt header, got %d: %q", len(parts), receipt)
+	}
+
+	actualCost := parts[2]
+	if actualCost != "1000" {
+		t.Errorf("Expected default actualCost to be '1000' when X-Agent-Cost is negative, got %q", actualCost)
+	}
+}
+
+func TestProxy_SettleReceipt_MalformedCost(t *testing.T) {
+	os.Unsetenv("GATEWAY_PRIVATE_KEY")
+
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Agent-Proof", "MockProofMalformedCost")
+		w.Header().Set("X-Agent-Cost", "abc")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"output":"agent replied"}`))
+	}))
+	defer agentServer.Close()
+
+	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true}`))
+	}))
+	defer bridgeServer.Close()
+
+	dbPath := t.TempDir() + "/test_proxy_malformed_cost.db"
+	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
+	if err != nil {
+		t.Fatalf("Failed to create QueueManager: %v", err)
+	}
+	defer queueMgr.Close()
+
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
+	if err != nil {
+		t.Fatalf("Failed to create reverse proxy: %v", err)
+	}
+
+	handler := middleware.X402Middleware(gatewayProxy)
+
+	req := httptest.NewRequest("POST", "/agent/execute", nil)
+	futureExp := time.Now().Unix() + 3600
+	futureExpStr := strconv.FormatInt(futureExp, 10)
+	req.Header.Set("Authorization", "Bearer 0xChannelMock:20000:999:"+futureExpStr+":0xSigabc")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	receipt := rr.Header().Get("X-402-Settle-Receipt")
+	if receipt == "" {
+		t.Fatal("Expected X-402-Settle-Receipt header, but got none")
+	}
+
+	parts := strings.Split(receipt, ":")
+	if len(parts) != 5 {
+		t.Fatalf("Expected 5 parts in SettleReceipt header, got %d: %q", len(parts), receipt)
+	}
+
+	actualCost := parts[2]
+	if actualCost != "1000" {
+		t.Errorf("Expected default actualCost to be '1000' when X-Agent-Cost is malformed, got %q", actualCost)
+	}
+}

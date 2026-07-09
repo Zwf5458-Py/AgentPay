@@ -113,9 +113,16 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 				log.Println("[Proxy] No X-Agent-Cost header found in downstream response, defaulting to cost 1000")
 			} else {
 				if costVal, err := strconv.ParseInt(costStr, 10, 64); err == nil {
-					actualCost = costVal
+					if costVal < 0 {
+						log.Println("[Proxy] Invalid negative X-Agent-Cost value found in downstream response, defaulting to cost 1000")
+						log.Printf("[Proxy] Failed to parse X-Agent-Cost header: '%s' (or it is negative), defaulting to cost 1000", costStr)
+						actualCost = 1000
+					} else {
+						actualCost = costVal
+					}
 				} else {
-					log.Println("[Proxy] No X-Agent-Cost header found in downstream response, defaulting to cost 1000")
+					log.Printf("[Proxy] Failed to parse X-Agent-Cost header: '%s' (or it is negative), defaulting to cost 1000", costStr)
+					actualCost = 1000
 				}
 			}
 
