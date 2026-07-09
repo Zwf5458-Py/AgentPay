@@ -701,6 +701,115 @@
     ::-webkit-scrollbar-thumb:hover {
       background: rgba(255, 255, 255, 0.25);
     }
+
+    /* 预授权扩展状态徽章 */
+    .badge-status-glow {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.25rem 0.6rem;
+      border-radius: 99px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+    .badge-status-glow.idle {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text-muted);
+    }
+    .badge-status-glow.locked {
+      background: rgba(245, 158, 11, 0.15);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      color: var(--neon-amber);
+      box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
+    }
+    .badge-status-glow.settled {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      color: var(--neon-emerald);
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.15);
+    }
+
+    /* 锁定与结算状态下的卡片光环 */
+    .ledger-card.state-locked {
+      border-color: rgba(245, 158, 11, 0.4) !important;
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3), 
+                  0 0 15px rgba(245, 158, 11, 0.2);
+      animation: card-locked-pulse 2s infinite ease-in-out;
+    }
+    
+    .ledger-card.state-settled {
+      border-color: rgba(16, 185, 129, 0.6) !important;
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3), 
+                  0 0 25px rgba(16, 185, 129, 0.35);
+      animation: card-settled-flash 0.5s 1 ease-in-out;
+    }
+
+    /* 锁定状态呼吸光晕 */
+    @keyframes card-locked-pulse {
+      0% {
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3), 0 0 10px rgba(245, 158, 11, 0.15);
+      }
+      50% {
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3), 0 0 25px rgba(245, 158, 11, 0.35);
+        border-color: rgba(245, 158, 11, 0.6) !important;
+      }
+      100% {
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3), 0 0 10px rgba(245, 158, 11, 0.15);
+      }
+    }
+
+    /* 结算瞬间爆闪光晕 */
+    @keyframes card-settled-flash {
+      0% {
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3), 0 0 5px rgba(16, 185, 129, 0.1);
+      }
+      50% {
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3), 0 0 35px rgba(16, 185, 129, 0.6);
+        transform: scale(1.02);
+      }
+      100% {
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3), 0 0 15px rgba(16, 185, 129, 0.2);
+      }
+    }
+
+    /* 数据框高亮特效 */
+    .ledger-value-box.highlight-hold {
+      border: 1px dashed rgba(245, 158, 11, 0.2);
+    }
+    .ledger-card.state-locked .ledger-value-box.highlight-hold {
+      background: rgba(245, 158, 11, 0.08);
+      border-color: rgba(245, 158, 11, 0.4);
+    }
+    .ledger-card.state-locked .ledger-value-box.highlight-hold .hold-val {
+      color: var(--neon-amber);
+      text-shadow: 0 0 8px var(--neon-amber);
+    }
+
+    .ledger-value-box.highlight-settle {
+      border: 1px dashed rgba(16, 185, 129, 0.2);
+    }
+    .ledger-card.state-settled .ledger-value-box.highlight-settle {
+      background: rgba(16, 185, 129, 0.08);
+      border-color: rgba(16, 185, 129, 0.4);
+    }
+    .ledger-card.state-settled .ledger-value-box.highlight-settle .settle-val {
+      color: var(--neon-emerald);
+      text-shadow: 0 0 8px var(--neon-emerald);
+    }
+  </style>
+  <style>
+    /* 引入脉冲和弹跳动画的快捷帮助类 */
+    .animate-pulse {
+      animation: pulse 1.5s infinite alternate;
+    }
+    .animate-bounce {
+      animation: bounce 1s infinite alternate;
+    }
+    @keyframes bounce {
+      0% { transform: translateY(0); }
+      100% { transform: translateY(-3px); }
+    }
   </style>
 </head>
 <body>
@@ -881,9 +990,9 @@
       maxPrice: 5000,
       gatewayHealth: 'offline',
       bridgeHealth: 'offline',
-      // 本地缓存的通道数据结构： { agentId: { id, confirmedSpend, accumulatedSpend, lastPrice } }
+      // 本地缓存的通道数据结构： { agentId: { id, confirmedSpend, accumulatedSpend, lastPrice, holdAmount, lastActualCost, status } }
       channels: {
-        888: { id: 'channel-888', confirmedSpend: 0, accumulatedSpend: 0, lastPrice: 0 }
+        888: { id: 'channel-888', confirmedSpend: 0, accumulatedSpend: 0, lastPrice: 0, holdAmount: 0, lastActualCost: 0, status: 'idle' }
       }
     };
 
@@ -967,20 +1076,49 @@
       channelKeys.forEach(agentId => {
         const chan = state.channels[agentId];
         const card = document.createElement('div');
-        card.className = 'ledger-card';
+        
+        // 动态设置状态相关的类
+        card.className = `ledger-card state-${chan.status || 'idle'}`;
+        
+        // 渲染状态徽章
+        let statusBadge = '<span class="badge-status-glow idle">闲置 (Idle)</span>';
+        if (chan.status === 'locked') {
+          statusBadge = `<span class="badge-status-glow locked animate-pulse">Credit Locked (Hold: ${(chan.holdAmount / 1000000).toFixed(2)} USDC)</span>`;
+        } else if (chan.status === 'settled') {
+          statusBadge = '<span class="badge-status-glow settled animate-bounce">Settled & Unlocked</span>';
+        }
+        
         card.innerHTML = `
           <div class="ledger-header">
             <span>Agent: <strong>${agentId}</strong></span>
             <span class="ledger-channel-id">${chan.id}</span>
           </div>
+          <div class="ledger-status-line" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <span style="font-size: 0.75rem; color: var(--text-muted);">通道生命周期状态</span>
+            ${statusBadge}
+          </div>
           <div class="ledger-value-grid">
             <div class="ledger-value-box">
               <span>已确认 (confirmed)</span>
-              <span>${chan.confirmedSpend} USDC</span>
+              <span>${(chan.confirmedSpend / 1000000).toFixed(6)} USDC</span>
+              <span style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">(${chan.confirmedSpend} micro)</span>
             </div>
             <div class="ledger-value-box">
               <span>累计发生 (accumulated)</span>
-              <span>${chan.accumulatedSpend} USDC</span>
+              <span>${(chan.accumulatedSpend / 1000000).toFixed(6)} USDC</span>
+              <span style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">(${chan.accumulatedSpend} micro)</span>
+            </div>
+          </div>
+          <div class="ledger-value-grid" style="margin-top: 0.5rem; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.5rem;">
+            <div class="ledger-value-box highlight-hold">
+              <span>冻结额度 (Hold Amount)</span>
+              <span class="hold-val" style="font-size: 1.1rem; font-weight: 700;">${chan.holdAmount ? (chan.holdAmount / 1000000).toFixed(2) + ' USDC' : '0.00 USDC'}</span>
+              <span style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">(${chan.holdAmount || 0} micro)</span>
+            </div>
+            <div class="ledger-value-box highlight-settle">
+              <span>实际费用 (Actual Cost)</span>
+              <span class="settle-val" style="font-size: 1.1rem; font-weight: 700;">${chan.lastActualCost ? (chan.lastActualCost / 1000000).toFixed(6) + ' USDC' : '0.000000 USDC'}</span>
+              <span style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">(${chan.lastActualCost || 0} micro)</span>
             </div>
           </div>
         `;
@@ -1224,9 +1362,10 @@
       // 获取当前通道状态
       let chan = state.channels[agentId];
       if (!chan) {
-        chan = { id: `channel-${agentId}`, confirmedSpend: 0, accumulatedSpend: 0, lastPrice: 0 };
+        chan = { id: `channel-${agentId}`, confirmedSpend: 0, accumulatedSpend: 0, lastPrice: 0, holdAmount: 0, lastActualCost: 0, status: 'idle' };
         state.channels[agentId] = chan;
       }
+      const lastConfirmedSpend = chan.confirmedSpend;
 
       // 组装首发 Authorization
       let authHeader = '';
@@ -1254,11 +1393,18 @@
           setTimelineState('step1', 'success', `[请求 #${reqIndex}] 首次请求返回 402 - 需要自愈`);
           setTimelineState('step2', 'active', `[请求 #${reqIndex}] 已成功捕获 402 首部参数`);
           
-          const price = parseInt(response.headers.get('X-402-Price')) || 1000;
+          const price = parseInt(response.headers.get('X-402-Price')) || 12000;
           const escrowAddr = response.headers.get('X-402-Payment-Address') || '0x5FbDB2315678afecb367f032d93F642f64180aa3';
           const paymentType = response.headers.get('X-402-Payment-Type') || 'channel';
+          const holdAmountHeader = response.headers.get('X-402-Hold-Amount');
+          const holdAmountVal = holdAmountHeader ? parseInt(holdAmountHeader) : 50000;
 
-          addLog('WARN', `[请求 #${reqIndex}] 收到 HTTP 402. 需要额度: ${price} USDC, 托管账户: ${escrowAddr}`);
+          // 动态显示 Credit Locked (Hold: 0.05 USDC) 状态
+          chan.holdAmount = holdAmountVal;
+          chan.status = 'locked';
+          renderChannels();
+
+          addLog('WARN', `[请求 #${reqIndex}] 收到 HTTP 402. 预授权冻结 (Hold): ${(holdAmountVal/1000000).toFixed(2)} USDC, 托管账户: ${escrowAddr}`);
 
           if (price > maxPrice) {
             setTimelineState('step2', 'warning', `[请求 #${reqIndex}] 超限阻断! 价格 ${price} > 限额 ${maxPrice}`);
@@ -1268,7 +1414,7 @@
 
           // 阶段 3: 签名额度
           setTimelineState('step2', 'success');
-          setTimelineState('step3', 'active', `[请求 #${reqIndex}] 生成 ${price} USDC 的通道状态签名...`);
+          setTimelineState('step3', 'active', `[请求 #${reqIndex}] 生成 ${price} micro-units 的通道状态签名...`);
           
           // 延时模拟签名动作
           await delay(600);
@@ -1279,7 +1425,7 @@
           
           // 模拟生成以太坊格式的伪签名 (130位16进制 + 0x)
           const randomSig = '0x' + Array.from({length: 130}, () => Math.floor(Math.random()*16).toString(16)).join('');
-          addLog('SIGN', `[请求 #${reqIndex}] 签名计算成功! 通道: ${chan.id}, 目标发生额: ${chan.accumulatedSpend} USDC`);
+          addLog('SIGN', `[请求 #${reqIndex}] 签名计算成功! 通道: ${chan.id}, 目标发生额: ${chan.accumulatedSpend} micro-units`);
           addLog('SIGN', `[请求 #${reqIndex}] 生成伪以太坊签名: ${randomSig.substring(0, 18)}...`);
 
           setTimelineState('step3', 'success');
@@ -1297,31 +1443,78 @@
           }
 
           if (secondResponse.status === 200) {
-            // 自愈成功，更新确认额度
-            chan.confirmedSpend = chan.accumulatedSpend;
+            // 解析清算凭证
+            const receipt = secondResponse.headers ? secondResponse.headers.get('X-402-Settle-Receipt') : null;
+            let actualCost = price;
+
+            if (receipt) {
+              const parts = receipt.split(':');
+              if (parts.length === 5) {
+                actualCost = parseInt(parts[2]) || price;
+                addLog('INFO', `[请求 #${reqIndex}] 收到网关结算凭证, 实际花费: ${actualCost} micro-units`);
+              }
+            }
+
+            if (chan.statusTimer) {
+              clearTimeout(chan.statusTimer);
+            }
+
+            // 更新状态通道 confirmed Spend 和结算反馈
+            chan.lastActualCost = actualCost;
+            chan.holdAmount = 0;
+            chan.confirmedSpend = lastConfirmedSpend + actualCost;
+            chan.accumulatedSpend = chan.confirmedSpend;
+            chan.status = 'settled';
             renderChannels();
-            
+
+            // 3秒后将状态设回 idle
+            chan.statusTimer = setTimeout(() => {
+              chan.status = 'idle';
+              renderChannels();
+            }, 3000);
+
             const resultData = await secondResponse.json();
-            setTimelineState('step4', 'success', `[请求 #${reqIndex}] 自愈成功并获取到模型响应`);
+            setTimelineState('step4', 'success', `[请求 #${reqIndex}] 自愈并结算成功`);
             addLog('SUCCESS', `[请求 #${reqIndex}] 自愈执行完成！答复: ${JSON.stringify(resultData.response || resultData)}`);
+            addLog('SUCCESS', `[请求 #${reqIndex}] 资金清算解冻成功。实际确认发生额: ${(chan.confirmedSpend/1000000).toFixed(6)} USDC`);
           } else {
             const errText = await secondResponse.text();
             setTimelineState('step4', 'warning', `[请求 #${reqIndex}] 失败状态: ${secondResponse.status}`);
             addLog('ERROR', `[请求 #${reqIndex}] 二次请求失败，错误代码: ${secondResponse.status}, 信息: ${errText}`);
           }
         } 
-        // 首发即 200 成功 (比如已有通道凭证直接扣款成功，或者在并发测试中，第二请求排队完成后直接扣款成功)
+        // 首发即 200 成功
         else if (response.status === 200) {
           setTimelineState('step1', 'success', `[请求 #${reqIndex}] 首次请求即通过已有的有效凭证直通`);
           
-          // 并发场景下，若是直接扣款成功，则同步更新确认额度
-          if (chan.accumulatedSpend > chan.confirmedSpend) {
-            chan.confirmedSpend = chan.accumulatedSpend;
-            renderChannels();
+          const receipt = response.headers ? response.headers.get('X-402-Settle-Receipt') : null;
+          let actualCost = chan.lastPrice || 12000;
+
+          if (receipt) {
+            const parts = receipt.split(':');
+            if (parts.length === 5) {
+              actualCost = parseInt(parts[2]) || actualCost;
+            }
           }
 
+          if (chan.statusTimer) {
+            clearTimeout(chan.statusTimer);
+          }
+
+          chan.lastActualCost = actualCost;
+          chan.holdAmount = 0;
+          chan.confirmedSpend = lastConfirmedSpend + actualCost;
+          chan.accumulatedSpend = chan.confirmedSpend;
+          chan.status = 'settled';
+          renderChannels();
+
+          chan.statusTimer = setTimeout(() => {
+            chan.status = 'idle';
+            renderChannels();
+          }, 3000);
+
           const resultData = await response.json();
-          addLog('SUCCESS', `[请求 #${reqIndex}] 请求直通完成！答复: ${JSON.stringify(resultData.response || resultData)}`);
+          addLog('SUCCESS', `[请求 #${reqIndex}] 请求直通完成！已结算实际发生: ${(actualCost/1000000).toFixed(6)} USDC`);
           
           // 时序图直接全部变亮，展现“直通”效率
           setTimelineState('step2', 'success', `[请求 #${reqIndex}] 无需拦截`);
@@ -1334,6 +1527,14 @@
         }
       } catch (err) {
         addLog('ERROR', `[请求 #${reqIndex}] 任务发生异常阻断: ${err.message}`);
+        
+        // 异常捕获与重置
+        if (chan) {
+          chan.status = 'idle';
+          chan.holdAmount = 0;
+          renderChannels();
+        }
+        
         throw err;
       }
     }
@@ -1351,7 +1552,8 @@
             get: (key) => {
               const headersMap = {
                 'X-402-Payment-Type': 'channel',
-                'X-402-Price': '1000',
+                'X-402-Price': '12000',
+                'X-402-Hold-Amount': '50000',
                 'X-402-Currency': 'USDC',
                 'X-402-Chain': 'base-sepolia',
                 'X-402-Payment-Address': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
@@ -1365,26 +1567,46 @@
 
       // 解析 Authorization 头部
       const parts = authHeader.replace('Bearer ', '').split(':');
-      if (parts.length === 3) {
+      if (parts.length >= 3) {
         const channelId = parts[0];
         const currentSpend = parseInt(parts[1]) || 0;
         const signature = parts[2];
 
-        // 计算当前额度增量是否大于等于 1000 (自愈协商额度)
+        // 计算当前额度增量是否大于等于 12000 (自愈结算额度，比如实际扣 12000 micro)
         const increment = currentSpend - mockChannelConfirmedSpend;
 
-        if (increment >= 1000) {
+        // 生成 Settle Receipt：channelId:holdAmount:actualCost:nonce:sig
+        const mockReceipt = `${channelId}:50000:12000:1:mock-settle-receipt-sig-req-${reqIndex}`;
+
+        if (increment >= 12000 || isRetry) {
+          // 这里是自愈重试或额度累加，返回 Settle Receipt
           mockChannelConfirmedSpend = currentSpend;
           return {
             status: 200,
+            headers: {
+              get: (key) => {
+                const headersMap = {
+                  'X-402-Settle-Receipt': mockReceipt
+                };
+                return headersMap[key] || '';
+              }
+            },
             json: async () => ({
-              response: `[Mock AI] 自愈握手完成。通道 ${channelId} 发生额累计为 ${currentSpend} USDC。已成功处理输入: "${input}"`
+              response: `[Mock AI] 自愈握手完成。通道 ${channelId} 预授权 50000 成功，已清算结算 12000 micro-units (0.012 USDC)。处理输入: "${input}"`
             })
           };
         } else if (increment >= 0) {
           // 并发场景下，虽然没有本次额度增加，但若是重复扣除已确认的累计额度，视为有效
           return {
             status: 200,
+            headers: {
+              get: (key) => {
+                const headersMap = {
+                  'X-402-Settle-Receipt': mockReceipt
+                };
+                return headersMap[key] || '';
+              }
+            },
             json: async () => ({
               response: `[Mock AI] 凭证直通扣款成功。通道 ${channelId} 额度一致 (${currentSpend} USDC)。处理输入: "${input}"`
             })
@@ -1399,7 +1621,8 @@
           get: (key) => {
             const headersMap = {
               'X-402-Payment-Type': 'channel',
-              'X-402-Price': '1000',
+              'X-402-Price': '12000',
+              'X-402-Hold-Amount': '50000',
               'X-402-Payment-Address': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
             };
             return headersMap[key] || '';
