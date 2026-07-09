@@ -877,7 +877,12 @@
             </div>
             <div class="form-group" style="margin-bottom: 0px;">
               <label for="input-private-key">客户端私钥 (0x开头，直连验签使用)</label>
-              <input type="password" id="input-private-key" class="form-control" value="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80">
+              <div style="position: relative; display: flex; align-items: center;">
+                <input type="password" id="input-private-key" class="form-control" value="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" style="padding-right: 2.5rem; width: 100%;">
+                <button type="button" id="btn-toggle-private-key" style="position: absolute; right: 0.75rem; background: none; border: none; cursor: pointer; color: var(--text-secondary); display: flex; align-items: center; justify-content: center; padding: 0.25rem;">
+                  <svg id="eye-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
             </div>
             <div class="form-group" style="margin-bottom: 0px;">
               <label for="input-verifying-contract">PaymentEscrow 合约地址</label>
@@ -1040,6 +1045,21 @@
       syncUIFromState();
       addLog('INFO', '沙盒调试面板加载成功，准备就绪。');
       addLog('INFO', '当前处于 Mock 仿真模式下，无需启动后端服务即可运行。');
+
+      // 注册私钥眼睛开关
+      const btnToggle = document.getElementById('btn-toggle-private-key');
+      const inputKey = document.getElementById('input-private-key');
+      const eyeIcon = document.getElementById('eye-icon');
+
+      btnToggle.addEventListener('click', () => {
+        if (inputKey.type === 'password') {
+          inputKey.type = 'text';
+          eyeIcon.innerHTML = `<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.52 13.52 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/>`;
+        } else {
+          inputKey.type = 'password';
+          eyeIcon.innerHTML = `<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>`;
+        }
+      });
 
       // 启动直连模式下的 OPTIONS 探测与 SQLite 轮询
       setInterval(healthCheck, 3000);
