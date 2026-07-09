@@ -982,6 +982,37 @@
           </div>
         </div>
 
+        <!-- 模型用量统计 -->
+        <div class="form-group" style="margin-top: 1rem; margin-bottom: 1rem;">
+          <label>模型服务用量分析 (Model Service Usage Analytics)</label>
+          <div class="stats-card" style="background: rgba(255, 255, 255, 0.015); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 12px; padding: 1rem;">
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem;">
+              <div class="stats-box" style="background: rgba(0, 0, 0, 0.2); padding: 0.6rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.02); text-align: center;">
+                <span style="font-size: 0.7rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">请求总数</span>
+                <span id="stats-queries" style="font-size: 1.1rem; font-weight: 700; color: var(--text-primary);">0</span>
+              </div>
+              <div class="stats-box" style="background: rgba(0, 0, 0, 0.2); padding: 0.6rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.02); text-align: center;">
+                <span style="font-size: 0.7rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">输入 Token 数</span>
+                <span id="stats-prompt-tokens" style="font-size: 1.1rem; font-weight: 700; color: var(--neon-indigo);">0</span>
+              </div>
+              <div class="stats-box" style="background: rgba(0, 0, 0, 0.2); padding: 0.6rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.02); text-align: center;">
+                <span style="font-size: 0.7rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">输出 Token 数</span>
+                <span id="stats-completion-tokens" style="font-size: 1.1rem; font-weight: 700; color: var(--neon-emerald);">0</span>
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; margin-top: 0.75rem;">
+              <div class="stats-box" style="background: rgba(0, 0, 0, 0.2); padding: 0.6rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.02); text-align: center;">
+                <span style="font-size: 0.7rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">总消耗额度</span>
+                <span id="stats-total-cost" style="font-size: 1rem; font-weight: 700; color: var(--neon-amber);">0.00 USDC</span>
+              </div>
+              <div class="stats-box" style="background: rgba(0, 0, 0, 0.2); padding: 0.6rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.02); text-align: center;">
+                <span style="font-size: 0.7rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">活跃模型</span>
+                <span id="stats-active-model" style="font-size: 0.75rem; font-weight: 600; color: var(--text-secondary); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="N/A">N/A</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- SQLite 任务列表 -->
         <div class="queue-monitor-container">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
@@ -1081,6 +1112,14 @@
       // 本地缓存的通道数据结构： { agentId: { id, confirmedSpend, accumulatedSpend, lastPrice, holdAmount, lastActualCost, status } }
       channels: {
         888: { id: 'channel-888', confirmedSpend: 0, accumulatedSpend: 0, lastPrice: 0, holdAmount: 0, lastActualCost: 0, status: 'idle' }
+      },
+      // 模型用量统计分析指标
+      usageStats: {
+        totalQueries: 0,
+        totalPromptTokens: 0,
+        totalCompletionTokens: 0,
+        totalCost: 0,
+        activeModel: 'N/A'
       }
     };
 
@@ -1111,7 +1150,17 @@
       const savedMode = localStorage.getItem('agentpay_mode');
       if (savedMode) state.mode = savedMode;
 
+      // 恢复模型统计指标
+      state.usageStats = {
+        totalQueries: parseInt(localStorage.getItem('agentpay_stats_queries')) || 0,
+        totalPromptTokens: parseInt(localStorage.getItem('agentpay_stats_prompt')) || 0,
+        totalCompletionTokens: parseInt(localStorage.getItem('agentpay_stats_completion')) || 0,
+        totalCost: parseInt(localStorage.getItem('agentpay_stats_cost')) || 0,
+        activeModel: localStorage.getItem('agentpay_stats_model') || 'N/A'
+      };
+
       syncUIFromState();
+      renderUsageStats();
       addLog('INFO', '沙盒调试面板加载成功，准备就绪。');
       if (state.mode === 'mock') {
         addLog('INFO', '当前处于 Mock 仿真模式下，无需启动后端服务即可运行。');
@@ -1297,6 +1346,44 @@
         `;
         container.appendChild(card);
       });
+    }
+
+    // 5.5 模型用量指标更新与渲染
+    function updateUsageStats(promptTokens, completionTokens, cost, modelId) {
+      state.usageStats.totalQueries += 1;
+      state.usageStats.totalPromptTokens += promptTokens;
+      state.usageStats.totalCompletionTokens += completionTokens;
+      state.usageStats.totalCost += cost;
+      if (modelId) {
+        state.usageStats.activeModel = modelId;
+      }
+      
+      localStorage.setItem('agentpay_stats_queries', state.usageStats.totalQueries);
+      localStorage.setItem('agentpay_stats_prompt', state.usageStats.totalPromptTokens);
+      localStorage.setItem('agentpay_stats_completion', state.usageStats.totalCompletionTokens);
+      localStorage.setItem('agentpay_stats_cost', state.usageStats.totalCost);
+      localStorage.setItem('agentpay_stats_model', state.usageStats.activeModel || '');
+
+      renderUsageStats();
+    }
+
+    function renderUsageStats() {
+      const qEl = document.getElementById('stats-queries');
+      const pEl = document.getElementById('stats-prompt-tokens');
+      const cEl = document.getElementById('stats-completion-tokens');
+      const costEl = document.getElementById('stats-total-cost');
+      const modelEl = document.getElementById('stats-active-model');
+
+      if (qEl) qEl.textContent = state.usageStats.totalQueries;
+      if (pEl) pEl.textContent = state.usageStats.totalPromptTokens.toLocaleString();
+      if (cEl) cEl.textContent = state.usageStats.totalCompletionTokens.toLocaleString();
+      if (costEl) costEl.textContent = `${(state.usageStats.totalCost / 1000000).toFixed(6)} USDC`;
+      
+      if (modelEl) {
+        const modelName = state.usageStats.activeModel || 'N/A';
+        modelEl.textContent = modelName;
+        modelEl.title = modelName;
+      }
     }
 
     // 6. 红绿灯状态灯显示控制
@@ -1525,7 +1612,7 @@
         }
 
         tr.innerHTML = `
-          <td><code>${(task.lock_id || '').substring(0, 10)}...</code></td>
+          <td><code>${task.lock_id || ''}</code></td>
           <td>${statusBadge}</td>
           <td><code>${task.retry_count ?? 0}</code></td>
           <td>${formattedTime}</td>
@@ -1820,6 +1907,13 @@
 
             const resultData = await secondResponse.json();
             setTimelineState('step4', 'success', `[请求 #${reqIndex}] 自愈并结算成功`);
+            
+            // 提取大模型用量并更新看板
+            const pTokens = (resultData.usage && resultData.usage.prompt_tokens) || 0;
+            const cTokens = (resultData.usage && resultData.usage.completion_tokens) || 0;
+            const resModelId = (resultData.proof && resultData.proof.modelId) || '';
+            updateUsageStats(pTokens, cTokens, actualCost, resModelId);
+
             const replyText = resultData.output || resultData.response || JSON.stringify(resultData);
             await addTypingLog(
               'SUCCESS',
@@ -1865,6 +1959,13 @@
           }, 3000);
 
           const resultData = await response.json();
+          
+          // 提取大模型用量并更新看板
+          const pTokens = (resultData.usage && resultData.usage.prompt_tokens) || 0;
+          const cTokens = (resultData.usage && resultData.usage.completion_tokens) || 0;
+          const resModelId = (resultData.proof && resultData.proof.modelId) || '';
+          updateUsageStats(pTokens, cTokens, actualCost, resModelId);
+
           const replyText = resultData.output || resultData.response || JSON.stringify(resultData);
           await addTypingLog(
             'SUCCESS',

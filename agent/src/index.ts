@@ -42,6 +42,8 @@ server.post('/agent/execute', async (request, reply) => {
     let output = `Processed by AgentPay AI: ${input}`;
     let modelId = 'deepseek-r1';
     let actualCost = 1000; // 默认基础单次推理价格 (1000 micro-units = 0.001 USDC)
+    let promptTokens = 0;
+    let completionTokens = 0;
 
     const llmUrl = process.env.LLM_API_URL || 'http://127.0.0.1:8007/v1/chat/completions';
     const llmModel = process.env.LLM_MODEL || 'Qwythos-9B-Claude-Mythos-5-1M-optiq-5bpw-mlx';
@@ -69,8 +71,8 @@ server.post('/agent/execute', async (request, reply) => {
 
           // 根据真实 Token 消耗进行动态微支付计费
           if (data.usage) {
-            const promptTokens = data.usage.prompt_tokens || 0;
-            const completionTokens = data.usage.completion_tokens || 0;
+            promptTokens = data.usage.prompt_tokens || 0;
+            completionTokens = data.usage.completion_tokens || 0;
             // 计费规则：输入每千 Token 1.5 micro-unit，输出每千 Token 6.0 micro-unit
             const calculatedCost = Math.round(promptTokens * 1.5 + completionTokens * 6.0);
             actualCost = Math.max(1000, calculatedCost); // 设置底价为 1000 micro-units
@@ -102,10 +104,17 @@ server.post('/agent/execute', async (request, reply) => {
     // 注入动态计算出的推理成本到 Header 中，供 Gateway 提取并最终完成签名账本扣除
     reply.header('X-Agent-Cost', actualCost.toString());
 
-    // 5. 返回 Body 格式：{ output: string, proof: InferenceProof }
+    // 5. 返回 Body 格式：{ output: string, proof: InferenceProof, usage: { prompt_tokens, completion_tokens } }
     // 使用自定义序列化以支持 bigint 字段的 JSON 传输
     const responseJson = JSON.stringify(
-      { output, proof },
+      { 
+        output, 
+        proof, 
+        usage: { 
+          prompt_tokens: promptTokens, 
+          completion_tokens: completionTokens 
+        } 
+      },
       (_, value) => (typeof value === 'bigint' ? value.toString() : value)
     );
 
