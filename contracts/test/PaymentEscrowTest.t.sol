@@ -345,7 +345,7 @@ contract PaymentEscrowTest is Test {
         new ReputationRegistry(address(0));
     }
 
-    bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
+    bytes32 public constant CHANNEL_HOLD_TYPEHASH = keccak256("ChannelHold(bytes32 channelId,uint256 holdAmount,uint256 nonce,uint256 expiration)");
 
     // 13. 测试正常状态通道锁定与 EIP-712 批量结算流程
     function test_ChannelBatchSettle() public {
@@ -383,10 +383,13 @@ contract PaymentEscrowTest is Test {
 
         // 线下生成 EIP-712 签名
         uint256 accumulatedAmount = 300 * 10**6;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -402,7 +405,7 @@ contract PaymentEscrowTest is Test {
 
         // settler 结算
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
 
         // 验证通道状态
         (,,,,, channelStatus) = escrow.channels(channelId);
@@ -426,10 +429,13 @@ contract PaymentEscrowTest is Test {
         bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
 
         uint256 accumulatedAmount = 300 * 10**6;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -443,7 +449,7 @@ contract PaymentEscrowTest is Test {
 
         vm.expectRevert(PaymentEscrow.InvalidSignature.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
     }
 
     // 15. 逆向测试：状态通道超时后结算应被拦截
@@ -459,10 +465,13 @@ contract PaymentEscrowTest is Test {
         bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
 
         uint256 accumulatedAmount = 300 * 10**6;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -478,7 +487,7 @@ contract PaymentEscrowTest is Test {
 
         vm.expectRevert(PaymentEscrow.ChannelExpired.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
     }
 
     // 16. 测试状态通道退款：未超时退款失败与超时退款成功
@@ -522,10 +531,13 @@ contract PaymentEscrowTest is Test {
         bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
 
         uint256 accumulatedAmount = 300 * 10**6;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -539,7 +551,7 @@ contract PaymentEscrowTest is Test {
         // 模拟非 Settler 尝试结算
         vm.expectRevert(PaymentEscrow.NotSettler.selector);
         vm.prank(payer);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
     }
 
     // 18. 增加 test_ChannelBatchSettleZeroAddressRecipientReverts
@@ -555,10 +567,13 @@ contract PaymentEscrowTest is Test {
         bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
 
         uint256 accumulatedAmount = 300 * 10**6;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -572,7 +587,7 @@ contract PaymentEscrowTest is Test {
         // 结算传入的 agentOwner = address(0)
         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, address(0));
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, address(0));
     }
 
     // 19. 增加 test_ChannelBatchSettleZeroAmountReverts
@@ -589,10 +604,13 @@ contract PaymentEscrowTest is Test {
 
         // 累计消费 accumulatedAmount = 0
         uint256 accumulatedAmount = 0;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -605,7 +623,7 @@ contract PaymentEscrowTest is Test {
 
         vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
     }
 
     // 20. 增加 test_ChannelBatchSettleExceedMaxAmountReverts
@@ -623,10 +641,13 @@ contract PaymentEscrowTest is Test {
 
         // 累计消费超过通道最大上限 maxAmount + 1
         uint256 accumulatedAmount = maxAmount + 1;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -639,7 +660,7 @@ contract PaymentEscrowTest is Test {
 
         vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
     }
 
     // 21. 增加 test_ChannelBatchSettleDoubleSettleReverts
@@ -656,10 +677,13 @@ contract PaymentEscrowTest is Test {
         bytes32 channelId = escrow.lockChannel(agentId, maxAmount, 3600);
 
         uint256 accumulatedAmount = 300 * 10**6;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -672,12 +696,12 @@ contract PaymentEscrowTest is Test {
 
         // 第一遍成功结算
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
 
         // 尝试进行二次结算
         vm.expectRevert(PaymentEscrow.InvalidStatus.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
     }
 
     // 22. 测试批量结算资金流入 TBA 账户并且 payer 收到退款
@@ -699,10 +723,13 @@ contract PaymentEscrowTest is Test {
 
         // 线下生成 EIP-712 签名
         uint256 accumulatedAmount = 300 * 10**6;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -718,7 +745,7 @@ contract PaymentEscrowTest is Test {
 
         // settler 结算
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
 
         // 验证资金：TBA 账户收到 300，payer 收到退款 200
         assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + accumulatedAmount);
@@ -738,10 +765,13 @@ contract PaymentEscrowTest is Test {
         bytes32 channelId = escrow.lockChannel(agentId, 500 * 10**6, 3600);
 
         uint256 accumulatedAmount = 300 * 10**6;
+        uint256 nonce = 123; uint256 expiration = 3600;
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            500 * 10**6,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",
@@ -756,7 +786,7 @@ contract PaymentEscrowTest is Test {
         address nonTbaRecipient = address(0x999);
         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, signature, nonTbaRecipient);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, nonTbaRecipient);
     }
 
     // 24. 测试 TBA.execute 只有 NFT owner 可调用

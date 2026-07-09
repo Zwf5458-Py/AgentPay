@@ -48,7 +48,7 @@ contract PaymentEscrow {
     mapping(bytes32 => PaymentLock) private _locks;
     mapping(bytes32 => ChannelLock) public channels;
 
-    bytes32 public constant CHANNEL_SETTLE_TYPEHASH = keccak256("ChannelSettle(bytes32 channelId,uint256 accumulatedAmount)");
+    bytes32 public constant CHANNEL_HOLD_TYPEHASH = keccak256("ChannelHold(bytes32 channelId,uint256 holdAmount,uint256 nonce,uint256 expiration)");
     bytes32 public immutable DOMAIN_SEPARATOR;
 
     event PaymentLocked(
@@ -248,6 +248,9 @@ contract PaymentEscrow {
     function batchSettle(
         bytes32 channelId,
         uint256 accumulatedAmount,
+        uint256 holdAmount,
+        uint256 nonce,
+        uint256 expiration,
         bytes calldata signature,
         address agentOwner
     ) external onlySettler {
@@ -257,6 +260,7 @@ contract PaymentEscrow {
         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
         if (block.timestamp > lock.expiresAt) revert ChannelExpired();
         if (accumulatedAmount == 0 || accumulatedAmount > lock.maxAmount) revert InvalidAmount();
+        if (holdAmount != lock.maxAmount) revert InvalidAmount();
 
         // 专属 TBA 校验防御
         address expectedTba = IERC6551Registry(erc6551Registry).account(
@@ -269,9 +273,11 @@ contract PaymentEscrow {
         if (agentOwner != expectedTba) revert InvalidAddress();
 
         bytes32 hashStruct = keccak256(abi.encode(
-            CHANNEL_SETTLE_TYPEHASH,
+            CHANNEL_HOLD_TYPEHASH,
             channelId,
-            accumulatedAmount
+            holdAmount,
+            nonce,
+            expiration
         ));
         bytes32 digest = keccak256(abi.encodePacked(
             "\x19\x01",

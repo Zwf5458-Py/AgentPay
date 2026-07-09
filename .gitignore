@@ -1,0 +1,10 @@
+
+# Ignored artifacts
+contracts/fix_tests.py
+contracts/deploy_anvil.sh
+contracts/.env
+test_e2e.sh
+sdk/run_e2e.js
+gateway/bin/
+gateway/gateway.db*
+

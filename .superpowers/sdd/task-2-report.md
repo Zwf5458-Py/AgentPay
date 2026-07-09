@@ -85,3 +85,46 @@
   - `TestProxy_InvalidPrivateKeyError` (PASS, 0.00s)
   - `TestProxy_MissingAgentCost` (PASS, 0.00s)
 
+---
+
+## 安全加固报告：基于 Reviewer 反馈的最终安全加固 (Final Security Hardening)
+
+为了应对可能的负数费用绕过攻击和排查日志不清晰的问题，我们对 Gateway 反向代理实施了最终安全加固：
+
+### 1. 负数费用保护 (Negative Cost Protection)
+- **改进逻辑**：在解析 `X-Agent-Cost` 时，若解析到的数值小于 0（负数费用），我们将拒绝该费用并安全回退到默认开销值 `1000`。
+- **警告日志**：在此事件发生时，会触发专门的警告日志记录：
+  - `"[Proxy] Invalid negative X-Agent-Cost value found in downstream response, defaulting to cost 1000"`
+
+### 2. 细化并区分日志输出 (Distinguish Parsing Errors in Log)
+- **头部缺失**：若 `X-Agent-Cost` 头部为空或不存在，输出明确日志：
+  - `"[Proxy] No X-Agent-Cost header found in downstream response, defaulting to cost 1000"`
+- **畸形格式或负数**：若头部存在但无法成功解析为正整数，或者其值为负数，输出细化日志，其中 `%s` 包含具体的无效内容：
+  - `"[Proxy] Failed to parse X-Agent-Cost header: '%s' (or it is negative), defaulting to cost 1000"`
+
+### 3. 单元测试覆盖
+- **新增测试用例**：
+  - `TestProxy_SettleReceipt_NegativeCost`：模拟下游 Eliza 服务返回负数费用（如 `-500`），验证网关正确拒绝并回退到 `1000`。
+  - `TestProxy_SettleReceipt_MalformedCost`：模拟下游 Eliza 服务返回畸形费用（如 `abc`），验证网关正确拒绝并回退到 `1000`。
+
+---
+
+## Git 提交详情 (安全加固)
+- **Commit Hash**: `440e6742`
+- **Commit Message**: `security: apply negative cost protection and log diagnostic hardening to proxy reverse`
+- **修改文件**:
+  - `gateway/internal/proxy/reverse.go`
+  - `gateway/internal/proxy/proxy_hold_test.go`
+
+---
+
+## 单元测试执行摘要 (安全加固)
+- **测试命令**: `go test -v ./internal/proxy`
+- **运行结果**: `PASS`
+- **测试用例列表 (共 6 个测试用例全部通过)**:
+  - `TestProxy_SettleReceipt` (PASS, 0.01s)
+  - `TestProxy_SettleReceipt_MockKey` (PASS, 0.01s)
+  - `TestProxy_InvalidPrivateKeyError` (PASS, 0.00s)
+  - `TestProxy_MissingAgentCost` (PASS, 0.00s)
+  - `TestProxy_SettleReceipt_NegativeCost` (PASS, 0.00s)
+  - `TestProxy_SettleReceipt_MalformedCost` (PASS, 0.00s)

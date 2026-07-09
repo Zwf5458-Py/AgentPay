@@ -1,72 +1,73 @@
-# Task 1 执行报告: 智能合约层状态通道扩展与 EIP-712 批量结算
+# Task 1 Completion Report: 升级 Go 网关中间件 (X402 Middleware)
 
-本报告总结了 AgentPay 智能合约状态通道与 EIP-712 批量结算功能的重构与实现细节。
+## 任务状态与结果
+所有任务要求已成功执行。已按照 TDD（测试驱动开发）的最佳实践完成开发：
+1. **测试先行**：在 `gateway/internal/middleware/x402_test.go` 中新增了 `TestX402Middleware_HoldAmount` 单元测试。
+2. **测试失败验证**：在未升级中间件前执行了该测试，确认断言完全失败。
+3. **功能实现**：
+   - 升级了 `trigger402` 方法，在返回 HTTP 402 时，注入了指定的头部：
+     - `X-402-Payment-Type: channel`
+     - `X-402-Hold-Amount: 50000`
+   - 升级了 `X402Middleware` 解码逻辑，使其支持解析 `Bearer <channelId>:<holdAmount>:<nonce>:<expiration>:<sig>` 格式的 EIP-712 Pre-authorization 证书。
+   - 解析成功后，将提取出的 `holdAmount`, `channelId`, `signature` 分别以 `HoldAmountContextKey`, `ChannelIDContextKey`, `SignatureContextKey` 注入至 Request Context 中。
+   - 提供了相应的 Context Getter 辅助函数以便下游调用。
+   - 完美兼容旧版本的 Token 解析规则与 fallback 逻辑。
+4. **测试通过验证**：执行了所有的单元测试，包括新增的测试和已有的测试，100% 成功通过。
+5. **Git 提交**：已将所有更改完美提交至 Git。
 
-## 1. 完成的任务与文件改动
-- **[IERC6551Registry.sol](file:///Users/oraclez/code/AgentPay/contracts/src/interfaces/IERC6551Registry.sol)**:
-  - 编写了标准的 ERC-6551 注册表接口，包含了 `createAccount`、`account` 函数定义及 `ERC6551AccountCreated` 事件声明。
-- **[PaymentEscrow.sol](file:///Users/oraclez/code/AgentPay/contracts/src/payment/PaymentEscrow.sol)**:
-  - 增加了 `ChannelLock` 结构体，引入 `channels` 状态变量记录通道详情。
-  - 定义了 `CHANNEL_SETTLE_TYPEHASH` 与构造函数中计算的 `DOMAIN_SEPARATOR`，支持 EIP-712 结构化数据哈希校验。
-  - 实现了 `lockChannel` 方法，允许 Payer 转入代币并锁定资金。
-  - 实现了 `batchSettle` 方法，通过 `ECDSA.recover` 还原签名人并核实为 Payer 后，遵循 Checks-Effects-Interactions (CEI) 进行状态更新，将结算金额分配给 Agent 拥有者，多余部分退回给 Payer。
-  - 实现了 `refundChannel` 方法，支持超时后的通道退款。
-- **[PaymentEscrowTest.t.sol](file:///Users/oraclez/code/AgentPay/contracts/test/PaymentEscrowTest.t.sol)**:
-  - 适配并增加了 `test_ChannelBatchSettle` 测试用例，通过 Solidity 的 `vm.sign` 构建 EIP-712 签名，成功覆盖了多角色、链下签名验证及链上划拨退款的完整周期。
-  - 增加了 `test_ChannelBatchSettleInvalidSignatureReverts`（伪造/错误签名结算被拦截）、`test_ChannelBatchSettleExpiredReverts`（超时后结算被拦截）和 `test_ChannelRefundSuccessAndNotExpiredRevert`（未超时退款拦截与超时退款成功）等边界与逆向测试用例。
-- **[foundry.toml](file:///Users/oraclez/code/AgentPay/contracts/foundry.toml)**:
-  - 启用了 Solidity 优化器 (`optimizer = true`，`optimizer_runs = 200`) 与 IR 编译模式 (`via_ir = true`)，彻底解决了测试代码包含复杂签名计算导致的 "Stack too deep" 编译错误。
+## Git 提交详情
+- **Commit Hash**: `b5a214f23b7ff8cdb2ef566f125a0728c2578679`
+- **Commit Message**: `feat: implement X-402 channel hold headers and parsing`
+- **修改文件**:
+  - `gateway/internal/middleware/x402.go`
+  - `gateway/internal/middleware/x402_test.go`
 
-## 2. 单元测试结果
-运行 `forge test` 的输出摘要：
-```text
-Ran 7 tests for test/AgentIdentityTest.t.sol:AgentIdentityTest
-[PASS] testBurnAgent() (gas: 158597)
-[PASS] testRegisterAgent() (gas: 194575)
-...
-Ran 16 tests for test/PaymentEscrowTest.t.sol:PaymentEscrowTest
-[PASS] test_ChannelBatchSettle() (gas: 289440)
-[PASS] test_ChannelBatchSettleExpiredReverts() (gas: 245640)
-[PASS] test_ChannelBatchSettleInvalidSignatureReverts() (gas: 249629)
-[PASS] test_ChannelRefundSuccessAndNotExpiredRevert() (gas: 230915)
-...
-Suite result: ok. 16 passed; 0 failed; 0 skipped; finished in 12.43ms (21.60ms CPU time)
+## 单元测试执行摘要
+- **测试命令**: `go test -v ./internal/middleware`
+- **运行结果**: `PASS`
+- **耗时**: `9.564s`
+- **测试用例列表**:
+  - `TestX402Middleware_NoToken` (PASS)
+  - `TestX402Middleware_WithToken` (PASS)
+  - `TestProxyReverse_AsyncSettle` (PASS)
+  - `TestProxyReverse_BridgeOutageSelfHealing` (PASS)
+  - `TestRateLimitMiddleware_LimitExceeded` (PASS)
+  - `TestRateLimitLimiter_CleanupTTL` (PASS)
+  - `TestCORS_OPTIONS` (PASS)
+  - `TestDebugTasks` (PASS)
+  - `TestX402Middleware_HoldAmount` (PASS)
 
-Ran 2 test suites in 18.52ms (21.24ms CPU time): 23 tests passed, 0 failed, 0 skipped (23 total tests)
-```
-所有原有的与新添加的 23 个测试均已编译无误并 100% 跑通。
+---
 
-## 3. 代码质量与安全性
-- **安全检查**：重构均符合 Checks-Effects-Interactions (CEI) 防重入原则。在将代币 safeTransfer 之前，将状态由 `Locked` 分别修改为 `Released` / `Refunded`，彻底消除了重入攻击的可能。
-- **签名防护**：在 `batchSettle` 中，采用了 `DOMAIN_SEPARATOR` 校验来确保签名的唯一性，防止不同链或不同合约实例之间的重放攻击。
-- **防止零地址转移**：对 `agentOwner` 进行零地址过滤，防止代币转入黑洞。
+## Task 1 Critical Fixes Report (第 2 阶段修复)
 
-## 4. 追加边界防御性单元测试（根据 Task 1 Fix Brief）
-为了加固状态通道拦截机制，我们追加了 5 个针对 `batchSettle` 功能的边界测试：
-- **`test_ChannelBatchSettleNonSettlerReverts`**：非 `settler`（普通 EOA）尝试结算时，断言被修饰器 `onlySettler` 成功拦截，抛出 `NotSettler` 错误。
-- **`test_ChannelBatchSettleZeroAddressRecipientReverts`**：结算传入的 `agentOwner` 为零地址时，断言抛出 `InvalidAddress` 错误。
-- **`test_ChannelBatchSettleZeroAmountReverts`**：结算传入的累计消费 `accumulatedAmount` 为 0 时，断言抛出 `InvalidAmount` 错误。
-- **`test_ChannelBatchSettleExceedMaxAmountReverts`**：结算传入的累计消费超过通道最大上限（`maxAmount + 1`）时，断言抛出 `InvalidAmount` 错误。
-- **`test_ChannelBatchSettleDoubleSettleReverts`**：对同一个通道，结算一次后再次尝试结算，断言抛出 `InvalidStatus` 错误（非 `Locked` 状态通道拒绝多次结算）。
+根据 Reviewer 的发现，已对 X402 中间件应用了以下关键修复，并基于 TDD 流程进行了完整验证：
 
-运行 `forge test` 的最新输出摘要：
-```text
-Ran 7 tests for test/AgentIdentityTest.t.sol:AgentIdentityTest
-[PASS] testBurnAgent() (gas: 158597)
-...
-Ran 21 tests for test/PaymentEscrowTest.t.sol:PaymentEscrowTest
-[PASS] test_ChannelBatchSettle() (gas: 289440)
-[PASS] test_ChannelBatchSettleDoubleSettleReverts() (gas: 284001)
-[PASS] test_ChannelBatchSettleExceedMaxAmountReverts() (gas: 244747)
-[PASS] test_ChannelBatchSettleExpiredReverts() (gas: 245662)
-[PASS] test_ChannelBatchSettleInvalidSignatureReverts() (gas: 249738)
-[PASS] test_ChannelBatchSettleNonSettlerReverts() (gas: 245006)
-[PASS] test_ChannelBatchSettleZeroAddressRecipientReverts() (gas: 242227)
-[PASS] test_ChannelBatchSettleZeroAmountReverts() (gas: 244904)
-[PASS] test_ChannelRefundSuccessAndNotExpiredRevert() (gas: 231025)
-...
-Suite result: ok. 21 passed; 0 failed; 0 skipped; finished in 1.24ms (4.72ms CPU time)
+### 1. 修复内容与验证
+1. **恢复缺失的 Context Keys 与 Getter 函数**：
+   - 在 `gateway/internal/middleware/x402.go` 中，定义了 `NonceContextKey` 和 `ExpirationContextKey`。
+   - 解析 EIP-712 Token 成功后，将 `nonce` 和 `expiration` 存入 Request Context。
+   - 导出了 `GetNonce(ctx)` 和 `GetExpiration(ctx)` 辅助获取函数。
+   - **验证**：修改 `TestX402Middleware_HoldAmount` 单元测试，加入对 Nonce 和 Expiration 字段在 Context 中提取的断言。
+2. **格式有效性校验 (Format Validation)**：
+   - 新增了 `isNumeric` 校验函数，确保从 Token 中解析出的 `holdAmount`、`nonce` 和 `expiration` 均为合法的纯数字字符串。如包含非数字字符或为空，则立即拒绝请求并触发 402。
+   - **验证**：新增 `TestX402Middleware_InvalidFormat` 测试用例，测试了各种非法格式（含字母、为空等）的 Token，确保它们全都被 402 拦截。
+3. **过期时间拦截器 (Expiration Interceptor)**：
+   - 提取 `expiration` 字段并将其解析为 Unix 时间戳。
+   - 与当前时间进行对比：若 `expTime < time.Now().Unix()`（即已过期），则立即拒绝请求并触发 402。
+   - **验证**：新增 `TestX402Middleware_Expiration` 测试用例，动态生成过期与未过期的 Token 进行测试，确认过期 Token 会被 402 拦截，而未过期 Token 则正常放行。
 
-Ran 2 test suites in 6.87ms (2.47ms CPU time): 28 tests passed, 0 failed, 0 skipped (28 total tests)
-```
-所有原有的与新添加的 28 个测试均已编译无误并 100% 跑通。
+### 2. Git 提交详情
+- **Commit Hash**: `e9a7dc48`
+- **Commit Message**: `fix(middleware): restore context keys, add expiration and format validation for X402`
+- **修改文件**:
+  - `gateway/internal/middleware/x402.go`
+  - `gateway/internal/middleware/x402_test.go`
+
+### 3. 单元测试结果
+- **测试命令**: `go test -v ./internal/middleware`
+- **运行结果**: `PASS`
+- **新增验证通过用例**:
+  - `TestX402Middleware_HoldAmount` (更新，包含 Nonce & Expiration Context 注入验证，PASS)
+  - `TestX402Middleware_InvalidFormat` (新增，格式合法性验证，PASS)
+  - `TestX402Middleware_Expiration` (新增，Token 过期时间校验验证，PASS)
