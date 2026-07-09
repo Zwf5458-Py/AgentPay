@@ -1684,7 +1684,8 @@
           }, 3000);
 
           const resultData = await response.json();
-          addLog('SUCCESS', `[请求 #${reqIndex}] 请求直通完成！已结算实际发生: ${(actualCost/1000000).toFixed(6)} USDC`);
+          const replyText = resultData.output || resultData.response || JSON.stringify(resultData);
+          addLog('SUCCESS', `[请求 #${reqIndex}] 请求直通完成！答复: "${replyText}"，已结算实际发生: ${(actualCost/1000000).toFixed(6)} USDC`);
           
           // 时序图直接全部变亮，展现“直通”效率
           setTimelineState('step2', 'success', `[请求 #${reqIndex}] 无需拦截`);
