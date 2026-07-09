@@ -5,7 +5,7 @@
   "description": "Smart Account Bridge for AgentPay",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "ts-node src/index.ts",
+    "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run"
@@ -23,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^20.14.9",
     "ts-node": "^10.9.2",
+    "tsx": "^4.19.1",
     "typescript": "^5.5.3",
     "vitest": "^1.6.0"
   }
