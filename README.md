@@ -132,6 +132,10 @@ docker compose up --build
 状态通道预授权采用 EIP-712 规范，类型散列配置如下：
 $$\text{computedHash} = \text{keccak256}(\text{abi.encode}(\text{ChannelHold(bytes32 channelId,uint256 holdAmount,uint256 nonce,uint256 expiration)}, \text{channelId}, \text{holdAmount}, \text{nonce}, \text{expiration}))$$
 
-### 6.2 链上批量清算 (Batch Settle)
-在结算阶段，合约的 `batchSettle` 会通过 `ECDSA.recover` 还原签名人，确保其必须为该通道的锁定发起人（Payer），从而防范 Settler 冒签，并将款项无误转给该 Agent 对应的专属 TBA：
-$$\text{computedHash} = \text{keccak256}(\text{abi.encode}(\text{CHANNEL\_SETTLE\_TYPEHASH}, \text{channelId}, \text{accumulatedAmount}))$$
+### 6.2 链上乐观结算 (Batch Settle)
+在结算阶段，网关作为 `settler` 可以单方面在链上提交结算。合约的 `batchSettle` 会验证客户端（Payer）签署的原始 `ChannelHold` 签名（包含锁定上限额度 `holdAmount`），只要网关提交的实际扣款金额 `accumulatedAmount` 不超过 `holdAmount`，合约即通过验证，无需客户端再次签署 final 签名。这彻底杜绝了客户端离线导致网关资金被卡死的风险：
+$$\text{hashStruct} = \text{keccak256}(\text{abi.encode}(\text{CHANNEL\_HOLD\_TYPEHASH}, \text{channelId}, \text{holdAmount}, \text{nonce}, \text{expiration}))$$
+$$\text{digest} = \text{keccak256}(\text{abi.encodePacked}(\text{"\textbackslash x19\textbackslash x01"}, \text{DOMAIN\_SEPARATOR}, \text{hashStruct}))$$
+$$\text{signer} = \text{ECDSA.recover}(\text{digest}, \text{signature})$$
+*(验证还原出的 `signer` 必须等于通道的 `payer`)*
+

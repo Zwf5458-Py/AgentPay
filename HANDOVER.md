@@ -8,7 +8,7 @@
 
 - **当前分支**: `main`
 - **代码状态**: 所有加固和新特性开发已全部完成，单元测试 100% 通过，分支安全提交归档。
-- **最新 Git Commit Hash**: `7186e0128e30a949ff80ff71ce8a9c7f13ae7f2f`
+- **最新 Git Commit Hash**: `ac6bb7a6e1152a56` (已使用 DeSix 项目 Token 完成 GitHub 远程自动同步配置)
 - **已合并功能版块**:
   1. 智能合约层状态通道扩展与 EIP-712 批量清算 (Task 1)
   2. ERC-6551 TBA 收款安全防御拦截与 immutable 地址优化 (Task 2)
@@ -22,6 +22,10 @@
      - Go 反向代理 Settle Receipt 签名生成、负数防御、溢出保护与生产硬防线（Task 2）
      - TS SDK 预授权 EIP-712 签名、网关凭证校验自愈与并发 Promise 内存泄露治理（Task 3）
      - 沙盒 Playground 预授权锁定和解冻动效与高精度 USDC 渲染展示（Task 4）
+  9. **Base Sepolia 测试网一键部署与多节点 RPC 容灾备份**：
+     - 修复了链上结算的“死锁漏洞”，重构 `batchSettle` 支持 Settler 乐观单方面使用 `ChannelHold` 凭证完成代币结算。
+     - 编写了 `Deploy.s.sol` 一键部署脚本，成功部署全套合约到 Base Sepolia 测试网。
+     - 为 `aa-bridge` 集成了基于 `viem` `fallback` 的多 RPC 容灾灾备路由（支持逗号分隔列表，自动切换）。
 
 ---
 
@@ -34,6 +38,7 @@
 - **客户端本地签名**：TS SDK 利用 viem 及其本地私钥对 `ChannelHold` 结构进行 EIP-712 签名。包含：`channelId` (bytes32)、`holdAmount` (uint256)、`nonce` (uint256)、`expiration` (uint256)。格式化标头：`Authorization: Bearer <channelId>:<holdAmount>:<nonce>:<expiration>:<sig>`。
 - **网关密码学解签校验**：在 `middleware/x402.go` 中，网关采用 `crypto.SigToPub` 从 `sig` 中恢复出以太坊地址。如果签名恢复失败、已过期（`expiration < time.Now().Unix()`）、格式畸形或恢复地址与配置的 `CLIENT_ADDRESS` 不符，直接予以熔断拦截。
 - **清算凭证与自愈**：下游执行完成后，网关通过 ECDSA 私钥生成以太坊标准个人消息签名（Settle Receipt）写回 `X-402-Settle-Receipt` 头。TS SDK 校验 receipt 签名无误后，自动回落并修正本地 `confirmedSpend = lastConfirmedSpend + actualCost`，防范过度扣款并解冻未消费的资金。
+- **链上结算防卡死重构**：更新了 `PaymentEscrow.sol` 智能合约。网关（Settler）无需获取客户端离线签署的 `ChannelSettle` 签名，而是直接提交客户端在 402 阶段签署的 `ChannelHold` 预授权签名和网关记录的 `accumulatedAmount` (实际开销)。只要 `accumulatedAmount` 不超过 `holdAmount` (且在锁定期内)，即可在链上乐观结算，彻底避免了因客户端下线导致网关资金死锁的重大漏洞。
 
 ### 2.2 防御与资源加固
 - **生产环境私钥硬熔断**：在生产环境下（`env == "production"`），若漏配或写错 `GATEWAY_PRIVATE_KEY` 导致解析出错，网关拒绝隐式 fallback 生成随机密钥启动，直接报错异常退出，防止垫付资金链上清算失败。
