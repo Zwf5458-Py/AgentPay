@@ -766,6 +766,16 @@
       to { transform: rotate(360deg); }
     }
 
+    /* 打字机光标闪烁动画 */
+    .typing-cursor {
+      animation: blink 0.8s infinite;
+      display: inline-block;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 0; }
+      50% { opacity: 1; }
+    }
+
     /* 锁定与结算状态下的卡片光环 */
     .ledger-card.state-locked {
       border-color: rgba(245, 158, 11, 0.4) !important;
@@ -1346,6 +1356,49 @@
       consoleEl.scrollTop = consoleEl.scrollHeight;
     }
 
+    // 模拟大模型打字机流式输出的彩色日志效果
+    async function addTypingLog(level, prefix, text, suffix) {
+      const consoleEl = document.getElementById('console-output');
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      
+      const timeStr = new Date().toLocaleTimeString();
+      entry.innerHTML = `
+        <span class="log-time">[${timeStr}]</span>
+        <span class="log-level ${level.toLowerCase()}">[${level}]</span>
+        <span class="log-msg">${prefix}<span class="typing-body"></span><span class="typing-cursor">▉</span>${suffix}</span>
+      `;
+      consoleEl.appendChild(entry);
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+
+      const bodyEl = entry.querySelector('.typing-body');
+      const cursorEl = entry.querySelector('.typing-cursor');
+
+      // 闪烁光标样式
+      cursorEl.style.color = 'var(--neon-indigo)';
+      cursorEl.style.fontWeight = 'bold';
+      cursorEl.style.marginLeft = '2px';
+      cursorEl.className = 'typing-cursor';
+
+      let currentIdx = 0;
+      const speed = 20; // 20ms 输出一个字符，流畅且富有动感
+      
+      return new Promise((resolve) => {
+        function typeChar() {
+          if (currentIdx < text.length) {
+            bodyEl.textContent += text.charAt(currentIdx);
+            currentIdx++;
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+            setTimeout(typeChar, speed);
+          } else {
+            cursorEl.style.display = 'none'; // 输入完成后把模拟光标隐藏
+            resolve();
+          }
+        }
+        typeChar();
+      });
+    }
+
     function clearLogs() {
       document.getElementById('console-output').innerHTML = '';
     }
@@ -1767,7 +1820,13 @@
 
             const resultData = await secondResponse.json();
             setTimelineState('step4', 'success', `[请求 #${reqIndex}] 自愈并结算成功`);
-            addLog('SUCCESS', `[请求 #${reqIndex}] 自愈执行完成！答复: ${JSON.stringify(resultData.response || resultData)}`);
+            const replyText = resultData.output || resultData.response || JSON.stringify(resultData);
+            await addTypingLog(
+              'SUCCESS',
+              `[请求 #${reqIndex}] 自愈执行完成！答复: "`,
+              replyText,
+              `"`
+            );
             addLog('SUCCESS', `[请求 #${reqIndex}] 资金清算解冻成功。实际确认发生额: ${(chan.confirmedSpend/1000000).toFixed(6)} USDC`);
           } else {
             const errText = await secondResponse.text();
@@ -1807,7 +1866,12 @@
 
           const resultData = await response.json();
           const replyText = resultData.output || resultData.response || JSON.stringify(resultData);
-          addLog('SUCCESS', `[请求 #${reqIndex}] 请求直通完成！答复: "${replyText}"，已结算实际发生: ${(actualCost/1000000).toFixed(6)} USDC`);
+          await addTypingLog(
+            'SUCCESS',
+            `[请求 #${reqIndex}] 请求直通完成！答复: "`,
+            replyText,
+            `"，已结算实际发生: ${(actualCost/1000000).toFixed(6)} USDC`
+          );
           
           // 时序图直接全部变亮，展现“直通”效率
           setTimelineState('step2', 'success', `[请求 #${reqIndex}] 无需拦截`);
