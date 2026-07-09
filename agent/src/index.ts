@@ -41,6 +41,7 @@ server.post('/agent/execute', async (request, reply) => {
     // 3. 优先尝试调用本地 LLM (如 oMLX 上运行的 Hermes 模型) 进行真实推理
     let output = `Processed by AgentPay AI: ${input}`;
     let modelId = 'deepseek-r1';
+    let actualCost = 1000; // 默认基础单次推理价格 (1000 micro-units = 0.001 USDC)
 
     const llmUrl = process.env.LLM_API_URL || 'http://127.0.0.1:8007/v1/chat/completions';
     const llmModel = process.env.LLM_MODEL || 'Qwythos-9B-Claude-Mythos-5-1M-optiq-5bpw-mlx';
@@ -65,6 +66,16 @@ server.post('/agent/execute', async (request, reply) => {
           output = data.choices[0].message.content;
           modelId = llmModel;
           console.log(`[Agent] Successfully generated inference via local model: ${output}`);
+
+          // 根据真实 Token 消耗进行动态微支付计费
+          if (data.usage) {
+            const promptTokens = data.usage.prompt_tokens || 0;
+            const completionTokens = data.usage.completion_tokens || 0;
+            // 计费规则：输入每千 Token 1.5 micro-unit，输出每千 Token 6.0 micro-unit
+            const calculatedCost = Math.round(promptTokens * 1.5 + completionTokens * 6.0);
+            actualCost = Math.max(1000, calculatedCost); // 设置底价为 1000 micro-units
+            console.log(`[Agent] Token usage: Prompt: ${promptTokens}, Completion: ${completionTokens}. Dynamic cost calculated: ${actualCost} micro-units`);
+          }
         }
       }
     } catch (e: any) {
@@ -87,6 +98,9 @@ server.post('/agent/execute', async (request, reply) => {
     const proofJson = serializeProof(proof);
     const proofBase64 = Buffer.from(proofJson).toString('base64');
     reply.header('X-Agent-Proof', proofBase64);
+    
+    // 注入动态计算出的推理成本到 Header 中，供 Gateway 提取并最终完成签名账本扣除
+    reply.header('X-Agent-Cost', actualCost.toString());
 
     // 5. 返回 Body 格式：{ output: string, proof: InferenceProof }
     // 使用自定义序列化以支持 bigint 字段的 JSON 传输
