@@ -6,6 +6,7 @@ import { grantPermission } from './kernel/permissions.js';
 import { createPublicClient, createWalletClient, http, isAddress, pad, stringToHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
+import { getRpcTransport } from './utils/rpc.js';
 
 dotenv.config();
 
@@ -65,7 +66,7 @@ async function checkIsDeployed(address: string): Promise<boolean> {
     const rpcUrl = process.env.RPC_URL || 'https://sepolia.base.org';
     const publicClient = createPublicClient({
       chain: baseSepolia,
-      transport: http(rpcUrl),
+      transport: getRpcTransport(rpcUrl),
     });
     const bytecode = await publicClient.getBytecode({ address: address as `0x${string}` });
     return bytecode !== undefined && bytecode !== '0x';
@@ -253,13 +254,13 @@ server.post('/aa/settle', {
       const account = privateKeyToAccount(privateKey);
       const publicClient = createPublicClient({
         chain: baseSepolia,
-        transport: http(rpcUrl),
+        transport: getRpcTransport(rpcUrl),
       });
 
       const walletClient = createWalletClient({
         account,
         chain: baseSepolia,
-        transport: http(rpcUrl),
+        transport: getRpcTransport(rpcUrl),
       });
 
       // 1. 获取 TBA 相关的合约地址
@@ -452,13 +453,13 @@ server.post('/aa/settle', {
       const account = privateKeyToAccount(privateKey);
       const publicClient = createPublicClient({
         chain: baseSepolia,
-        transport: http(rpcUrl),
+        transport: getRpcTransport(rpcUrl),
       });
 
       const walletClient = createWalletClient({
         account,
         chain: baseSepolia,
-        transport: http(rpcUrl),
+        transport: getRpcTransport(rpcUrl),
       });
 
       // Simulate on-chain call
@@ -536,7 +537,7 @@ server.get('/aa/account/:agentId', async (request, reply) => {
         const rpcUrl = process.env.RPC_URL || 'https://sepolia.base.org';
         const publicClient = createPublicClient({
           chain: baseSepolia,
-          transport: http(rpcUrl),
+          transport: getRpcTransport(rpcUrl),
         });
 
         // Call ownerOf on AgentIdentityRegistry contract (implements ERC721)

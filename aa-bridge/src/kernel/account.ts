@@ -1,6 +1,7 @@
 import { keccak256, encodePacked, getAddress, createPublicClient, http, formatEther, parseAbi } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
+import { getRpcTransport } from '../utils/rpc.js';
 
 // We import these dynamically or handle missing package errors gracefully if needed, 
 // but since they are installed, we can import them directly.
@@ -43,7 +44,7 @@ export async function getSmartAccountAddress(
 
   const publicClient = createPublicClient({
     chain: baseSepolia,
-    transport: http(rpcUrl),
+    transport: getRpcTransport(rpcUrl),
   });
 
   // Since we only need to compute the address and might not have the owner's private key in this microservice,
@@ -97,7 +98,7 @@ export async function getAccountBalance(
   try {
     const publicClient = createPublicClient({
       chain: baseSepolia,
-      transport: http(rpcUrl),
+      transport: getRpcTransport(rpcUrl),
     });
 
     const nativeBalance = await publicClient.getBalance({ address: address as `0x${string}` });

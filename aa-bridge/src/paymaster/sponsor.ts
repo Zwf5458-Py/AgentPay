@@ -22,5 +22,5 @@ export function getSponsorPaymasterClient() {
     chain: baseSepolia,
     transport: http(paymasterUrl),
     entryPoint,
-  });
+  } as any);
 }

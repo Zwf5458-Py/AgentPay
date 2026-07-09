@@ -9,7 +9,7 @@ vi.mock('viem', async (importOriginal) => {
   return {
     ...original,
     createPublicClient: (config: any) => {
-      const client = original.createPublicClient(config);
+      const client = original.createPublicClient(config) as any;
       
       client.request = async (args: any) => {
         if (args.method === 'eth_chainId') return 84532;
