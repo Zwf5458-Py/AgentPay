@@ -63,13 +63,28 @@
 
 ---
 
-## 4. 遗留问题与后续推荐工作 (Outstanding / Next Steps)
+## 4. 本轮对话优化成果与技术改造 (2026-07-09 最新迭代)
 
-当下一个开发会话启动后，建议推进以下工作：
+在本轮对话中，我们定位并解决了开发者在本地微服务部署联调时遇到的多个真实瓶颈，并对调试面板的用户体验进行了重要升级：
+
+1. **解决 Node.js ESM 环境加载报错**：
+   - **症状**：在新版 Node 下，由于项目使用了 `.js` 后缀作为 TS 导入的 ESM 规范，原生 `ts-node` 在启动 `aa-bridge` 或 `agent` 时抛出文件未找到的兼容性崩溃。
+   - **方案**：将 `aa-bridge` 和 `agent` 的开发运行引擎彻底从 `ts-node` 替换为了现代化的高性能 TypeScript 解释引擎 **`tsx`**，支持开箱即用且原生兼容 NodeNext ESM 模块解析规则。
+2. **重构 Bridge 健康探测与跨域豁免**：
+   - **症状**：沙盒通过对结算路径 `/aa/settle` 发起手动的 `OPTIONS` 请求来监测健康状况，触发了 Fastify 的安全鉴权机制；同时因未带密钥导致被 `onRequest` 钩子拦截，返回 `500` 或 `401`，造成网页端检测错误（红灯 OFFLINE）。
+   - **方案**：在 `aa-bridge` 中添加了免鉴权的专属健康检查路径 `/health` 与 `/`，并在 `onRequest` 拦截器中对其进行显式豁免放行。同时将 `playground.html` 中的健康心跳更改为解析 Bridge Host 并以 `GET /health` 形式平滑请求，使绿灯健康状态完美对齐。
+3. **增加 SQLite 任务队列一键清空机制**：
+   - **方案**：在 Go 网关上挂载了 `POST /debug/tasks/clear` 调试专用端点，在底层 SQLite 队列管理器中实现了 `ClearTasks()` 删表清空逻辑，并在沙盒网页控制端中追加了“清空队列 (Clear)”按钮。方便开发者重置已失败的任务，发起新挑战以观察队列由 `pending` 转化为 `Success` 的完整过程。
+4. **提升私钥安全性与体验（眼睛👀隐藏切换）**：
+   - **方案**：在 `playground.html` 客户端私钥输入框中集成了 SVG 眼睛图标，支持一键切换 `input[type="password"]` 与 `input[type="text"]`，便于开发者在本地核对与对齐私钥内容。
+
+---
+
+## 5. 后续推荐工作 (Next Steps)
 
 1. **时间容差与重放防范细化**：
-   - 目前过期时间校验为单边强制拦截，建议在 `x402.go` 中引入 5-10 秒的时钟漂移偏差容忍度（Skew Tolerance），防止客户端与网关时钟不完全同步导致频繁报错；同时可以加入过期上限拦截，如 `expiration > now + 3600*2` 视为非法，防重放期过长。
-2. **SQLite 历史数据清理机制**：
-   - 随着通道使用频次增高，SQLite 中的 `settle_tasks` 任务数量会无限增大。可以在 `QueueManager` 内部添加定时 Cleanup 任务，定期删除 `status = 'success'` 且超过 30 天的历史记录。
-3. **Eliza AI 实物插件完整闭环**：
-   - 对接 Eliza 智能体真实推理计算，并在 Response Header 中附带 Base64 编码的 `X-Agent-Proof` 签名挑战。
+   - 建议在 `x402.go` 中引入 5-10 秒的时钟漂移偏差容忍度（Skew Tolerance），防止客户端与网关时钟不完全同步导致频繁报错；同时可以加入过期上限拦截，如 `expiration > now + 3600*2` 视为非法，防重放期过长。
+2. **SQLite 历史数据自动清理**：
+   - 可以在 `QueueManager` 内部添加后台轻量定时任务，定期删除 `status = 'success'` 且超过 30 天的历史记录。
+3. **Eliza AI 插件完整闭环**：
+   - 在 Eliza 实物智能体框架中挂载此 SDK 作为微支付中间件插件，利用响应头中的 Base64 编码 `X-Agent-Proof` 真实驱动微额支付挑战与结算动作。

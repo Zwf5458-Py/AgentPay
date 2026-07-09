@@ -124,6 +124,35 @@ docker compose up --build
    - **Mock 演示模式**：开启时无需启动任何后端进程，双击 `Execute` 或 `Concurrent Execute` 即可在控制台和 Timeline 时序图中动态查看 402 自愈与 Promise 并发排队锁、信贷预授权锁定、清算凭证解冻自愈的运作过程。
    - **本地直连调试**：开启时，面板红绿灯会自动检测本地 8080 和 3001 的健康状况。点击 Execute 会发送真实请求，中间面板的 SQLite 后台队列监视表每隔 2 秒自动刷新。
 
+### 5.2 本地直连环境启动说明
+为了跑通本地直连（direct）模式下的完整微支付与清算自愈流程，您需要在不同终端窗口中启动以下 3 个微服务：
+
+1. **AA Bridge 网桥微服务**（使用 `tsx` 强兼容引擎启动，默认绑定 3001 端口）：
+   ```bash
+   cd aa-bridge
+   # 在 .env 中填入拥有 Base Sepolia 余额的 PRIVATE_KEY 与 INTERNAL_SECRET=testsecret
+   npm run dev
+   ```
+2. **Agent 模拟推理智能体**（默认绑定 3002 端口）：
+   ```bash
+   cd agent
+   npm run dev
+   ```
+3. **Go Gateway 代理网关**（默认绑定 8080 端口）：
+   ```bash
+   cd gateway
+   export ELIZA_AGENT_URL=http://127.0.0.1:3002
+   export AA_BRIDGE_URL=http://127.0.0.1:3001/aa/settle
+   export INTERNAL_SECRET=testsecret
+   export CHAIN_ID=84532
+   export GATEWAY_PRIVATE_KEY=您的以太坊私钥
+   ./bin/gateway
+   ```
+
+### 5.3 调试技巧
+- **私钥可见性明暗切换**：在高级连接设置中，点击“客户端私钥”输入框右侧的眼睛👀图标，可一键切换可见性以核查私钥准确度。
+- **清空 SQLite 调试队列**：如果多次测试导致 SQLite 任务流水线被大量 `Failed` 任务塞满，可以点击流水线标题右侧的 **`清空队列 (Clear)`** 按钮一键擦除，重新发起全新的 402 预授权以查看最新任务如何成功扭转为 `Success` 状态。
+
 ---
 
 ## 6. 协议清算逻辑细节
