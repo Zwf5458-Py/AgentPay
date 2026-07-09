@@ -150,6 +150,9 @@ server.post('/aa/settle', {
         proof: { type: 'string' },
         channelId: { type: 'string' },
         accumulatedAmount: { type: 'string' },
+        holdAmount: { type: 'string' },
+        nonce: { type: 'string' },
+        expiration: { type: 'string' },
         signature: { type: 'string' },
         agentId: { type: 'integer' }
       }
@@ -159,16 +162,19 @@ server.post('/aa/settle', {
   const body = request.body as any;
 
   if (body && body.channelId !== undefined) {
-    const { channelId, accumulatedAmount, signature, agentId, escrowAddress } = body as {
+    const { channelId, accumulatedAmount, holdAmount, nonce, expiration, signature, agentId, escrowAddress } = body as {
       channelId: string;
       accumulatedAmount: string | bigint;
+      holdAmount: string | bigint;
+      nonce: string | bigint;
+      expiration: string | bigint;
       signature: string;
       agentId: number;
       escrowAddress?: string;
     };
 
-    if (!channelId || accumulatedAmount === undefined || !signature || agentId === undefined) {
-      return reply.status(400).send({ error: 'Missing channelId, accumulatedAmount, signature, or agentId' });
+    if (!channelId || accumulatedAmount === undefined || holdAmount === undefined || nonce === undefined || expiration === undefined || !signature || agentId === undefined) {
+      return reply.status(400).send({ error: 'Missing channelId, accumulatedAmount, holdAmount, nonce, expiration, signature, or agentId' });
     }
 
     const resolvedEscrowAddress = escrowAddress || process.env.ESCROW_ADDRESS;
@@ -205,6 +211,9 @@ server.post('/aa/settle', {
         inputs: [
           { name: 'channelId', type: 'bytes32' },
           { name: 'accumulatedAmount', type: 'uint256' },
+          { name: 'holdAmount', type: 'uint256' },
+          { name: 'nonce', type: 'uint256' },
+          { name: 'expiration', type: 'uint256' },
           { name: 'signature', type: 'bytes' },
           { name: 'agentOwner', type: 'address' },
         ],
@@ -378,6 +387,9 @@ server.post('/aa/settle', {
         args: [
           bytes32ChannelId,
           BigInt(accumulatedAmount),
+          BigInt(holdAmount),
+          BigInt(nonce),
+          BigInt(expiration),
           signature as `0x${string}`,
           computedTBA as `0x${string}`,
         ],

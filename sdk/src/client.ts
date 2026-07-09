@@ -29,7 +29,7 @@ export class AgentPayClient {
     this.privateKey = config.privateKey;
     this.env = config.env || 'production';
     this.chainId = config.chainId || 11155111;
-    this.verifyingContract = config.verifyingContract || '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+    this.verifyingContract = config.verifyingContract || '0x4d5e11be368a8f5ea304197475467b3173c25eea';
     this.gatewayAddress = config.gatewayAddress;
   }
 
