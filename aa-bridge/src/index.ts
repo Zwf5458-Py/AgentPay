@@ -618,6 +618,10 @@ server.get('/aa/account/:agentId', async (request, reply) => {
   }
 });
 
+// Health check endpoints
+server.get('/health', async () => ({ status: 'OK' }));
+server.get('/', async () => ({ status: 'OK' }));
+
 // Start fastify server
 const start = async () => {
   try {

@@ -1255,8 +1255,14 @@
 
       // 检测 AA Bridge
       try {
-        const res = await fetch(`${state.bridgeUrl}`, {
-          method: 'OPTIONS',
+        let bridgeHealthUrl = 'http://127.0.0.1:3001/health';
+        try {
+          const urlObj = new URL(state.bridgeUrl);
+          bridgeHealthUrl = `${urlObj.protocol}//${urlObj.host}/health`;
+        } catch (e) {}
+
+        const res = await fetch(bridgeHealthUrl, {
+          method: 'GET',
           headers: { 'Origin': window.location.origin }
         });
         if (res.ok || res.status === 200) {
