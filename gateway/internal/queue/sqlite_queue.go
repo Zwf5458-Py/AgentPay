@@ -325,3 +325,16 @@ func (qm *QueueManager) GetLatestTasks(limit int) ([]map[string]interface{}, err
 	}
 	return tasks, nil
 }
+
+// ClearTasks 清空数据库中所有的结算任务，用互斥锁保护
+func (qm *QueueManager) ClearTasks() error {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	query := `DELETE FROM settle_tasks`
+	_, err := qm.db.Exec(query)
+	if err != nil {
+		return fmt.Errorf("failed to clear tasks: %w", err)
+	}
+	return nil
+}

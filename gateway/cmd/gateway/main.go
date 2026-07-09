@@ -93,6 +93,16 @@ func main() {
 		json.NewEncoder(w).Encode(tasks)
 	})
 
+	// 调试接口：清空所有结算任务
+	r.Post("/debug/tasks/clear", func(w http.ResponseWriter, r *http.Request) {
+		if err := queueMgr.ClearTasks(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Tasks cleared"))
+	})
+
 	// 启动服务
 	addr := "0.0.0.0:" + port
 	log.Printf("Server listening on %s", addr)

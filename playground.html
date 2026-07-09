@@ -940,7 +940,10 @@
 
         <!-- SQLite 任务列表 -->
         <div class="queue-monitor-container">
-          <label>网关任务流水线 (SQLite Queue Monitor)</label>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <label style="margin-bottom: 0;">网关任务流水线 (SQLite Queue Monitor)</label>
+            <button type="button" class="btn-clear-queue" onclick="clearSQLiteQueue()" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 8px; font-size: 0.75rem; color: var(--text-secondary); cursor: pointer; transition: all 0.2s;">清空队列 (Clear)</button>
+          </div>
           <div class="table-wrapper">
             <table>
               <thead>
@@ -1315,6 +1318,29 @@
         }
       } catch (e) {
         // 静默失败，不输出日志以免刷屏
+      }
+    }
+
+    // 10.1 清空本地 SQLite 队列
+    async function clearSQLiteQueue() {
+      if (state.mode !== 'direct') return;
+
+      let clearUrl = 'http://127.0.0.1:8080/debug/tasks/clear';
+      try {
+        const urlObj = new URL(state.gatewayUrl);
+        clearUrl = `${urlObj.protocol}//${urlObj.host}/debug/tasks/clear`;
+      } catch (e) {}
+
+      try {
+        const res = await fetch(clearUrl, { method: 'POST' });
+        if (res.ok) {
+          addLog('INFO', '已成功清空网关 SQLite 任务队列！');
+          pollSQLiteQueue();
+        } else {
+          addLog('ERROR', '清空 SQLite 队列请求被网关拒绝。');
+        }
+      } catch (e) {
+        addLog('ERROR', `无法清空 SQLite 队列: ${e.message}`);
       }
     }
 
