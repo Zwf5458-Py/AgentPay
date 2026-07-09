@@ -542,6 +542,13 @@
     .timeline-node.active .timeline-indicator {
       background-color: var(--neon-indigo);
       box-shadow: 0 0 10px var(--neon-indigo), 0 0 20px var(--neon-indigo);
+      animation: indicator-pulse 1.5s infinite ease-in-out;
+    }
+
+    @keyframes indicator-pulse {
+      0% { box-shadow: 0 0 0 0px rgba(99, 102, 241, 0.7); }
+      70% { box-shadow: 0 0 0 8px rgba(99, 102, 241, 0); }
+      100% { box-shadow: 0 0 0 0px rgba(99, 102, 241, 0); }
     }
 
     .timeline-node.success {
@@ -730,6 +737,33 @@
       border: 1px solid rgba(16, 185, 129, 0.35);
       color: var(--neon-emerald);
       box-shadow: 0 0 10px rgba(16, 185, 129, 0.15);
+    }
+    .badge-status-glow.generating {
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      color: var(--neon-indigo);
+      box-shadow: 0 0 10px rgba(99, 102, 241, 0.15);
+      animation: generating-breath 1.5s infinite alternate ease-in-out;
+    }
+    @keyframes generating-breath {
+      0% { opacity: 0.6; box-shadow: 0 0 4px rgba(99, 102, 241, 0.2); }
+      100% { opacity: 1; box-shadow: 0 0 15px rgba(99, 102, 241, 0.6); }
+    }
+
+    /* 按钮旋转加载动画 */
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255, 255, 255, 0.35);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 0.8s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
     }
 
     /* 锁定与结算状态下的卡片光环 */
@@ -1155,6 +1189,8 @@
           statusBadge = `<span class="badge-status-glow locked animate-pulse">Credit Locked (Hold: ${(chan.holdAmount / 1000000).toFixed(2)} USDC)</span>`;
         } else if (chan.status === 'settled') {
           statusBadge = '<span class="badge-status-glow settled animate-bounce">Settled & Unlocked</span>';
+        } else if (chan.status === 'generating') {
+          statusBadge = '<span class="badge-status-glow generating">推理中 (Generating...)</span>';
         }
         
         card.innerHTML = `
@@ -1392,7 +1428,10 @@
       readInputs();
       resetTimeline();
       addLog('INFO', `---------------- 发起单次请求 ----------------`);
-      executeRequest(state.agentId, state.input, 1);
+      setButtonsLoading(true);
+      executeRequest(state.agentId, state.input, 1).finally(() => {
+        setButtonsLoading(false);
+      });
     }
 
     function triggerConcurrentRequest() {
@@ -1400,6 +1439,7 @@
       resetTimeline();
       addLog('INFO', `---------------- 发起双击并发请求 (Promise.all) ----------------`);
       addLog('INFO', '正在并发提交请求 #1 和 请求 #2... 验证通道防重入锁自愈！');
+      setButtonsLoading(true);
 
       // 并发执行，底层通过相同的 channelLocks 控制顺序
       Promise.all([
@@ -1409,7 +1449,27 @@
         addLog('SUCCESS', '并发测试完成。');
       }).catch(err => {
         addLog('ERROR', `并发测试异常终止: ${err.message}`);
+      }).finally(() => {
+        setButtonsLoading(false);
       });
+    }
+
+    // 辅助控制动作按钮禁用与旋转加载显示
+    function setButtonsLoading(isLoading) {
+      const btnSingle = document.querySelector('.action-btn.btn-primary');
+      const btnConcurrent = document.querySelector('.action-btn.btn-secondary');
+      if (isLoading) {
+        btnSingle.disabled = true;
+        btnConcurrent.disabled = true;
+        btnSingle.innerHTML = `<span class="spinner"></span> 智能体推理中 (Generating...)`;
+      } else {
+        btnSingle.disabled = false;
+        btnConcurrent.disabled = false;
+        btnSingle.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+          发送单次请求 (Execute)
+        `;
+      }
     }
 
     // 封装 Promise 排队锁的外壳，确保对同一 agentId 的请求按序串行化执行
@@ -1471,6 +1531,10 @@
         state.channels[agentId] = chan;
       }
       const lastConfirmedSpend = chan.confirmedSpend;
+
+      // 展现智能体推理动态，卡片闪烁提示
+      chan.status = 'generating';
+      renderChannels();
 
       // 组装首发 Authorization
       let authHeader = '';
