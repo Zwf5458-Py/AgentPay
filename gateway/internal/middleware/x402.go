@@ -3,11 +3,18 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 type contextKey string
@@ -67,6 +74,37 @@ func X402Middleware(next http.Handler) http.Handler {
 			if err != nil || expTime < time.Now().Unix() {
 				trigger402(w)
 				return
+			}
+
+			// 密码学签名验证与安全隔离
+			isProd := os.Getenv("APP_ENV") == "production"
+			clientAddress := os.Getenv("CLIENT_ADDRESS")
+
+			isMockSig := !strings.HasPrefix(sig, "0x") || len(sig) != 132
+
+			if isMockSig {
+				if isProd {
+					trigger402(w)
+					return
+				}
+				// 非生产环境继续放行 mock-signature (用于兼容测试用例)
+			} else {
+				signerAddr, err := RecoverEIP712Signer(channelID, holdAmount, nonce, expiration, sig)
+				if err != nil {
+					trigger402(w)
+					return
+				}
+
+				if clientAddress != "" {
+					if !strings.EqualFold(signerAddr, clientAddress) {
+						trigger402(w)
+						return
+					}
+				} else if isProd {
+					// 生产模式无 clientAddress 配置阻断防线
+					trigger402(w)
+					return
+				}
 			}
 
 			if lockID == "" {
@@ -198,4 +236,102 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+// GetEIP712DomainSeparator 计算 EIP-712 Domain Separator
+func GetEIP712DomainSeparator(verifyingContract string) []byte {
+	typeHash := crypto.Keccak256([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
+	nameHash := crypto.Keccak256([]byte("AgentPay"))
+	versionHash := crypto.Keccak256([]byte("1"))
+
+	chainIdBytes := make([]byte, 32)
+	new(big.Int).SetInt64(11155111).FillBytes(chainIdBytes)
+
+	contractAddr := common.HexToAddress(verifyingContract)
+	contractBytes := make([]byte, 32)
+	copy(contractBytes[12:], contractAddr.Bytes())
+
+	data := append(typeHash, nameHash...)
+	data = append(data, versionHash...)
+	data = append(data, chainIdBytes...)
+	data = append(data, contractBytes...)
+
+	return crypto.Keccak256(data)
+}
+
+// GetChannelHoldMessageHash 计算 ChannelHold typed data message hash
+func GetChannelHoldMessageHash(channelID string, holdAmount, nonce, expiration *big.Int) []byte {
+	typeHash := crypto.Keccak256([]byte("ChannelHold(bytes32 channelId,uint256 holdAmount,uint256 nonce,uint256 expiration)"))
+
+	var channelBytes [32]byte
+	if strings.HasPrefix(channelID, "0x") {
+		h := common.HexToHash(channelID)
+		copy(channelBytes[:], h.Bytes())
+	} else {
+		copy(channelBytes[:], []byte(channelID))
+	}
+
+	holdAmountBytes := make([]byte, 32)
+	holdAmount.FillBytes(holdAmountBytes)
+
+	nonceBytes := make([]byte, 32)
+	nonce.FillBytes(nonceBytes)
+
+	expirationBytes := make([]byte, 32)
+	expiration.FillBytes(expirationBytes)
+
+	data := append(typeHash, channelBytes[:]...)
+	data = append(data, holdAmountBytes...)
+	data = append(data, nonceBytes...)
+	data = append(data, expirationBytes...)
+
+	return crypto.Keccak256(data)
+}
+
+// RecoverEIP712Signer 从预授权 Token 还原以太坊签名地址
+func RecoverEIP712Signer(channelID, holdAmountStr, nonceStr, expirationStr, sigStr string) (string, error) {
+	verifyingContract := os.Getenv("ESCROW_ADDRESS")
+	if verifyingContract == "" {
+		verifyingContract = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+	}
+
+	holdAmount, ok := new(big.Int).SetString(holdAmountStr, 10)
+	if !ok {
+		return "", errors.New("invalid holdAmount")
+	}
+	nonce, ok := new(big.Int).SetString(nonceStr, 10)
+	if !ok {
+		return "", errors.New("invalid nonce")
+	}
+	expiration, ok := new(big.Int).SetString(expirationStr, 10)
+	if !ok {
+		return "", errors.New("invalid expiration")
+	}
+
+	domainSeparator := GetEIP712DomainSeparator(verifyingContract)
+	messageHash := GetChannelHoldMessageHash(channelID, holdAmount, nonce, expiration)
+
+	digestData := append([]byte("\x19\x01"), domainSeparator...)
+	digestData = append(digestData, messageHash...)
+	digest := crypto.Keccak256(digestData)
+
+	sigBytes, err := hexutil.Decode(sigStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode signature: %w", err)
+	}
+	if len(sigBytes) != 65 {
+		return "", fmt.Errorf("invalid signature length: %d", len(sigBytes))
+	}
+
+	if sigBytes[64] == 27 || sigBytes[64] == 28 {
+		sigBytes[64] -= 27
+	}
+
+	pubKey, err := crypto.SigToPub(digest, sigBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to recover public key: %w", err)
+	}
+
+	address := crypto.PubkeyToAddress(*pubKey).Hex()
+	return address, nil
 }

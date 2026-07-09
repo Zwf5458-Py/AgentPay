@@ -61,6 +61,10 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 	}
 
 	if privKey == nil {
+		isProd := os.Getenv("APP_ENV") == "production"
+		if isProd {
+			return nil, fmt.Errorf("GATEWAY_PRIVATE_KEY must be provided in production environment")
+		}
 		log.Println("[Proxy] GATEWAY_PRIVATE_KEY not set. Generating a temporary ECDSA key in memory.")
 		k, err := crypto.GenerateKey()
 		if err != nil {
@@ -88,11 +92,17 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 			// 提取 lockId
 			ctx := res.Request.Context()
 			lockID := middleware.GetLockID(ctx)
+			channelID := middleware.GetChannelID(ctx)
+			nonce := middleware.GetNonce(ctx)
 
 			if lockID != "" {
-				log.Printf("[Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: %s", lockID)
-				if err := wrapper.QueueManager.Enqueue(lockID, proof, wrapper.agentOwner, wrapper.escrowAddress); err != nil {
-					log.Printf("[Proxy] Enqueue failed for lockId %s: %v", lockID, err)
+				enqueueLockID := lockID
+				if channelID != "" && nonce != "" {
+					enqueueLockID = fmt.Sprintf("%s:%s", channelID, nonce)
+				}
+				log.Printf("[Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: %s", enqueueLockID)
+				if err := wrapper.QueueManager.Enqueue(enqueueLockID, proof, wrapper.agentOwner, wrapper.escrowAddress); err != nil {
+					log.Printf("[Proxy] Enqueue failed for lockId %s: %v", enqueueLockID, err)
 				}
 			} else {
 				log.Printf("[Proxy] Intercepted X-Agent-Proof but lockId is missing in request context.")

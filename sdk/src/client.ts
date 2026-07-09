@@ -21,6 +21,7 @@ export class AgentPayClient {
   private gatewayAddress?: `0x${string}`;
   private channels = new Map<number, { id: string; confirmedSpend: bigint; accumulatedSpend: bigint; lastPrice: bigint; nonce: bigint }>();
   private channelLocks = new Map<number, Promise<any>>();
+  private activeRequests = new Map<number, number>();
 
   constructor(config: AgentPayClientConfig = {}) {
     this.gatewayUrl = config.gatewayUrl || 'http://127.0.0.1:8080';
@@ -33,10 +34,24 @@ export class AgentPayClient {
   }
 
   public async execute(agentId: number, input: string): Promise<any> {
+    const count = (this.activeRequests.get(agentId) || 0) + 1;
+    this.activeRequests.set(agentId, count);
+
     const currentLock = this.channelLocks.get(agentId) || Promise.resolve();
     const nextLock = currentLock.then(() => this.executeInternal(agentId, input));
-    // 捕获异常防止后续排队发生死锁阻塞
-    this.channelLocks.set(agentId, nextLock.catch(() => {}));
+    
+    // 捕获异常防止后续排队发生死锁阻塞，并在最终执行清理以释放 Promise 节点
+    const cleanPromise = nextLock.catch(() => {}).finally(() => {
+      const currentCount = this.activeRequests.get(agentId) || 0;
+      if (currentCount <= 1) {
+        this.activeRequests.delete(agentId);
+        this.channelLocks.delete(agentId);
+      } else {
+        this.activeRequests.set(agentId, currentCount - 1);
+      }
+    });
+
+    this.channelLocks.set(agentId, cleanPromise);
     return nextLock;
   }
 

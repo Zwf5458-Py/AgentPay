@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,8 @@ import (
 	"gateway/internal/proxy"
 	"gateway/internal/queue"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"golang.org/x/time/rate"
 )
 
@@ -711,6 +715,138 @@ func TestX402Middleware_Expiration(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Errorf("Expected status %d for active token, got %d", http.StatusOK, rr.Code)
+	}
+}
+
+func TestX402Middleware_EIP712ValidSignature(t *testing.T) {
+	// 准备测试私钥
+	privKeyHex := "2222222222222222222222222222222222222222222222222222222222222222"
+	privKey, err := crypto.HexToECDSA(privKeyHex)
+	if err != nil {
+		t.Fatalf("Failed to parse private key: %v", err)
+	}
+
+	// 导出地址为 0x1563915e194D8CfBA1943570603F7606A3115508
+	clientAddr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
+	os.Setenv("CLIENT_ADDRESS", clientAddr)
+	defer os.Unsetenv("CLIENT_ADDRESS")
+
+	escrowAddr := "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+	os.Setenv("ESCROW_ADDRESS", escrowAddr)
+	defer os.Unsetenv("ESCROW_ADDRESS")
+
+	// 构造 typed data 字段
+	channelID := "0x0000000000000000000000000000000000000000000000000000000000000888"
+	holdAmountStr := "50000"
+	nonceStr := "1"
+	expirationStr := strconv.FormatInt(time.Now().Unix()+3600, 10)
+
+	holdAmount, _ := new(big.Int).SetString(holdAmountStr, 10)
+	nonce, _ := new(big.Int).SetString(nonceStr, 10)
+	expiration, _ := new(big.Int).SetString(expirationStr, 10)
+
+	// 计算 EIP-712 Hash
+	domainSeparator := middleware.GetEIP712DomainSeparator(escrowAddr)
+	messageHash := middleware.GetChannelHoldMessageHash(channelID, holdAmount, nonce, expiration)
+
+	digestData := append([]byte("\x19\x01"), domainSeparator...)
+	digestData = append(digestData, messageHash...)
+	digest := crypto.Keccak256(digestData)
+
+	// 签名
+	sigBytes, err := crypto.Sign(digest, privKey)
+	if err != nil {
+		t.Fatalf("Failed to sign: %v", err)
+	}
+	sigBytes[64] += 27 // 转为以太坊 V 格式
+	sig := hexutil.Encode(sigBytes)
+
+	// 构造 Token
+	token := fmt.Sprintf("Bearer %s:%s:%s:%s:%s", channelID, holdAmountStr, nonceStr, expirationStr, sig)
+
+	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/agent/execute", nil)
+	req.Header.Set("Authorization", token)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d. Body: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+}
+
+func TestX402Middleware_EIP712InvalidSignature(t *testing.T) {
+	// 准备测试私钥
+	privKeyHex := "2222222222222222222222222222222222222222222222222222222222222222"
+	privKey, err := crypto.HexToECDSA(privKeyHex)
+	if err != nil {
+		t.Fatalf("Failed to parse private key: %v", err)
+	}
+
+	// 故意把预期客户端地址设置为另一个地址
+	os.Setenv("CLIENT_ADDRESS", "0x3c7CAd7D0fA28a1c86D2e48AFa87df2c21966C5a")
+	defer os.Unsetenv("CLIENT_ADDRESS")
+
+	escrowAddr := "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+	os.Setenv("ESCROW_ADDRESS", escrowAddr)
+	defer os.Unsetenv("ESCROW_ADDRESS")
+
+	channelID := "0x0000000000000000000000000000000000000000000000000000000000000888"
+	holdAmountStr := "50000"
+	nonceStr := "1"
+	expirationStr := strconv.FormatInt(time.Now().Unix()+3600, 10)
+
+	holdAmount, _ := new(big.Int).SetString(holdAmountStr, 10)
+	nonce, _ := new(big.Int).SetString(nonceStr, 10)
+	expiration, _ := new(big.Int).SetString(expirationStr, 10)
+
+	// 计算 EIP-712 Hash
+	domainSeparator := middleware.GetEIP712DomainSeparator(escrowAddr)
+	messageHash := middleware.GetChannelHoldMessageHash(channelID, holdAmount, nonce, expiration)
+
+	digestData := append([]byte("\x19\x01"), domainSeparator...)
+	digestData = append(digestData, messageHash...)
+	digest := crypto.Keccak256(digestData)
+
+	// 签名
+	sigBytes, err := crypto.Sign(digest, privKey)
+	if err != nil {
+		t.Fatalf("Failed to sign: %v", err)
+	}
+	sigBytes[64] += 27
+	sig := hexutil.Encode(sigBytes)
+
+	// 构造带非法签名的 Token (由于 CLIENT_ADDRESS 为 0x3c7CAd...，而我们使用 0x156391... 签的，因此应该被拒绝)
+	token := fmt.Sprintf("Bearer %s:%s:%s:%s:%s", channelID, holdAmountStr, nonceStr, expirationStr, sig)
+
+	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/agent/execute", nil)
+	req.Header.Set("Authorization", token)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusPaymentRequired {
+		t.Errorf("Expected status code %d for invalid signature, got %d", http.StatusPaymentRequired, rr.Code)
+	}
+
+	// 测试篡改字段 (holdAmount 被篡改为 60000，但签名依然是针对 50000 签的)
+	tamperedToken := fmt.Sprintf("Bearer %s:60000:%s:%s:%s", channelID, nonceStr, expirationStr, sig)
+	req2 := httptest.NewRequest("GET", "/agent/execute", nil)
+	req2.Header.Set("Authorization", tamperedToken)
+	rr2 := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusPaymentRequired {
+		t.Errorf("Expected status code %d for tampered parameter, got %d", http.StatusPaymentRequired, rr2.Code)
 	}
 }
 

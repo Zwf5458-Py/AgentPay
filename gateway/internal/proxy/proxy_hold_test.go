@@ -437,3 +437,18 @@ func TestProxy_SettleReceipt_MalformedCost(t *testing.T) {
 		t.Errorf("Expected default actualCost to be '1000' when X-Agent-Cost is malformed, got %q", actualCost)
 	}
 }
+
+func TestProxy_ProductionKeyRequired(t *testing.T) {
+	os.Setenv("APP_ENV", "production")
+	defer os.Unsetenv("APP_ENV")
+	os.Unsetenv("GATEWAY_PRIVATE_KEY")
+
+	_, err := proxy.NewReverseProxy("http://localhost:8080", "http://localhost:8081", "secret", nil)
+	if err == nil {
+		t.Fatal("Expected NewReverseProxy to return error in production when private key is missing, but it succeeded")
+	}
+
+	if !strings.Contains(err.Error(), "GATEWAY_PRIVATE_KEY must be provided in production environment") {
+		t.Errorf("Expected error to contain 'GATEWAY_PRIVATE_KEY must be provided', got: %v", err)
+	}
+}
