@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type contextKey string
@@ -16,6 +18,8 @@ const (
 	HoldAmountContextKey contextKey = "x402_hold_amount"
 	ChannelIDContextKey  contextKey = "x402_channel_id"
 	SignatureContextKey  contextKey = "x402_signature"
+	NonceContextKey      contextKey = "x402_nonce"
+	ExpirationContextKey contextKey = "x402_expiration"
 )
 
 type ErrorResponse struct {
@@ -49,7 +53,21 @@ func X402Middleware(next http.Handler) http.Handler {
 		if len(parts) == 5 {
 			channelID := parts[0]
 			holdAmount := parts[1]
+			nonce := parts[2]
+			expiration := parts[3]
 			sig := parts[4]
+
+			if !isNumeric(holdAmount) || !isNumeric(nonce) || !isNumeric(expiration) {
+				trigger402(w)
+				return
+			}
+
+			// 检查是否过期
+			expTime, err := strconv.ParseInt(expiration, 10, 64)
+			if err != nil || expTime < time.Now().Unix() {
+				trigger402(w)
+				return
+			}
 
 			if lockID == "" {
 				lockID = channelID
@@ -60,6 +78,8 @@ func X402Middleware(next http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, LockIDContextKey, lockID)
 			ctx = context.WithValue(ctx, HoldAmountContextKey, holdAmount)
 			ctx = context.WithValue(ctx, ChannelIDContextKey, channelID)
+			ctx = context.WithValue(ctx, NonceContextKey, nonce)
+			ctx = context.WithValue(ctx, ExpirationContextKey, expiration)
 			ctx = context.WithValue(ctx, SignatureContextKey, sig)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -127,6 +147,22 @@ func GetSignature(ctx context.Context) string {
 	return ""
 }
 
+// GetNonce 从 context 中获取 nonce
+func GetNonce(ctx context.Context) string {
+	if val, ok := ctx.Value(NonceContextKey).(string); ok {
+		return val
+	}
+	return ""
+}
+
+// GetExpiration 从 context 中获取 expiration
+func GetExpiration(ctx context.Context) string {
+	if val, ok := ctx.Value(ExpirationContextKey).(string); ok {
+		return val
+	}
+	return ""
+}
+
 func trigger402(w http.ResponseWriter) {
 	// 获取 ESCROW_ADDRESS 环境变量，默认为 Mock 合约地址
 	escrowAddr := os.Getenv("ESCROW_ADDRESS")
@@ -150,4 +186,16 @@ func trigger402(w http.ResponseWriter) {
 		Message: "micropayment required via x-402 protocol",
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

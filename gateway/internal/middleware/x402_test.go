@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -603,19 +604,26 @@ func TestX402Middleware_HoldAmount(t *testing.T) {
 	var capturedHoldAmount string
 	var capturedChannelID string
 	var capturedSignature string
+	var capturedNonce string
+	var capturedExpiration string
 
 	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedHoldAmount = middleware.GetHoldAmount(r.Context())
 		capturedChannelID = middleware.GetChannelID(r.Context())
 		capturedSignature = middleware.GetSignature(r.Context())
+		capturedNonce = middleware.GetNonce(r.Context())
+		capturedExpiration = middleware.GetExpiration(r.Context())
 		w.WriteHeader(http.StatusOK)
 	})
 
 	handler = middleware.X402Middleware(nextHandler)
 
+	futureExp := time.Now().Unix() + 3600
+	futureExpStr := strconv.FormatInt(futureExp, 10)
+
 	req = httptest.NewRequest("GET", "/agent/execute", nil)
 	// Bearer <channelId>:<holdAmount>:<nonce>:<expiration>:<sig>
-	req.Header.Set("Authorization", "Bearer 0xChannel123:50000:nonce456:exp789:0xSigabc")
+	req.Header.Set("Authorization", "Bearer 0xChannel123:50000:456:"+futureExpStr+":0xSigabc")
 	rr = httptest.NewRecorder()
 
 	handler.ServeHTTP(rr, req)
@@ -634,6 +642,75 @@ func TestX402Middleware_HoldAmount(t *testing.T) {
 
 	if capturedSignature != "0xSigabc" {
 		t.Errorf("Expected captured signature '0xSigabc', got %q", capturedSignature)
+	}
+
+	if capturedNonce != "456" {
+		t.Errorf("Expected captured nonce '456', got %q", capturedNonce)
+	}
+
+	if capturedExpiration != futureExpStr {
+		t.Errorf("Expected captured expiration %q, got %q", futureExpStr, capturedExpiration)
+	}
+}
+
+func TestX402Middleware_InvalidFormat(t *testing.T) {
+	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	invalidTokens := []string{
+		"Bearer 0xChannel123:50000a:123456:1718999999:0xSig", // holdAmount 含字母
+		"Bearer 0xChannel123:50000:123456b:1718999999:0xSig", // nonce 含字母
+		"Bearer 0xChannel123:50000:123456:1718999999c:0xSig", // expiration 含字母
+		"Bearer 0xChannel123::123456:1718999999:0xSig",       // holdAmount 为空
+		"Bearer 0xChannel123:50000::1718999999:0xSig",       // nonce 为空
+		"Bearer 0xChannel123:50000:123456::0xSig",           // expiration 为空
+	}
+
+	for _, token := range invalidTokens {
+		req := httptest.NewRequest("GET", "/agent/execute", nil)
+		req.Header.Set("Authorization", token)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusPaymentRequired {
+			t.Errorf("For token %q, expected status %d, got %d", token, http.StatusPaymentRequired, rr.Code)
+		}
+	}
+}
+
+func TestX402Middleware_Expiration(t *testing.T) {
+	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	now := time.Now().Unix()
+
+	// 1. 过期 token (10秒前过期)
+	expiredTime := now - 10
+	expiredToken := "Bearer 0xChannel123:50000:123456:" + strconv.FormatInt(expiredTime, 10) + ":0xSig"
+	req := httptest.NewRequest("GET", "/agent/execute", nil)
+	req.Header.Set("Authorization", expiredToken)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusPaymentRequired {
+		t.Errorf("Expected status %d for expired token, got %d", http.StatusPaymentRequired, rr.Code)
+	}
+
+	// 2. 有效 token (1小时后过期)
+	activeTime := now + 3600
+	activeToken := "Bearer 0xChannel123:50000:123456:" + strconv.FormatInt(activeTime, 10) + ":0xSig"
+	req = httptest.NewRequest("GET", "/agent/execute", nil)
+	req.Header.Set("Authorization", activeToken)
+	rr = httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status %d for active token, got %d", http.StatusOK, rr.Code)
 	}
 }
 
