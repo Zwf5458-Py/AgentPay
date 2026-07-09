@@ -1,14 +1,21 @@
 package proxy
 
 import (
+	"crypto/ecdsa"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 
 	"gateway/internal/middleware"
 	"gateway/internal/queue"
+
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // ReverseProxyWrapper 封装了反向代理的逻辑
@@ -19,6 +26,7 @@ type ReverseProxyWrapper struct {
 	escrowAddress  string
 	internalSecret string
 	QueueManager   *queue.QueueManager
+	privateKey     *ecdsa.PrivateKey
 }
 
 // NewReverseProxy 构造反向代理实例
@@ -39,18 +47,43 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 		escrowAddress = "0x5FbDB2315678afecb367f032d93F642f64180aa3" // 默认合约 Mock 地址
 	}
 
+	// 加载私钥
+	var privKey *ecdsa.PrivateKey
+	privKeyHex := os.Getenv("GATEWAY_PRIVATE_KEY")
+	if privKeyHex != "" {
+		privKeyHex = strings.TrimPrefix(privKeyHex, "0x")
+		k, err := crypto.HexToECDSA(privKeyHex)
+		if err == nil {
+			privKey = k
+			log.Println("[Proxy] Successfully loaded GATEWAY_PRIVATE_KEY.")
+		} else {
+			log.Printf("[Proxy] Error parsing GATEWAY_PRIVATE_KEY: %v. Fallback to generating memory key.", err)
+		}
+	}
+
+	if privKey == nil {
+		log.Println("[Proxy] GATEWAY_PRIVATE_KEY not set. Generating a temporary ECDSA key in memory.")
+		k, err := crypto.GenerateKey()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate temporary private key: %w", err)
+		}
+		privKey = k
+	}
+
 	wrapper := &ReverseProxyWrapper{
 		aaBridgeURL:    aaBridgeURL,
 		agentOwner:     agentOwner,
 		escrowAddress:  escrowAddress,
 		internalSecret: internalSecret,
 		QueueManager:   queueMgr,
+		privateKey:     privKey,
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
 
 	// 劫持响应
 	proxy.ModifyResponse = func(res *http.Response) error {
+		// 1. 异步入队结算原逻辑
 		proof := res.Header.Get("X-Agent-Proof")
 		if proof != "" {
 			// 提取 lockId
@@ -66,6 +99,48 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 				log.Printf("[Proxy] Intercepted X-Agent-Proof but lockId is missing in request context.")
 			}
 		}
+
+		// 2. 生成并追加状态通道清算凭证 Settle Receipt
+		ctx := res.Request.Context()
+		channelID := middleware.GetChannelID(ctx)
+		if channelID != "" {
+			holdAmountStr := middleware.GetHoldAmount(ctx)
+			nonceStr := middleware.GetNonce(ctx)
+
+			// 计算实际开销 actualCost
+			actualCost := int64(1000) // 默认微支付单次价格
+			if costStr := res.Header.Get("X-Agent-Cost"); costStr != "" {
+				if costVal, err := strconv.ParseInt(costStr, 10, 64); err == nil {
+					actualCost = costVal
+				}
+			}
+
+			// 安全防线：实际扣款不超过预授权冻结额
+			if holdAmountStr != "" {
+				if holdVal, err := strconv.ParseInt(holdAmountStr, 10, 64); err == nil {
+					if actualCost > holdVal {
+						actualCost = holdVal
+					}
+				}
+			}
+
+			// 生成签名
+			expectedMsg := fmt.Sprintf("%s:%s:%d:%s", channelID, holdAmountStr, actualCost, nonceStr)
+			expectedMsgHash := crypto.Keccak256Hash([]byte(fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(expectedMsg), expectedMsg)))
+
+			sigBytes, err := crypto.Sign(expectedMsgHash.Bytes(), wrapper.privateKey)
+			if err != nil {
+				log.Printf("[Proxy] Failed to sign settle receipt: %v", err)
+			} else {
+				sigBytes[64] += 27 // 格式化为以太坊 V 格式
+				sigStr := hexutil.Encode(sigBytes)
+
+				receiptStr := fmt.Sprintf("%s:%s:%d:%s:%s", channelID, holdAmountStr, actualCost, nonceStr, sigStr)
+				res.Header.Set("X-402-Settle-Receipt", receiptStr)
+				log.Printf("[Proxy] Appended Settle Receipt header: %s", receiptStr)
+			}
+		}
+
 		return nil
 	}
 
