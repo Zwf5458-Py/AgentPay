@@ -36,7 +36,7 @@ server.setErrorHandler((error, request, reply) => {
 
 // onRequest hook to enforce security credentials validation via x-internal-secret
 server.addHook('onRequest', async (request, reply) => {
-  if (request.method === 'OPTIONS') {
+  if (request.method === 'OPTIONS' || request.url === '/health' || request.url === '/') {
     return;
   }
   const secret = process.env.INTERNAL_SECRET;
