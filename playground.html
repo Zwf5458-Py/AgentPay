@@ -6,6 +6,8 @@
   <title>AgentPay 协议自愈沙盒调试面板</title>
   <!-- Google Fonts: Outfit -->
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Ethers.js CDN for Client-side signing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
   <style>
     /* CSS 设计系统：暗黑霓虹与毛玻璃美学 */
     :root {
@@ -858,6 +860,36 @@
           </div>
         </div>
 
+        <!-- 高级连接设置 (Collapsible Settings) -->
+        <details class="settings-details" style="margin-top: 1rem; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 1rem; padding-bottom: 0.5rem;">
+          <summary style="cursor: pointer; font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); display: flex; align-items: center; gap: 0.35rem; user-select: none;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            高级连接设置 (Advanced Connection Settings)
+          </summary>
+          <div style="margin-top: 0.75rem; display: flex; flex-direction: column; gap: 0.75rem;">
+            <div class="form-group" style="margin-bottom: 0px;">
+              <label for="input-gateway-url">网关服务 URL</label>
+              <input type="text" id="input-gateway-url" class="form-control" value="http://127.0.0.1:8080">
+            </div>
+            <div class="form-group" style="margin-bottom: 0px;">
+              <label for="input-bridge-url">AA Bridge 结算 URL</label>
+              <input type="text" id="input-bridge-url" class="form-control" value="http://127.0.0.1:3001/aa/settle">
+            </div>
+            <div class="form-group" style="margin-bottom: 0px;">
+              <label for="input-private-key">客户端私钥 (0x开头，直连验签使用)</label>
+              <input type="password" id="input-private-key" class="form-control" value="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80">
+            </div>
+            <div class="form-group" style="margin-bottom: 0px;">
+              <label for="input-verifying-contract">PaymentEscrow 合约地址</label>
+              <input type="text" id="input-verifying-contract" class="form-control" value="0x4d5e11be368a8f5ea304197475467b3173c25eea">
+            </div>
+            <div class="form-group" style="margin-bottom: 0px;">
+              <label for="input-chain-id">以太坊 Chain ID</label>
+              <input type="number" id="input-chain-id" class="form-control" value="84532">
+            </div>
+          </div>
+        </details>
+
         <!-- 输入表单 -->
         <div class="form-group">
           <label for="input-agent-id">Agent ID</label>
@@ -982,7 +1014,6 @@
   </div>
 
   <script>
-    // 1. 全局状态存储 (Single State Store)
     const state = {
       mode: 'mock', // 'mock' | 'direct'
       agentId: 888,
@@ -990,6 +1021,11 @@
       maxPrice: 5000,
       gatewayHealth: 'offline',
       bridgeHealth: 'offline',
+      gatewayUrl: 'http://127.0.0.1:8080',
+      bridgeUrl: 'http://127.0.0.1:3001/aa/settle',
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      verifyingContract: '0x4d5e11be368a8f5ea304197475467b3173c25eea',
+      chainId: 84532,
       // 本地缓存的通道数据结构： { agentId: { id, confirmedSpend, accumulatedSpend, lastPrice, holdAmount, lastActualCost, status } }
       channels: {
         888: { id: 'channel-888', confirmedSpend: 0, accumulatedSpend: 0, lastPrice: 0, holdAmount: 0, lastActualCost: 0, status: 'idle' }
@@ -1027,6 +1063,11 @@
       document.getElementById('input-agent-id').value = state.agentId;
       document.getElementById('input-data').value = state.input;
       document.getElementById('input-max-price').value = state.maxPrice;
+      document.getElementById('input-gateway-url').value = state.gatewayUrl;
+      document.getElementById('input-bridge-url').value = state.bridgeUrl;
+      document.getElementById('input-private-key').value = state.privateKey;
+      document.getElementById('input-verifying-contract').value = state.verifyingContract;
+      document.getElementById('input-chain-id').value = state.chainId;
 
       // 渲染通道账本列表
       renderChannels();
@@ -1060,6 +1101,11 @@
       state.agentId = parseInt(document.getElementById('input-agent-id').value) || 0;
       state.input = document.getElementById('input-data').value || 'Hello';
       state.maxPrice = parseInt(document.getElementById('input-max-price').value) || 5000;
+      state.gatewayUrl = document.getElementById('input-gateway-url').value || 'http://127.0.0.1:8080';
+      state.bridgeUrl = document.getElementById('input-bridge-url').value || 'http://127.0.0.1:3001/aa/settle';
+      state.privateKey = document.getElementById('input-private-key').value || '';
+      state.verifyingContract = document.getElementById('input-verifying-contract').value || '0x4d5e11be368a8f5ea304197475467b3173c25eea';
+      state.chainId = parseInt(document.getElementById('input-chain-id').value) || 84532;
     }
 
     // 5. 渲染本地通道面板
@@ -1191,9 +1237,9 @@
     async function healthCheck() {
       if (state.mode !== 'direct') return;
 
-      // 检测 Gateway 8080
+      // 检测 Gateway
       try {
-        const res = await fetch('http://127.0.0.1:8080/agent/execute', {
+        const res = await fetch(`${state.gatewayUrl}`, {
           method: 'OPTIONS',
           headers: { 'Origin': window.location.origin }
         });
@@ -1207,9 +1253,9 @@
       }
       setHealthStatus('gateway', state.gatewayHealth);
 
-      // 检测 AA Bridge 3001
+      // 检测 AA Bridge
       try {
-        const res = await fetch('http://127.0.0.1:3001/aa/settle', {
+        const res = await fetch(`${state.bridgeUrl}`, {
           method: 'OPTIONS',
           headers: { 'Origin': window.location.origin }
         });
@@ -1228,8 +1274,15 @@
     async function pollSQLiteQueue() {
       if (state.mode !== 'direct') return;
 
+      // 获取 Gateway 的基础 host，用以请求调试接口
+      let debugUrl = 'http://127.0.0.1:8080/debug/tasks';
       try {
-        const res = await fetch('http://127.0.0.1:8080/debug/tasks');
+        const urlObj = new URL(state.gatewayUrl);
+        debugUrl = `${urlObj.protocol}//${urlObj.host}/debug/tasks`;
+      } catch (e) {}
+
+      try {
+        const res = await fetch(debugUrl);
         if (res.ok) {
           const tasks = await res.json();
           renderQueueTable(tasks);
@@ -1370,11 +1423,44 @@
       // 组装首发 Authorization
       let authHeader = '';
       if (chan.lastPrice > 0) {
-        // 如果本地有记录的 lastPrice，预期已自愈并确认，按正常请求拼接 Authorization
         chan.accumulatedSpend = chan.confirmedSpend + chan.lastPrice;
-        const fakeSig = `mock-channel-sig-req-${reqIndex}`;
-        authHeader = `Bearer ${chan.id}:${chan.accumulatedSpend}:${fakeSig}`;
-        addLog('INFO', `[请求 #${reqIndex}] 检测到本地已存在通道，主动注入凭证: ${chan.id}, accumulatedSpend: ${chan.accumulatedSpend}`);
+        const holdAmountVal = chan.lastPrice;
+        const currentNonce = chan.nonce || 1;
+        const expiration = Math.floor(Date.now() / 1000) + 3600;
+        
+        let sig = `mock-sig-nonce-${currentNonce}`;
+        if (window.ethers && state.privateKey && state.privateKey.startsWith('0x') && state.privateKey.length === 66) {
+          try {
+            const wallet = new ethers.Wallet(state.privateKey);
+            const domain = {
+              name: 'AgentPay',
+              version: '1',
+              chainId: state.chainId,
+              verifyingContract: state.verifyingContract
+            };
+            const types = {
+              ChannelHold: [
+                { name: 'channelId', type: 'bytes32' },
+                { name: 'holdAmount', type: 'uint256' },
+                { name: 'nonce', type: 'uint256' },
+                { name: 'expiration', type: 'uint256' }
+              ]
+            };
+            const message = {
+              channelId: chan.id.startsWith('0x') ? chan.id : '0x0000000000000000000000000000000000000000000000000000000000000888',
+              holdAmount: BigInt(holdAmountVal),
+              nonce: BigInt(currentNonce),
+              expiration: BigInt(expiration)
+            };
+            chan.nonce = (chan.nonce || 1) + 1;
+            sig = await wallet.signTypedData(domain, types, message);
+          } catch (e) {
+            sig = `mock-sig-nonce-${currentNonce}`;
+          }
+        }
+        
+        authHeader = `Bearer ${chan.id}:${holdAmountVal}:${currentNonce}:${expiration}:${sig}`;
+        addLog('INFO', `[请求 #${reqIndex}] 检测到本地已存在通道，主动注入凭证: ${chan.id}, holdAmount: ${holdAmountVal}, nonce: ${currentNonce}`);
       } else {
         addLog('INFO', `[请求 #${reqIndex}] 本地无活动通道凭证，发起空授权请求`);
       }
@@ -1419,21 +1505,53 @@
           // 延时模拟签名动作
           await delay(600);
           
-          // 累加本地额度并生成以太坊格式的伪签名
+          // 累加本地额度并生成以太坊格式的凭证
           chan.accumulatedSpend = chan.confirmedSpend + price;
           chan.lastPrice = price;
+          const currentNonce = chan.nonce || 1;
+          const expiration = Math.floor(Date.now() / 1000) + 3600;
           
-          // 模拟生成以太坊格式的伪签名 (130位16进制 + 0x)
-          const randomSig = '0x' + Array.from({length: 130}, () => Math.floor(Math.random()*16).toString(16)).join('');
-          addLog('SIGN', `[请求 #${reqIndex}] 签名计算成功! 通道: ${chan.id}, 目标发生额: ${chan.accumulatedSpend} micro-units`);
-          addLog('SIGN', `[请求 #${reqIndex}] 生成伪以太坊签名: ${randomSig.substring(0, 18)}...`);
+          let sig = `mock-sig-nonce-${currentNonce}`;
+          if (window.ethers && state.privateKey && state.privateKey.startsWith('0x') && state.privateKey.length === 66) {
+            try {
+              const wallet = new ethers.Wallet(state.privateKey);
+              const domain = {
+                name: 'AgentPay',
+                version: '1',
+                chainId: state.chainId,
+                verifyingContract: state.verifyingContract
+              };
+              const types = {
+                ChannelHold: [
+                  { name: 'channelId', type: 'bytes32' },
+                  { name: 'holdAmount', type: 'uint256' },
+                  { name: 'nonce', type: 'uint256' },
+                  { name: 'expiration', type: 'uint256' }
+                ]
+              };
+              const message = {
+                channelId: chan.id.startsWith('0x') ? chan.id : '0x0000000000000000000000000000000000000000000000000000000000000888',
+                holdAmount: BigInt(holdAmountVal),
+                nonce: BigInt(currentNonce),
+                expiration: BigInt(expiration)
+              };
+              chan.nonce = (chan.nonce || 1) + 1;
+              sig = await wallet.signTypedData(domain, types, message);
+              addLog('SIGN', `[请求 #${reqIndex}] EIP-712 预授权签名计算成功! 通道: ${chan.id}, holdAmount: ${holdAmountVal}, nonce: ${currentNonce}`);
+            } catch (signErr) {
+              sig = `mock-sig-nonce-${currentNonce}`;
+              addLog('WARN', `[请求 #${reqIndex}] 真实签名计算失败: ${signErr.message}。已回退至 Mock 签名。`);
+            }
+          } else {
+            addLog('SIGN', `[请求 #${reqIndex}] 签名计算成功! 通道: ${chan.id}, 目标发生额: ${chan.accumulatedSpend} micro-units (Mock 签)`);
+          }
 
           setTimelineState('step3', 'success');
           
           // 阶段 4: 二次重试并结算
           setTimelineState('step4', 'active', `[请求 #${reqIndex}] 正在携带签名凭证二次重试`);
           
-          const secondaryAuth = `Bearer ${chan.id}:${chan.accumulatedSpend}:${randomSig}`;
+          const secondaryAuth = `Bearer ${chan.id}:${holdAmountVal}:${currentNonce}:${expiration}:${sig}`;
           
           let secondResponse;
           if (state.mode === 'mock') {
@@ -1540,7 +1658,6 @@
     }
 
     // 12. 纯前端 Mock Fetch 仿真逻辑
-    let mockChannelConfirmedSpend = 0; // 模拟后端的已记录额度
     async function mockFetch(agentId, input, authHeader, reqIndex, isRetry = false) {
       await delay(800); // 模拟网络延迟
 
@@ -1565,71 +1682,32 @@
         };
       }
 
-      // 解析 Authorization 头部
+      // 解析 Authorization 头部 (Bearer <channelId>:<holdAmount>:<nonce>:<expiration>:<sig>)
       const parts = authHeader.replace('Bearer ', '').split(':');
-      if (parts.length >= 3) {
-        const channelId = parts[0];
-        const currentSpend = parseInt(parts[1]) || 0;
-        const signature = parts[2];
+      const channelId = parts[0];
+      const holdAmount = parts.length === 5 ? parseInt(parts[1]) : 50000;
+      const nonce = parts.length === 5 ? parts[2] : '1';
 
-        // 计算当前额度增量是否大于等于 12000 (自愈结算额度，比如实际扣 12000 micro)
-        const increment = currentSpend - mockChannelConfirmedSpend;
+      // 生成 Settle Receipt：channelId:holdAmount:actualCost:nonce:sig
+      const mockReceipt = `${channelId}:${holdAmount}:12000:${nonce}:mock-settle-receipt-sig-req-${reqIndex}`;
 
-        // 生成 Settle Receipt：channelId:holdAmount:actualCost:nonce:sig
-        const mockReceipt = `${channelId}:50000:12000:1:mock-settle-receipt-sig-req-${reqIndex}`;
-
-        if (increment >= 12000 || isRetry) {
-          // 这里是自愈重试或额度累加，返回 Settle Receipt
-          mockChannelConfirmedSpend = currentSpend;
-          return {
-            status: 200,
-            headers: {
-              get: (key) => {
-                const headersMap = {
-                  'X-402-Settle-Receipt': mockReceipt
-                };
-                return headersMap[key] || '';
-              }
-            },
-            json: async () => ({
-              response: `[Mock AI] 自愈握手完成。通道 ${channelId} 预授权 50000 成功，已清算结算 12000 micro-units (0.012 USDC)。处理输入: "${input}"`
-            })
-          };
-        } else if (increment >= 0) {
-          // 并发场景下，虽然没有本次额度增加，但若是重复扣除已确认的累计额度，视为有效
-          return {
-            status: 200,
-            headers: {
-              get: (key) => {
-                const headersMap = {
-                  'X-402-Settle-Receipt': mockReceipt
-                };
-                return headersMap[key] || '';
-              }
-            },
-            json: async () => ({
-              response: `[Mock AI] 凭证直通扣款成功。通道 ${channelId} 额度一致 (${currentSpend} USDC)。处理输入: "${input}"`
-            })
-          };
-        }
-      }
-
-      // 回退 402
       return {
-        status: 402,
+        status: 200,
         headers: {
           get: (key) => {
             const headersMap = {
-              'X-402-Payment-Type': 'channel',
-              'X-402-Price': '12000',
-              'X-402-Hold-Amount': '50000',
-              'X-402-Payment-Address': '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+              'X-402-Settle-Receipt': mockReceipt
             };
             return headersMap[key] || '';
           }
-        }
+        },
+        json: async () => ({
+          response: `[Mock AI] 自愈握手完成。通道 ${channelId} 预授权 ${holdAmount} 成功，已清算结算 12000 micro-units (0.012 USDC)。处理输入: "${input}"`
+        })
       };
     }
+
+
 
     // 13. 真实网络直连 Fetch
     async function directFetch(agentId, input, authHeader) {
@@ -1638,7 +1716,14 @@
         headers['Authorization'] = authHeader;
       }
 
-      return fetch('http://127.0.0.1:8080/agent/execute', {
+      // 获取 Gateway 的基础 host，用以请求执行接口
+      let executeUrl = 'http://127.0.0.1:8080/agent/execute';
+      try {
+        const urlObj = new URL(state.gatewayUrl);
+        executeUrl = `${urlObj.protocol}//${urlObj.host}/agent/execute`;
+      } catch (e) {}
+
+      return fetch(executeUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify({ agentId, input })
