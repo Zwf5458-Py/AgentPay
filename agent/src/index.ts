@@ -38,8 +38,38 @@ server.post('/agent/execute', async (request, reply) => {
   }
 
   try {
-    // 3. 生成 mock 的推理输出
-    const output = `Processed by AgentPay AI: ${input}`;
+    // 3. 优先尝试调用本地 LLM (如 oMLX 上运行的 Hermes 模型) 进行真实推理
+    let output = `Processed by AgentPay AI: ${input}`;
+    let modelId = 'deepseek-r1';
+
+    const llmUrl = process.env.LLM_API_URL || 'http://127.0.0.1:8007/v1/chat/completions';
+    const llmModel = process.env.LLM_MODEL || 'Qwythos-9B-Claude-Mythos-5-1M-optiq-5bpw-mlx';
+    const llmApiKey = process.env.LLM_API_KEY || 'sk-225458@';
+
+    try {
+      const llmResponse = await fetch(llmUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${llmApiKey}`
+        },
+        body: JSON.stringify({
+          model: llmModel,
+          messages: [{ role: 'user', content: input }],
+          temperature: 0.7
+        })
+      });
+      if (llmResponse.ok) {
+        const data: any = await llmResponse.json();
+        if (data.choices && data.choices[0] && data.choices[0].message) {
+          output = data.choices[0].message.content;
+          modelId = llmModel;
+          console.log(`[Agent] Successfully generated inference via local model: ${output}`);
+        }
+      }
+    } catch (e: any) {
+      console.log(`[Agent] Local LLM connection failed, falling back to mock output. Error: ${e.message}`);
+    }
 
     // 获取私钥
     const privateKey = getAgentPrivateKey();
@@ -49,7 +79,7 @@ server.post('/agent/execute', async (request, reply) => {
       BigInt(agentId),
       input,
       output,
-      'deepseek-r1', // mock 模型的 modelId
+      modelId,
       privateKey
     );
 
