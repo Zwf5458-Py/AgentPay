@@ -246,3 +246,78 @@ func TestProxy_SettleReceipt_MockKey(t *testing.T) {
 	}
 }
 
+func TestProxy_InvalidPrivateKeyError(t *testing.T) {
+	// Set an invalid private key
+	os.Setenv("GATEWAY_PRIVATE_KEY", "invalid_hex_key")
+	defer os.Unsetenv("GATEWAY_PRIVATE_KEY")
+
+	// Expect NewReverseProxy to return an error instead of falling back to generating memory key
+	_, err := proxy.NewReverseProxy("http://localhost:8080", "http://localhost:8081", "secret", nil)
+	if err == nil {
+		t.Fatal("Expected NewReverseProxy to fail with invalid GATEWAY_PRIVATE_KEY, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "failed to parse GATEWAY_PRIVATE_KEY") {
+		t.Errorf("Expected error to contain 'failed to parse GATEWAY_PRIVATE_KEY', got: %v", err)
+	}
+}
+
+func TestProxy_MissingAgentCost(t *testing.T) {
+	os.Unsetenv("GATEWAY_PRIVATE_KEY")
+
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Agent-Proof", "MockProofForSettleReceiptMockKey")
+		// Do not set X-Agent-Cost
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"output":"agent replied"}`))
+	}))
+	defer agentServer.Close()
+
+	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true}`))
+	}))
+	defer bridgeServer.Close()
+
+	dbPath := t.TempDir() + "/test_proxy_missing_cost.db"
+	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
+	if err != nil {
+		t.Fatalf("Failed to create QueueManager: %v", err)
+	}
+	defer queueMgr.Close()
+
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
+	if err != nil {
+		t.Fatalf("Failed to create reverse proxy: %v", err)
+	}
+
+	handler := middleware.X402Middleware(gatewayProxy)
+
+	req := httptest.NewRequest("POST", "/agent/execute", nil)
+	futureExp := time.Now().Unix() + 3600
+	futureExpStr := strconv.FormatInt(futureExp, 10)
+	req.Header.Set("Authorization", "Bearer 0xChannelMock:20000:999:"+futureExpStr+":0xSigabc")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	receipt := rr.Header().Get("X-402-Settle-Receipt")
+	if receipt == "" {
+		t.Fatal("Expected X-402-Settle-Receipt header, but got none")
+	}
+
+	parts := strings.Split(receipt, ":")
+	if len(parts) != 5 {
+		t.Fatalf("Expected 5 parts in SettleReceipt header, got %d: %q", len(parts), receipt)
+	}
+
+	actualCost := parts[2]
+	if actualCost != "1000" {
+		t.Errorf("Expected default actualCost to be '1000' when X-Agent-Cost is missing, got %q", actualCost)
+	}
+}
+
+

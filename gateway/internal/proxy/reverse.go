@@ -53,12 +53,11 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 	if privKeyHex != "" {
 		privKeyHex = strings.TrimPrefix(privKeyHex, "0x")
 		k, err := crypto.HexToECDSA(privKeyHex)
-		if err == nil {
-			privKey = k
-			log.Println("[Proxy] Successfully loaded GATEWAY_PRIVATE_KEY.")
-		} else {
-			log.Printf("[Proxy] Error parsing GATEWAY_PRIVATE_KEY: %v. Fallback to generating memory key.", err)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse GATEWAY_PRIVATE_KEY: %w", err)
 		}
+		privKey = k
+		log.Println("[Proxy] Successfully loaded GATEWAY_PRIVATE_KEY.")
 	}
 
 	if privKey == nil {
@@ -109,9 +108,14 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 
 			// 计算实际开销 actualCost
 			actualCost := int64(1000) // 默认微支付单次价格
-			if costStr := res.Header.Get("X-Agent-Cost"); costStr != "" {
+			costStr := res.Header.Get("X-Agent-Cost")
+			if costStr == "" {
+				log.Println("[Proxy] No X-Agent-Cost header found in downstream response, defaulting to cost 1000")
+			} else {
 				if costVal, err := strconv.ParseInt(costStr, 10, 64); err == nil {
 					actualCost = costVal
+				} else {
+					log.Println("[Proxy] No X-Agent-Cost header found in downstream response, defaulting to cost 1000")
 				}
 			}
 
