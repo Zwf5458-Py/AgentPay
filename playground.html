@@ -1079,9 +1079,37 @@
 
     // 2. 初始化加载
     window.addEventListener('DOMContentLoaded', () => {
+      // 从 localStorage 中恢复用户自定义的配置
+      const savedPrivateKey = localStorage.getItem('agentpay_private_key');
+      if (savedPrivateKey) state.privateKey = savedPrivateKey;
+
+      const savedGatewayUrl = localStorage.getItem('agentpay_gateway_url');
+      if (savedGatewayUrl) state.gatewayUrl = savedGatewayUrl;
+
+      const savedBridgeUrl = localStorage.getItem('agentpay_bridge_url');
+      if (savedBridgeUrl) state.bridgeUrl = savedBridgeUrl;
+
+      const savedVerifyingContract = localStorage.getItem('agentpay_verifying_contract');
+      if (savedVerifyingContract) state.verifyingContract = savedVerifyingContract;
+
+      const savedChainId = localStorage.getItem('agentpay_chain_id');
+      if (savedChainId) state.chainId = parseInt(savedChainId) || 84532;
+
+      const savedAgentId = localStorage.getItem('agentpay_agent_id');
+      if (savedAgentId) state.agentId = parseInt(savedAgentId) || 888;
+
+      const savedMode = localStorage.getItem('agentpay_mode');
+      if (savedMode) state.mode = savedMode;
+
       syncUIFromState();
       addLog('INFO', '沙盒调试面板加载成功，准备就绪。');
-      addLog('INFO', '当前处于 Mock 仿真模式下，无需启动后端服务即可运行。');
+      if (state.mode === 'mock') {
+        addLog('INFO', '当前处于 Mock 仿真模式下，无需启动后端服务即可运行。');
+      } else {
+        addLog('INFO', '切换至 [本地直连调试模式]');
+        healthCheck();
+        pollSQLiteQueue();
+      }
 
       // 注册私钥眼睛开关
       const btnToggle = document.getElementById('btn-toggle-private-key');
@@ -1095,6 +1123,27 @@
         } else {
           inputKey.type = 'password';
           eyeIcon.innerHTML = `<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>`;
+        }
+      });
+
+      // 注册高级输入项的 input 即时同步保存机制
+      const inputsToWatch = [
+        { id: 'input-private-key', key: 'agentpay_private_key', stateKey: 'privateKey' },
+        { id: 'input-gateway-url', key: 'agentpay_gateway_url', stateKey: 'gatewayUrl' },
+        { id: 'input-bridge-url', key: 'agentpay_bridge_url', stateKey: 'bridgeUrl' },
+        { id: 'input-verifying-contract', key: 'agentpay_verifying_contract', stateKey: 'verifyingContract' },
+        { id: 'input-chain-id', key: 'agentpay_chain_id', stateKey: 'chainId', isInt: true },
+        { id: 'input-agent-id', key: 'agentpay_agent_id', stateKey: 'agentId', isInt: true }
+      ];
+
+      inputsToWatch.forEach(item => {
+        const element = document.getElementById(item.id);
+        if (element) {
+          element.addEventListener('input', (e) => {
+            const val = e.target.value;
+            state[item.stateKey] = item.isInt ? (parseInt(val) || 0) : val;
+            localStorage.setItem(item.key, val);
+          });
         }
       });
 
@@ -1133,6 +1182,7 @@
     function switchMode(newMode) {
       if (state.mode === newMode) return;
       state.mode = newMode;
+      localStorage.setItem('agentpay_mode', newMode);
       syncUIFromState();
       addLog('INFO', `切换至 [${newMode === 'mock' ? 'Mock 仿真演示模式' : '本地直连调试模式'}]`);
       
@@ -1163,6 +1213,14 @@
       state.privateKey = document.getElementById('input-private-key').value || '';
       state.verifyingContract = document.getElementById('input-verifying-contract').value || '0x4d5e11be368a8f5ea304197475467b3173c25eea';
       state.chainId = parseInt(document.getElementById('input-chain-id').value) || 84532;
+
+      // 额外将输入的值同步写入 localStorage
+      localStorage.setItem('agentpay_private_key', state.privateKey);
+      localStorage.setItem('agentpay_gateway_url', state.gatewayUrl);
+      localStorage.setItem('agentpay_bridge_url', state.bridgeUrl);
+      localStorage.setItem('agentpay_verifying_contract', state.verifyingContract);
+      localStorage.setItem('agentpay_chain_id', state.chainId);
+      localStorage.setItem('agentpay_agent_id', state.agentId);
     }
 
     // 5. 渲染本地通道面板
