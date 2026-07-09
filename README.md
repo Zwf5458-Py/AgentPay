@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/banner.png" alt="AgentPay Title Banner" width="800">
+</p>
+
 # AgentPay 智能体微支付与状态通道结算协议
 
 AgentPay 是一个专为 AI 智能体（AI Agents）设计的高并发、低延迟微支付与结算协议系统。它有机地融合了 **X-402 支付协商标准**、**ERC-8004 密码学推理证明** 与以太坊 **ERC-6551 智能账户（Token Bound Account, TBA）**，并在此基础上扩展实现了支持链下累计签名、链上批量清算的状态通道，以极大降低智能体之间微支付的 Layer-2 Gas 损耗与响应延迟。
@@ -111,6 +115,10 @@ docker compose up --build
 ## 5. Web 端沙盒调试工具 (Playground)
 
 我们为开发者预置了开箱即用的可视化沙盒，用于体验 Mock 演示或直连本地后端调试。
+
+<p align="center">
+  <img src="docs/images/playground.png" alt="AgentPay Web Client Playground" width="800">
+</p>
 
 ### 5.1 使用方法
 1. **启动本地静态服务器**：
