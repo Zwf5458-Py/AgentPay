@@ -144,3 +144,62 @@ func TestQuote_BillingModelHint(t *testing.T) {
 		t.Errorf("hint subscription should force model = %s, got %s", model.SubscriptionModel, q.Model)
 	}
 }
+
+func TestPricingService_RecordUsageBuffer_Fallback(t *testing.T) {
+	svc := newTestService(t)
+
+	// 阶梯折扣配置
+	cfg := &model.PriceConfig{
+		AgentID:        "agent-buffer-test",
+		ModelCostPer1k: 1500,
+		ServiceFee:     2000,
+		PlatformBps:    1000,
+		TierThresholds: []uint64{5000, 10000},
+		TierDiscounts:  []float64{0.9, 0.8},
+	}
+	if err := svc.store.SavePriceConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("save price config: %v", err)
+	}
+
+	// 1. 发起高频调用暂存
+	q := &model.Quote{ModelCost: 1500, Model: model.Tiered}
+	err := svc.RecordUsage(context.Background(), "agent-buffer-test", "call-1", 3000, q)
+	if err != nil {
+		t.Fatalf("record usage 1 failed: %v", err)
+	}
+	err2 := svc.RecordUsage(context.Background(), "agent-buffer-test", "call-2", 4000, q)
+	if err2 != nil {
+		t.Fatalf("record usage 2 failed: %v", err2)
+	}
+
+	// 此时 SQLite DB 中总 tokens 应该还是 0（因为还没有刷盘）
+	dbTokens, _ := svc.store.GetCumulativeTokens(context.Background(), "agent-buffer-test")
+	if dbTokens != 0 {
+		t.Errorf("dbTokens = %d, want 0 (delayed flush not working)", dbTokens)
+	}
+
+	// 2. 检查阶梯一致性防线：当前 Quote 能否正确感知到 3000 + 4000 = 7000 未落库 tokens，从而命中 5000 以上的 9 折折扣
+	qBig, errQuote := svc.Quote(context.Background(), "agent-buffer-test", 1000, "")
+	if errQuote != nil {
+		t.Fatalf("quote: %v", errQuote)
+	}
+	// 无折扣 1500，9 折后为 1350
+	if qBig.ModelCost != 1350 {
+		t.Errorf("qBig.ModelCost = %d, want 1350 (should apply 0.9 discount)", qBig.ModelCost)
+	}
+
+	// 3. 执行 Flush 刷盘
+	svc.FlushUsage(context.Background())
+
+	// 刷盘后，SQLite 中的累计 tokens 应完成入库，计数器应扣减
+	dbTokensAfter, _ := svc.store.GetCumulativeTokens(context.Background(), "agent-buffer-test")
+	if dbTokensAfter != 7000 {
+		t.Errorf("dbTokensAfter = %d, want 7000 (flush failed)", dbTokensAfter)
+	}
+
+	// 缓存 tokens 应由于刷盘完成扣减清零
+	cachedTokens := svc.getCachedTokens(context.Background(), "agent-buffer-test")
+	if cachedTokens != 0 {
+		t.Errorf("cachedTokens = %d, want 0 after flush", cachedTokens)
+	}
+}

@@ -116,6 +116,12 @@ func main() {
 	}
 	pricingService := pricingservice.NewPricingService(pricingStore)
 
+	// 挂载 Redis 客户端到计费计量引擎以启用高频缓冲，并启动后台 5 秒定时刷盘 Worker
+	if limiter != nil && limiter.GetRedisClient() != nil {
+		pricingService.SetRedisClient(limiter.GetRedisClient())
+	}
+	pricingService.StartFlushWorker(ctx, 5*time.Second)
+
 	queueMgr, err := queue.NewQueueManager("gateway.db", aaBridgeURL, internalSecret)
 	if err != nil {
 		log.Fatalf("Failed to initialize queue manager: %v", err)

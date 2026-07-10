@@ -23,6 +23,8 @@ type PricingStore interface {
 
 	// AppendUsage 记录一次调用用量（阶梯累计 + 对账）
 	AppendUsage(ctx context.Context, rec *model.UsageRecord) error
+	// AppendUsageBatch 批量记录用量
+	AppendUsageBatch(ctx context.Context, records []*model.UsageRecord) error
 	// GetCumulativeTokens 返回某 agent 累计 token（阶梯定价用）
 	GetCumulativeTokens(ctx context.Context, agentID string) (uint64, error)
 }

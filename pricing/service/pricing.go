@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"sync"
@@ -11,6 +13,8 @@ import (
 
 	"pricing/model"
 	"pricing/store"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // 默认计费参数，与 legacy reverse.go 行为一致，可由 PriceConfig 逐 agent 覆盖。
@@ -32,16 +36,26 @@ type PricingService struct {
 	subCache     map[string]*model.Subscription
 	cacheExpiry map[string]time.Time
 	cacheTTL     time.Duration
+
+	// Redis 暂存与内存降级缓冲支持
+	redisClient    *redis.Client
+	memUsageBuffer chan *model.UsageRecord
+	memTokensMap   sync.Map // key: agentID (string) -> tokens (uint64)
 }
 
 func NewPricingService(s store.PricingStore) *PricingService {
 	return &PricingService{
-		store:        s,
-		configCache: make(map[string]*model.PriceConfig),
-		subCache:    make(map[string]*model.Subscription),
-		cacheExpiry: make(map[string]time.Time),
-		cacheTTL:    30 * time.Second,
+		store:          s,
+		configCache:   make(map[string]*model.PriceConfig),
+		subCache:      make(map[string]*model.Subscription),
+		cacheExpiry:   make(map[string]time.Time),
+		cacheTTL:      30 * time.Second,
+		memUsageBuffer: make(chan *model.UsageRecord, 10000),
 	}
+}
+
+func (p *PricingService) SetRedisClient(client *redis.Client) {
+	p.redisClient = client
 }
 
 // Quote 根据 agentID + tokens 计算本次报价。
@@ -99,6 +113,9 @@ func (p *PricingService) quoteTiered(ctx context.Context, agentID string, tokens
 	if err != nil {
 		return nil, fmt.Errorf("tiered: get cumulative tokens: %w", err)
 	}
+
+	// 累加尚未刷盘的缓存增量
+	cum += p.getCachedTokens(ctx, agentID)
 
 	// 找最高不超过 (累计+本次) 的阈值档
 	discount := 1.0
@@ -195,10 +212,200 @@ func (p *PricingService) RecordUsage(ctx context.Context, agentID, callID string
 		Model:     q.Model,
 		Timestamp: time.Now(),
 	}
-	if err := p.store.AppendUsage(ctx, rec); err != nil {
-		return fmt.Errorf("record usage: %w", err)
+
+	// 1. 将用量增量 tokens 累加至暂存缓存（用于 quote 时阶梯计费精确对账）
+	p.addCachedTokens(ctx, agentID, tokens)
+
+	// 2. 将明细记录暂存入缓冲队列（优先 Redis，降级为内存 channel）
+	if p.redisClient != nil {
+		val, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("failed to marshal usage record: %w", err)
+		}
+		key := "pricing:usage:buffer"
+		if err := p.redisClient.RPush(ctx, key, string(val)).Err(); err != nil {
+			// Redis 写入失败，退回内存 channel
+			select {
+			case p.memUsageBuffer <- rec:
+			default:
+				log.Printf("[PricingService] Warning: Both Redis and Memory channel buffer are full, dropping record %s", callID)
+			}
+		}
+	} else {
+		select {
+		case p.memUsageBuffer <- rec:
+		default:
+			log.Printf("[PricingService] Warning: Memory channel buffer is full, dropping record %s", callID)
+		}
 	}
+
 	return nil
+}
+
+func (p *PricingService) addCachedTokens(ctx context.Context, agentID string, tokens uint64) {
+	if p.redisClient != nil {
+		key := fmt.Sprintf("pricing:accumulated:tokens:%s", agentID)
+		_ = p.redisClient.IncrBy(ctx, key, int64(tokens)).Err()
+		return
+	}
+
+	// 降级模式：内存增量累加
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var current uint64 = 0
+	if val, ok := p.memTokensMap.Load(agentID); ok {
+		if num, ok2 := val.(uint64); ok2 {
+			current = num
+		}
+	}
+	p.memTokensMap.Store(agentID, current+tokens)
+}
+
+func (p *PricingService) getCachedTokens(ctx context.Context, agentID string) uint64 {
+	if p.redisClient != nil {
+		key := fmt.Sprintf("pricing:accumulated:tokens:%s", agentID)
+		val, err := p.redisClient.Get(ctx, key).Result()
+		if err == nil && val != "" {
+			if num, err := strconv.ParseUint(val, 10, 64); err == nil {
+				return num
+			}
+		}
+		return 0
+	}
+
+	// 降级模式：从内存 map 读取
+	if val, ok := p.memTokensMap.Load(agentID); ok {
+		if num, ok2 := val.(uint64); ok2 {
+			return num
+		}
+	}
+	return 0
+}
+
+func (p *PricingService) subtractCachedTokens(ctx context.Context, agentID string, tokens uint64) {
+	if p.redisClient != nil {
+		key := fmt.Sprintf("pricing:accumulated:tokens:%s", agentID)
+		// 减去 tokens。如果扣减后低于或等于 0 则删除该 Key，防止负数
+		script := `
+			local key = KEYS[1]
+			local sub = tonumber(ARGV[1])
+			local val = tonumber(redis.call('GET', key) or "0")
+			local n = val - sub
+			if n <= 0 then
+				redis.call('DEL', key)
+				return 0
+			else
+				redis.call('SET', key, tostring(n))
+				return n
+			end
+		`
+		_, _ = p.redisClient.Eval(ctx, script, []string{key}, strconv.FormatUint(tokens, 10)).Result()
+		return
+	}
+
+	// 降级模式
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if val, ok := p.memTokensMap.Load(agentID); ok {
+		if num, ok2 := val.(uint64); ok2 {
+			if num > tokens {
+				p.memTokensMap.Store(agentID, num-tokens)
+			} else {
+				p.memTokensMap.Delete(agentID)
+			}
+		}
+	}
+}
+
+// StartFlushWorker 启动后台延迟刷盘 Worker 协程
+func (p *PricingService) StartFlushWorker(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("[Pricing Flush Worker] Stopping flush worker...")
+				// 优雅退出前强制刷盘一次，防止内存遗漏
+				flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				p.FlushUsage(flushCtx)
+				cancel()
+				return
+			case <-ticker.C:
+				p.FlushUsage(ctx)
+			}
+		}
+	}()
+}
+
+// FlushUsage 将缓冲队列中的数据批量写入 SQLite，并减去对应的缓存 tokens 计数器
+func (p *PricingService) FlushUsage(ctx context.Context) {
+	var records []*model.UsageRecord
+
+	if p.redisClient != nil {
+		key := "pricing:usage:buffer"
+		// 每次批量最多刷盘 500 条
+		for i := 0; i < 500; i++ {
+			val, err := p.redisClient.LPop(ctx, key).Result()
+			if err != nil {
+				break
+			}
+			var rec model.UsageRecord
+			if err := json.Unmarshal([]byte(val), &rec); err == nil {
+				records = append(records, &rec)
+			}
+		}
+	} else {
+		// 降级模式：从 channel 读取
+		for i := 0; i < 500; i++ {
+			select {
+			case rec := <-p.memUsageBuffer:
+				records = append(records, rec)
+			default:
+				break
+			}
+			if len(records) >= 500 {
+				break
+			}
+		}
+	}
+
+	if len(records) == 0 {
+		return
+	}
+
+	// 开启 SQLite 大事务批量插入
+	if err := p.store.AppendUsageBatch(ctx, records); err != nil {
+		log.Printf("[Pricing Flush Worker] Failed to save usage records batch to SQLite: %v", err)
+		// 刷盘失败回滚，放回缓冲队列中以防丢数据
+		if p.redisClient != nil {
+			key := "pricing:usage:buffer"
+			for _, rec := range records {
+				val, _ := json.Marshal(rec)
+				_ = p.redisClient.RPush(ctx, key, string(val)).Err()
+			}
+		} else {
+			for _, rec := range records {
+				select {
+				case p.memUsageBuffer <- rec:
+				default:
+				}
+			}
+		}
+		return
+	}
+
+	// 刷盘成功，按 AgentID 累计刷出的 tokens 额度并扣减缓存计数器
+	agentTokensMap := make(map[string]uint64)
+	for _, rec := range records {
+		agentTokensMap[rec.AgentID] += rec.Tokens
+	}
+
+	for agentID, flushedTokens := range agentTokensMap {
+		p.subtractCachedTokens(ctx, agentID, flushedTokens)
+	}
+
+	log.Printf("[Pricing Flush Worker] Flushed %d usage records to SQLite store successfully", len(records))
 }
 
 // ----- 配置解析（带短 TTL 缓存，降低 DB 读）-----

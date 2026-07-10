@@ -196,3 +196,35 @@ func (s *SQLiteStore) GetCumulativeTokens(ctx context.Context, agentID string) (
 	}
 	return uint64(total.Int64), nil
 }
+
+func (s *SQLiteStore) AppendUsageBatch(ctx context.Context, records []*model.UsageRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO usage_records (id, agent_id, call_id, tokens, cost, model, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, rec := range records {
+		_, err := stmt.ExecContext(ctx, rec.ID, rec.AgentID, rec.CallID, rec.Tokens, rec.Cost, string(rec.Model), rec.Timestamp)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
