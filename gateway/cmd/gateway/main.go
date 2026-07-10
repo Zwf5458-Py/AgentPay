@@ -160,12 +160,79 @@ func main() {
 		w.Write([]byte("Tasks cleared"))
 	})
 
+	// 注册 /admin 路由组（受 CORSMiddleware 和 AdminAuthMiddleware 保护）
+	r.Route("/admin", func(r chi.Router) {
+		r.Use(AdminAuthMiddleware)
+		r.Get("/stats", func(w http.ResponseWriter, r *http.Request) {
+			stats, err := queueMgr.GetAdminStats()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(stats)
+		})
+		r.Get("/tasks", func(w http.ResponseWriter, r *http.Request) {
+			tasks, err := queueMgr.GetAllTasks()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(tasks)
+		})
+		r.Post("/tasks/retry", func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				LockID string `json:"lock_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid request body", http.StatusBadRequest)
+				return
+			}
+			if req.LockID == "" {
+				http.Error(w, "lock_id is required", http.StatusBadRequest)
+				return
+			}
+			if err := queueMgr.ManualRetryTask(req.LockID); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Task scheduled for retry"))
+		})
+		r.Post("/stripe-sessions/clear", func(w http.ResponseWriter, r *http.Request) {
+			if err := queueMgr.ClearStripeSessions(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Stripe sessions cleared"))
+		})
+	})
+
 	// 启动服务
 	addr := "0.0.0.0:" + port
 	log.Printf("Server listening on %s", addr)
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("Server exited with error: %v", err)
 	}
+}
+
+// AdminAuthMiddleware 管理员鉴权中间件
+func AdminAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		internalSecret := os.Getenv("INTERNAL_SECRET")
+		if internalSecret != "" {
+			reqSecret := r.Header.Get("X-Internal-Secret")
+			if reqSecret != internalSecret {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // CORSMiddleware 放行跨域及暴露头部

@@ -203,3 +203,138 @@ func TestQueue_ProcessSingleTask(t *testing.T) {
 		t.Errorf("Expected lockId 'lock-456' in body, got %v", lastBody["lockId"])
 	}
 }
+
+func TestQueue_AdminOperations(t *testing.T) {
+	dbPath := t.TempDir() + "/test_admin.db"
+	qm, err := NewQueueManager(dbPath, "http://localhost:8081/aa/settle", "secret")
+	if err != nil {
+		t.Fatalf("Failed to create QueueManager: %v", err)
+	}
+	defer qm.Close()
+
+	// 1. 插入测试数据
+	// 任务 1: success, amount = 10000, bps = 200 (fee = 200)
+	_, err = qm.db.Exec(`
+		INSERT INTO settle_tasks (lock_id, proof, agent_owner, escrow_address, status, retry_count, created_at, accumulated_amount, platform_bps)
+		VALUES ('lock-1', 'proof-1', 'owner-1', 'escrow-1', 'success', 0, 1000, 10000, 200)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert task 1: %v", err)
+	}
+
+	// 任务 2: success, amount = 5000, bps = 150 (fee = 75)
+	_, err = qm.db.Exec(`
+		INSERT INTO settle_tasks (lock_id, proof, agent_owner, escrow_address, status, retry_count, created_at, accumulated_amount, platform_bps)
+		VALUES ('lock-2', 'proof-2', 'owner-2', 'escrow-2', 'success', 0, 1001, 5000, 150)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert task 2: %v", err)
+	}
+
+	// 任务 3: pending
+	_, err = qm.db.Exec(`
+		INSERT INTO settle_tasks (lock_id, proof, agent_owner, escrow_address, status, retry_count, created_at, accumulated_amount, platform_bps)
+		VALUES ('lock-3', 'proof-3', 'owner-3', 'escrow-3', 'pending', 0, 1002, 0, 0)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert task 3: %v", err)
+	}
+
+	// 任务 4: failed
+	_, err = qm.db.Exec(`
+		INSERT INTO settle_tasks (lock_id, proof, agent_owner, escrow_address, status, retry_count, created_at, accumulated_amount, platform_bps)
+		VALUES ('lock-4', 'proof-4', 'owner-4', 'escrow-4', 'failed', 4, 1003, 0, 0)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert task 4: %v", err)
+	}
+
+	// Stripe 会话记录
+	_, err = qm.db.Exec(`
+		INSERT INTO consumed_stripe_sessions (session_id, status)
+		VALUES ('session-1', 'consumed'), ('session-2', 'consumed'), ('session-3', 'consumed')
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert stripe sessions: %v", err)
+	}
+
+	// 2. 测试 GetAdminStats
+	stats, err := qm.GetAdminStats()
+	if err != nil {
+		t.Fatalf("GetAdminStats failed: %v", err)
+	}
+
+	if val, ok := stats["total_settled_usdc"].(float64); !ok || val != 15000.0 {
+		t.Errorf("Expected total_settled_usdc 15000.0, got %v", stats["total_settled_usdc"])
+	}
+	if val, ok := stats["total_platform_fees_usdc"].(float64); !ok || val != 275.0 {
+		t.Errorf("Expected total_platform_fees_usdc 275.0, got %v", stats["total_platform_fees_usdc"])
+	}
+	if val, ok := stats["total_stripe_sessions"].(int64); !ok || val != 3 {
+		t.Errorf("Expected total_stripe_sessions 3, got %v", stats["total_stripe_sessions"])
+	}
+	if val, ok := stats["success_tasks"].(int64); !ok || val != 2 {
+		t.Errorf("Expected success_tasks 2, got %v", stats["success_tasks"])
+	}
+	if val, ok := stats["pending_tasks"].(int64); !ok || val != 1 {
+		t.Errorf("Expected pending_tasks 1, got %v", stats["pending_tasks"])
+	}
+	if val, ok := stats["failed_tasks"].(int64); !ok || val != 1 {
+		t.Errorf("Expected failed_tasks 1, got %v", stats["failed_tasks"])
+	}
+
+	// 3. 测试 GetAllTasks
+	tasks, err := qm.GetAllTasks()
+	if err != nil {
+		t.Fatalf("GetAllTasks failed: %v", err)
+	}
+	if len(tasks) != 4 {
+		t.Fatalf("Expected 4 tasks, got %d", len(tasks))
+	}
+	// 验证按 id DESC 排序，即最新的（排在最后的 lock-4）应该在最前面
+	if tasks[0].LockID != "lock-4" {
+		t.Errorf("Expected tasks[0].LockID 'lock-4', got %q", tasks[0].LockID)
+	}
+	if tasks[0].Status != "failed" {
+		t.Errorf("Expected tasks[0].Status 'failed', got %q", tasks[0].Status)
+	}
+
+	// 4. 测试 ManualRetryTask
+	err = qm.ManualRetryTask("lock-4")
+	if err != nil {
+		t.Fatalf("ManualRetryTask failed: %v", err)
+	}
+
+	var status string
+	var retryCount int
+	var nextRetryAt int64
+	err = qm.db.QueryRow("SELECT status, retry_count, next_retry_at FROM settle_tasks WHERE lock_id = 'lock-4'").Scan(&status, &retryCount, &nextRetryAt)
+	if err != nil {
+		t.Fatalf("Failed to query updated task 4: %v", err)
+	}
+
+	if status != "pending" {
+		t.Errorf("Expected status 'pending', got %q", status)
+	}
+	if retryCount != 0 {
+		t.Errorf("Expected retryCount 0, got %d", retryCount)
+	}
+	if time.Now().Unix()-nextRetryAt > 5 {
+		t.Errorf("Expected nextRetryAt to be close to now, got %d", nextRetryAt)
+	}
+
+	// 5. 测试 ClearStripeSessions
+	err = qm.ClearStripeSessions()
+	if err != nil {
+		t.Fatalf("ClearStripeSessions failed: %v", err)
+	}
+
+	var stripeCount int
+	err = qm.db.QueryRow("SELECT COUNT(*) FROM consumed_stripe_sessions").Scan(&stripeCount)
+	if err != nil {
+		t.Fatalf("Failed to query stripe sessions count after clear: %v", err)
+	}
+	if stripeCount != 0 {
+		t.Errorf("Expected stripe sessions count 0, got %d", stripeCount)
+	}
+}

@@ -18,24 +18,26 @@ import (
 )
 
 type SettleTask struct {
-	ID                int64
-	LockID            string
-	Proof             string
-	AgentOwner        string
-	EscrowAddress     string
-	RetryCount        int
-	ChannelID         string
-	HoldAmount        uint64
-	Nonce             uint64
-	Expiration        uint64
-	Signature         string
-	AccumulatedAmount uint64
-	ModelCost         uint64
-	ServiceFee        uint64
-	ModelProvider     string
-	Treasury          string
-	PlatformBps       uint16
-	AgentID           int64
+	ID                int64  `json:"id"`
+	LockID            string `json:"lock_id"`
+	Proof             string `json:"proof"`
+	AgentOwner        string `json:"agent_owner"`
+	EscrowAddress     string `json:"escrow_address"`
+	RetryCount        int    `json:"retry_count"`
+	ChannelID         string `json:"channel_id"`
+	HoldAmount        uint64 `json:"hold_amount"`
+	Nonce             uint64 `json:"nonce"`
+	Expiration        uint64 `json:"expiration"`
+	Signature         string `json:"signature"`
+	AccumulatedAmount uint64 `json:"accumulated_amount"`
+	ModelCost         uint64 `json:"model_cost"`
+	ServiceFee        uint64 `json:"service_fee"`
+	ModelProvider     string `json:"model_provider"`
+	Treasury          string `json:"treasury"`
+	PlatformBps       uint16 `json:"platform_bps"`
+	AgentID           int64  `json:"agent_id"`
+	Status            string `json:"status"`
+	CreatedAt         int64  `json:"created_at"`
 }
 
 type QueueManager struct {
@@ -596,4 +598,111 @@ func (qm *QueueManager) ReleaseStripeSession(sessionID string) error {
 		WHERE session_id = ? AND status = 'pending'
 	`, sessionID)
 	return err
+}
+
+// GetAdminStats 获取管理员统计数据
+func (qm *QueueManager) GetAdminStats() (map[string]interface{}, error) {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	var totalSettled float64
+	var totalPlatformFees float64
+	var totalStripeSessions int64
+	var successTasks, pendingTasks, failedTasks int64
+
+	err := qm.db.QueryRow("SELECT TOTAL(accumulated_amount) FROM settle_tasks WHERE status = 'success'").Scan(&totalSettled)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query total settled: %w", err)
+	}
+
+	err = qm.db.QueryRow("SELECT TOTAL(accumulated_amount * platform_bps / 10000) FROM settle_tasks WHERE status = 'success'").Scan(&totalPlatformFees)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query platform fees: %w", err)
+	}
+
+	err = qm.db.QueryRow("SELECT COUNT(*) FROM consumed_stripe_sessions").Scan(&totalStripeSessions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query stripe sessions count: %w", err)
+	}
+
+	queryCounts := `
+	SELECT 
+		COUNT(CASE WHEN status = 'success' THEN 1 END),
+		COUNT(CASE WHEN status = 'pending' THEN 1 END),
+		COUNT(CASE WHEN status = 'failed' THEN 1 END)
+	FROM settle_tasks
+	`
+	err = qm.db.QueryRow(queryCounts).Scan(&successTasks, &pendingTasks, &failedTasks)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query task status counts: %w", err)
+	}
+
+	return map[string]interface{}{
+		"total_settled_usdc":       totalSettled,
+		"total_platform_fees_usdc": totalPlatformFees,
+		"total_stripe_sessions":    totalStripeSessions,
+		"success_tasks":            successTasks,
+		"pending_tasks":            pendingTasks,
+		"failed_tasks":             failedTasks,
+	}, nil
+}
+
+// GetAllTasks 获取所有的结算任务
+func (qm *QueueManager) GetAllTasks() ([]SettleTask, error) {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	query := `
+	SELECT lock_id, proof, agent_owner, escrow_address, status, retry_count, created_at
+	FROM settle_tasks
+	ORDER BY id DESC
+	`
+	rows, err := qm.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query all tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []SettleTask
+	for rows.Next() {
+		var t SettleTask
+		err := rows.Scan(
+			&t.LockID, &t.Proof, &t.AgentOwner, &t.EscrowAddress, &t.Status, &t.RetryCount, &t.CreatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
+	}
+	return tasks, nil
+}
+
+// ManualRetryTask 手动重试任务
+func (qm *QueueManager) ManualRetryTask(lockID string) error {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	now := time.Now().Unix()
+	query := `UPDATE settle_tasks SET status = 'pending', retry_count = 0, next_retry_at = ? WHERE lock_id = ?`
+	_, err := qm.db.Exec(query, now, lockID)
+	if err != nil {
+		return fmt.Errorf("failed to manually retry task: %w", err)
+	}
+	return nil
+}
+
+// ClearStripeSessions 清空 Stripe 会话记录
+func (qm *QueueManager) ClearStripeSessions() error {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	query := `DELETE FROM consumed_stripe_sessions`
+	_, err := qm.db.Exec(query)
+	if err != nil {
+		return fmt.Errorf("failed to clear stripe sessions: %w", err)
+	}
+	return nil
 }
