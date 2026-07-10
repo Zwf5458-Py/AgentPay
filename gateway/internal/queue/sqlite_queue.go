@@ -131,6 +131,11 @@ func (qm *QueueManager) initDB() error {
 		return fmt.Errorf("failed to initialize stripe session table: %w", err)
 	}
 
+	// 排除网关异常重启导致 Session 锁挂起死锁：清理遗留的 pending 状态记录
+	if _, err := qm.db.Exec(`DELETE FROM consumed_stripe_sessions WHERE status = 'pending'`); err != nil {
+		return fmt.Errorf("failed to clear pending stripe sessions: %w", err)
+	}
+
 	// 动态检查缺失的列并添加
 	rows, err := qm.db.Query("PRAGMA table_info(settle_tasks);")
 	if err != nil {
@@ -559,8 +564,10 @@ func (qm *QueueManager) TryLockStripeSession(sessionID string) (bool, error) {
 		VALUES (?, 'pending')
 	`, sessionID)
 	if err != nil {
-		// 主键冲突或其他错误，直接返回已锁定
-		return false, nil
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }
