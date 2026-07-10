@@ -20,6 +20,8 @@ vi.mock('viem', async (importOriginal) => {
 
       client.readContract = mockReadContract;
       client.getBalance = mockGetBalance;
+      client.getBytecode = vi.fn().mockResolvedValue('0x');
+      client.simulateContract = vi.fn().mockRejectedValue(new Error('Mock simulation error'));
 
       return client as any;
     },
@@ -154,7 +156,10 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
         accumulatedAmount: '2000',
         signature: 'mock-channel-sig',
         agentId: 888,
-        escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
+        escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+        holdAmount: '2000',
+        nonce: '1',
+        expiration: '9999999999'
       }
     });
 
@@ -183,7 +188,7 @@ describe('AA Bridge API Integration Tests (Mock Mode & Production Vulnerability 
 
     expect(response.statusCode).toBe(400);
     const body = JSON.parse(response.body);
-    expect(body.error).toContain('Missing channelId, accumulatedAmount, signature, or agentId');
+    expect(body.error).toContain('Missing channelId, accumulatedAmount, holdAmount, nonce, expiration, signature, or agentId');
   });
 
   describe('Non-DEV_MODE / Production scenarios', () => {

@@ -513,6 +513,360 @@ server.post('/aa/settle', {
   }
 });
 
+// 3.5. Split Settle Payment
+server.post('/aa/split-settle', {
+  schema: {
+    body: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string' },
+        accumulatedAmount: { type: 'string' },
+        modelCost: { type: 'string' },
+        serviceFee: { type: 'string' },
+        modelProvider: { type: 'string' },
+        treasury: { type: 'string' },
+        platformBps: { type: 'integer' },
+        holdAmount: { type: 'string' },
+        nonce: { type: 'string' },
+        expiration: { type: 'string' },
+        signature: { type: 'string' },
+        agentId: { type: 'integer' },
+        escrowAddress: { type: 'string' }
+      }
+    }
+  }
+}, async (request, reply) => {
+  const body = request.body as any;
+
+  if (!body) {
+    return reply.status(400).send({ error: 'Missing request body' });
+  }
+
+  const {
+    channelId,
+    accumulatedAmount,
+    modelCost,
+    serviceFee,
+    modelProvider,
+    treasury,
+    platformBps,
+    holdAmount,
+    nonce,
+    expiration,
+    signature,
+    agentId,
+    escrowAddress
+  } = body;
+
+  if (
+    !channelId ||
+    accumulatedAmount === undefined ||
+    modelCost === undefined ||
+    serviceFee === undefined ||
+    !modelProvider ||
+    !treasury ||
+    platformBps === undefined ||
+    holdAmount === undefined ||
+    nonce === undefined ||
+    expiration === undefined ||
+    !signature ||
+    agentId === undefined
+  ) {
+    return reply.status(400).send({
+      error: 'Missing required parameters: channelId, accumulatedAmount, modelCost, serviceFee, modelProvider, treasury, platformBps, holdAmount, nonce, expiration, signature, or agentId'
+    });
+  }
+
+  if (!isAddress(modelProvider) || modelProvider === '0x0000000000000000000000000000000000000000') {
+    return reply.status(400).send({ error: 'Invalid modelProvider address' });
+  }
+
+  if (!isAddress(treasury) || treasury === '0x0000000000000000000000000000000000000000') {
+    return reply.status(400).send({ error: 'Invalid treasury address' });
+  }
+
+  const resolvedEscrowAddress = escrowAddress || process.env.ESCROW_ADDRESS;
+  if (!resolvedEscrowAddress || !isAddress(resolvedEscrowAddress)) {
+    return reply.status(400).send({ error: 'Invalid or missing escrowAddress' });
+  }
+
+  const biAccumulated = BigInt(accumulatedAmount);
+  const biModelCost = BigInt(modelCost);
+  const biServiceFee = BigInt(serviceFee);
+  const biHoldAmount = BigInt(holdAmount);
+  const biNonce = BigInt(nonce);
+  const biExpiration = BigInt(expiration);
+
+  const platformFee = (biAccumulated * BigInt(platformBps)) / 10000n;
+  if (biModelCost + biServiceFee + platformFee > biAccumulated) {
+    return reply.status(400).send({ error: 'Invalid amounts: modelCost + serviceFee + platformFee exceeds accumulatedAmount' });
+  }
+
+  const escrowAbi = [
+    {
+      name: 'tbaImplementation',
+      type: 'function',
+      stateMutability: 'view',
+      inputs: [],
+      outputs: [{ name: '', type: 'address' }],
+    },
+    {
+      name: 'erc6551Registry',
+      type: 'function',
+      stateMutability: 'view',
+      inputs: [],
+      outputs: [{ name: '', type: 'address' }],
+    },
+    {
+      name: 'agentIdentityRegistry',
+      type: 'function',
+      stateMutability: 'view',
+      inputs: [],
+      outputs: [{ name: '', type: 'address' }],
+    },
+    {
+      name: 'splitSettle',
+      type: 'function',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'channelId', type: 'bytes32' },
+        { name: 'accumulatedAmount', type: 'uint256' },
+        { name: 'modelCost', type: 'uint256' },
+        { name: 'serviceFee', type: 'uint256' },
+        { name: 'modelProvider', type: 'address' },
+        { name: 'treasury', type: 'address' },
+        { name: 'platformBps', type: 'uint16' },
+        { name: 'holdAmount', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'expiration', type: 'uint256' },
+        { name: 'signature', type: 'bytes' },
+      ],
+      outputs: [],
+    },
+  ];
+
+  const registryAbi = [
+    {
+      name: 'account',
+      type: 'function',
+      stateMutability: 'view',
+      inputs: [
+        { name: 'implementation', type: 'address' },
+        { name: 'salt', type: 'bytes32' },
+        { name: 'chainId', type: 'uint256' },
+        { name: 'tokenContract', type: 'address' },
+        { name: 'tokenId', type: 'uint256' },
+      ],
+      outputs: [{ name: '', type: 'address' }],
+    },
+    {
+      name: 'createAccount',
+      type: 'function',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'implementation', type: 'address' },
+        { name: 'salt', type: 'bytes32' },
+        { name: 'chainId', type: 'uint256' },
+        { name: 'tokenContract', type: 'address' },
+        { name: 'tokenId', type: 'uint256' },
+      ],
+      outputs: [{ name: '', type: 'address' }],
+    },
+  ];
+
+  const devMode = process.env.DEV_MODE === 'true' || !process.env.ZERODEV_PROJECT_ID;
+
+  try {
+    const privateKey = process.env.PRIVATE_KEY as `0x${string}`;
+    const rpcUrl = process.env.RPC_URL || 'http://127.0.0.1:8545';
+
+    if (!privateKey) {
+      throw new Error('PRIVATE_KEY is not configured in environment variables');
+    }
+
+    const account = privateKeyToAccount(privateKey);
+    const publicClient = createPublicClient({
+      chain: baseSepolia,
+      transport: getRpcTransport(rpcUrl),
+    });
+
+    const walletClient = createWalletClient({
+      account,
+      chain: baseSepolia,
+      transport: getRpcTransport(rpcUrl),
+    });
+
+    // 1. 获取 TBA 相关的合约地址
+    let tbaImplementationAddress: string;
+    let erc6551RegistryAddress: string;
+    let agentIdentityRegistryAddress: string;
+
+    try {
+      tbaImplementationAddress = await publicClient.readContract({
+        address: resolvedEscrowAddress as `0x${string}`,
+        abi: escrowAbi,
+        functionName: 'tbaImplementation',
+      }) as string;
+      erc6551RegistryAddress = await publicClient.readContract({
+        address: resolvedEscrowAddress as `0x${string}`,
+        abi: escrowAbi,
+        functionName: 'erc6551Registry',
+      }) as string;
+      agentIdentityRegistryAddress = await publicClient.readContract({
+        address: resolvedEscrowAddress as `0x${string}`,
+        abi: escrowAbi,
+        functionName: 'agentIdentityRegistry',
+      }) as string;
+
+      if (devMode) {
+        if (!tbaImplementationAddress) tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
+        if (!erc6551RegistryAddress) erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
+        if (!agentIdentityRegistryAddress) agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+      }
+    } catch (err: any) {
+      if (!devMode) throw err;
+      tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
+      erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
+      agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+    }
+
+    // 2. 计算专属 TBA 账户地址
+    const salt = '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`;
+    const chainId = BigInt(baseSepolia.id);
+
+    let computedTBA: string;
+    try {
+      computedTBA = await publicClient.readContract({
+        address: erc6551RegistryAddress as `0x${string}`,
+        abi: registryAbi,
+        functionName: 'account',
+        args: [
+          tbaImplementationAddress as `0x${string}`,
+          salt,
+          chainId,
+          agentIdentityRegistryAddress as `0x${string}`,
+          BigInt(agentId),
+        ],
+      }) as string;
+
+      if (!computedTBA && devMode) {
+        computedTBA = '0x4444444444444444444444444444444444444444';
+      }
+    } catch (err: any) {
+      if (!devMode) throw err;
+      computedTBA = '0x4444444444444444444444444444444444444444';
+    }
+
+    // 3. 检测该 TBA 账户是否部署
+    let isDeployed = false;
+    if (!devMode) {
+      try {
+        const bytecode = await publicClient.getBytecode({ address: computedTBA as `0x${string}` });
+        isDeployed = bytecode !== undefined && bytecode !== '0x';
+      } catch {
+        isDeployed = false;
+      }
+    }
+
+    // 4. 若未部署，调用 createAccount 自动部署
+    if (!isDeployed && !devMode) {
+      const { request: deployRequest } = await publicClient.simulateContract({
+        account,
+        address: erc6551RegistryAddress as `0x${string}`,
+        abi: registryAbi,
+        functionName: 'createAccount',
+        args: [
+          tbaImplementationAddress as `0x${string}`,
+          salt,
+          chainId,
+          agentIdentityRegistryAddress as `0x${string}`,
+          BigInt(agentId),
+        ],
+      });
+      const deployHash = await walletClient.writeContract(deployRequest);
+      await publicClient.waitForTransactionReceipt({ hash: deployHash });
+    } else if (!isDeployed && devMode) {
+      server.log.info(`Mock environment: Simulated deployment of TBA for agent ${agentId} at address ${computedTBA}`);
+    }
+
+    // 5. 调用 splitSettle
+    const bytes32ChannelId = channelId.startsWith('0x') ? (channelId as `0x${string}`) : pad(stringToHex(channelId), { size: 32 });
+    const agentPayout = biAccumulated - biModelCost - platformFee;
+
+    const payouts = {
+      modelProvider,
+      modelProviderPayout: biModelCost.toString(),
+      platformFee: platformFee.toString(),
+      agentPayout: agentPayout.toString(),
+      recipient: computedTBA,
+    };
+
+    if (devMode) {
+      return {
+        success: true,
+        txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
+        mocked: true,
+        computedTBA,
+        payouts,
+      };
+    }
+
+    const { request: splitSettleRequest } = await publicClient.simulateContract({
+      account,
+      address: resolvedEscrowAddress as `0x${string}`,
+      abi: escrowAbi,
+      functionName: 'splitSettle',
+      args: [
+        bytes32ChannelId,
+        biAccumulated,
+        biModelCost,
+        biServiceFee,
+        modelProvider as `0x${string}`,
+        treasury as `0x${string}`,
+        platformBps,
+        biHoldAmount,
+        biNonce,
+        biExpiration,
+        signature as `0x${string}`,
+      ],
+    });
+
+    const hash = await walletClient.writeContract(splitSettleRequest);
+
+    return {
+      success: true,
+      txHash: hash,
+      computedTBA,
+      payouts,
+    };
+  } catch (error: any) {
+    server.log.warn(`Channel splitSettle transaction failed/skipped: ${error.message}. DevMode: ${devMode}`);
+
+    if (!devMode) {
+      return reply.status(500).send({
+        success: false,
+        error: error.message || 'Channel split settlement transaction execution failed',
+      });
+    }
+
+    const agentPayout = biAccumulated - biModelCost - platformFee;
+
+    return {
+      success: true,
+      txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
+      mocked: true,
+      computedTBA: '0x4444444444444444444444444444444444444444',
+      payouts: {
+        modelProvider,
+        modelProviderPayout: biModelCost.toString(),
+        platformFee: platformFee.toString(),
+        agentPayout: agentPayout.toString(),
+        recipient: '0x4444444444444444444444444444444444444444',
+      },
+    };
+  }
+});
+
 // 4. Get Agent Smart Account and Balance
 server.get('/aa/account/:agentId', async (request, reply) => {
   const { agentId } = request.params as { agentId: string };
