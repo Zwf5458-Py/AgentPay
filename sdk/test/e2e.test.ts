@@ -100,14 +100,13 @@ beforeAll(async () => {
 
           if (auth && auth.startsWith('Bearer channel-')) {
             const parts = auth.substring(7).split(':');
-            if (parts.length === 3) {
+            if (parts.length === 5) {
               channelId = parts[0];
-              currentSpend = BigInt(parts[1]);
-              signature = parts[2];
-              const increment = currentSpend - mockGatewayChannelSpend;
-              if (increment >= 1000n && signature === 'mock-channel-sig') {
+              signature = parts[4];
+              if (signature === 'mock-channel-sig') {
                 isChannelAuthValid = true;
-                mockGatewayChannelSpend = currentSpend;
+                mockGatewayChannelSpend += 1000n;
+                currentSpend = mockGatewayChannelSpend;
               }
             }
           }
@@ -135,11 +134,13 @@ beforeAll(async () => {
                     'x-internal-secret': process.env.INTERNAL_SECRET || 'test-secret'
                   }
                 });
+                const proof = agentRes.headers['x-agent-proof'] || 'mock-proof-base64';
                 bridgeReq.write(JSON.stringify({
                   channelId,
                   accumulatedAmount: currentSpend.toString(),
                   signature,
                   agentId,
+                  proof,
                   escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3'
                 }));
                 bridgeReq.end();
@@ -249,7 +250,7 @@ describe('AgentPay SDK E2E Integration Test', () => {
       env: 'development'
     });
 
-    const result = await client.execute(1, 'E2E Integration Test String');
+    const result = await client.execute(888, 'E2E Integration Test String');
 
     expect(result.output).toBe('Processed by AgentPay AI: E2E Integration Test String');
 
@@ -259,7 +260,7 @@ describe('AgentPay SDK E2E Integration Test', () => {
     expect(gatewayRequestCount).toBe(2); // First failed, second success
     expect(agentRequestCount).toBe(1);   // Agent only got hit on second request
     expect(bridgeRequestCount).toBe(1);  // Bridge settle got triggered once
-    expect(bridgeLastBody.lockId).toBe('lock-999');
+    expect(bridgeLastBody.channelId).toBe('channel-888');
     expect(bridgeLastBody.proof).toBe('mock-proof-base64');
   });
 
@@ -302,7 +303,7 @@ describe('AgentPay SDK E2E Integration Test', () => {
       env: 'development'
     });
 
-    await expect(client.execute(1, 'Exp')).rejects.toThrow('Price limit exceeded');
+    await expect(client.execute(888, 'Exp')).rejects.toThrow('Price limit exceeded');
   });
 
   it('should throw error if maxPriceLimit is set to 0n', async () => {
@@ -312,7 +313,7 @@ describe('AgentPay SDK E2E Integration Test', () => {
       env: 'development'
     });
 
-    await expect(client.execute(1, 'Test 0n Limit')).rejects.toThrow('Price limit exceeded');
+    await expect(client.execute(888, 'Test 0n Limit')).rejects.toThrow('Price limit exceeded');
   });
 
   it('should return 401 from mockBridge if x-internal-secret header is missing', async () => {

@@ -156,11 +156,12 @@ export class AgentPayClient {
     
     let signFunc = async (cObj: any, holdAmt: bigint, currentN: bigint, exp: bigint) => {
        if (this.walletClient && this.publicClient) {
-          let userAddr = this.walletClient.account?.address;
+          let userAddr = this.walletClient.account;
           if (!userAddr && this.provider) {
              const accs = await this.walletClient.requestAddresses();
              userAddr = accs[0];
           }
+          if (!userAddr) throw new Error('No account available for signing');
           return await this.walletClient.signTypedData({
               account: userAddr,
               domain: { name: 'AgentPay', version: '1', chainId: this.chainId, verifyingContract: this.verifyingContract },

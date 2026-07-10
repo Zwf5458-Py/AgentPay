@@ -48,8 +48,8 @@ beforeAll(async () => {
         domain: {
           name: 'AgentPay',
           version: '1',
-          chainId: 11155111,
-          verifyingContract: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+          chainId: 31337,
+          verifyingContract: '0x4d5e11be368a8f5ea304197475467b3173c25eea',
         },
         types: {
           ChannelHold: [
@@ -112,6 +112,15 @@ describe('AgentPay SDK Credit Hold & Self-heal Unit Tests', () => {
       gatewayUrl: `http://127.0.0.1:${PORT}`,
       privateKey: clientPrivateKey,
       gatewayAddress: gatewayAddress,
+    });
+
+    (client as any).channels.set(1, {
+      id: '0x0000000000000000000000000000000000000000000000000000000000000888',
+      confirmedSpend: 0n,
+      accumulatedSpend: 0n,
+      lastPrice: 0n,
+      nonce: 1n,
+      maxAmount: 50000n
     });
 
     const result = await client.execute(1, 'Test hold signing and receipt settlement');
