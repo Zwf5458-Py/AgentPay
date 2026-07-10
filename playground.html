@@ -1126,11 +1126,8 @@
     // 全局通道锁容器：按 agentId 进行 Promise 链式排队控制
     const channelLocks = new Map();
 
-    // 2. 初始化加载
     window.addEventListener('DOMContentLoaded', () => {
-      // 从 localStorage 中恢复用户自定义的配置
-      const savedPrivateKey = localStorage.getItem('agentpay_private_key');
-      if (savedPrivateKey) state.privateKey = savedPrivateKey;
+      // 从 localStorage 中恢复用户自定义的配置 (敏感私钥除外)
 
       const savedGatewayUrl = localStorage.getItem('agentpay_gateway_url');
       if (savedGatewayUrl) state.gatewayUrl = savedGatewayUrl;
@@ -1187,7 +1184,6 @@
 
       // 注册高级输入项的 input 即时同步保存机制
       const inputsToWatch = [
-        { id: 'input-private-key', key: 'agentpay_private_key', stateKey: 'privateKey' },
         { id: 'input-gateway-url', key: 'agentpay_gateway_url', stateKey: 'gatewayUrl' },
         { id: 'input-bridge-url', key: 'agentpay_bridge_url', stateKey: 'bridgeUrl' },
         { id: 'input-verifying-contract', key: 'agentpay_verifying_contract', stateKey: 'verifyingContract' },
@@ -1273,8 +1269,7 @@
       state.verifyingContract = document.getElementById('input-verifying-contract').value || '0x4d5e11be368a8f5ea304197475467b3173c25eea';
       state.chainId = parseInt(document.getElementById('input-chain-id').value) || 84532;
 
-      // 额外将输入的值同步写入 localStorage
-      localStorage.setItem('agentpay_private_key', state.privateKey);
+      // 额外将输入的值同步写入 localStorage (敏感私钥除外)
       localStorage.setItem('agentpay_gateway_url', state.gatewayUrl);
       localStorage.setItem('agentpay_bridge_url', state.bridgeUrl);
       localStorage.setItem('agentpay_verifying_contract', state.verifyingContract);

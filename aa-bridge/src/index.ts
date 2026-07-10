@@ -560,6 +560,7 @@ server.post('/aa/split-settle', {
         nonce: { type: 'string' },
         expiration: { type: 'string' },
         signature: { type: 'string' },
+        proof: { type: 'string' },
         agentId: { type: 'integer' },
         escrowAddress: { type: 'string' }
       }
@@ -584,6 +585,7 @@ server.post('/aa/split-settle', {
     nonce,
     expiration,
     signature,
+    proof,
     agentId,
     escrowAddress
   } = body;
@@ -600,10 +602,11 @@ server.post('/aa/split-settle', {
     nonce === undefined ||
     expiration === undefined ||
     !signature ||
+    proof === undefined ||
     agentId === undefined
   ) {
     return reply.status(400).send({
-      error: 'Missing required parameters: channelId, accumulatedAmount, modelCost, serviceFee, modelProvider, treasury, platformBps, holdAmount, nonce, expiration, signature, or agentId'
+      error: 'Missing required parameters: channelId, accumulatedAmount, modelCost, serviceFee, modelProvider, treasury, platformBps, holdAmount, nonce, expiration, signature, proof, or agentId'
     });
   }
 
@@ -670,6 +673,7 @@ server.post('/aa/split-settle', {
         { name: 'nonce', type: 'uint256' },
         { name: 'expiration', type: 'uint256' },
         { name: 'signature', type: 'bytes' },
+        { name: 'proof', type: 'bytes' },
       ],
       outputs: [],
     },
@@ -833,7 +837,7 @@ server.post('/aa/split-settle', {
 
     // 5. 调用 splitSettle
     const bytes32ChannelId = parseChannelId(channelId);
-    const agentPayout = biAccumulated - biModelCost - platformFee;
+    const agentPayout = biAccumulated - biModelCost - platformFee - biServiceFee;
 
     const payouts = {
       modelProvider,
@@ -870,6 +874,7 @@ server.post('/aa/split-settle', {
         biNonce,
         biExpiration,
         signature as `0x${string}`,
+        proof as `0x${string}`,
       ],
     });
 
@@ -891,7 +896,7 @@ server.post('/aa/split-settle', {
       });
     }
 
-    const agentPayout = biAccumulated - biModelCost - platformFee;
+    const agentPayout = biAccumulated - biModelCost - platformFee - biServiceFee;
 
     return {
       success: true,

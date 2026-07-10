@@ -261,6 +261,7 @@ contract PaymentEscrow {
         uint256 nonce,
         uint256 expiration,
         bytes calldata signature,
+        bytes calldata proof,
         address agentOwner
     ) external onlySettler {
         if (agentOwner == address(0)) revert InvalidAddress();
@@ -280,6 +281,10 @@ contract PaymentEscrow {
             lock.agentId
         );
         if (agentOwner != expectedTba) revert InvalidAddress();
+
+        // 校验 TEE proof
+        bool isValid = validationRegistry.validateProof(lock.agentId, "TEE", proof);
+        if (!isValid) revert ProofValidationFailed();
 
         bytes32 hashStruct = keccak256(abi.encode(
             CHANNEL_HOLD_TYPEHASH,
@@ -320,7 +325,8 @@ contract PaymentEscrow {
         uint256 holdAmount,
         uint256 nonce,
         uint256 expiration,
-        bytes   calldata signature
+        bytes   calldata signature,
+        bytes   calldata proof
     ) external onlySettler {
         if (modelProvider == address(0) || treasury == address(0)) revert InvalidAddress();
         if (platformBps > 10000) revert InvalidAmount();
@@ -330,6 +336,10 @@ contract PaymentEscrow {
         if (block.timestamp > lock.expiresAt) revert ChannelExpired();
         if (accumulatedAmount == 0 || accumulatedAmount > lock.maxAmount) revert InvalidAmount();
         if (holdAmount != lock.maxAmount) revert InvalidAmount();
+
+        // 校验 TEE proof
+        bool isValid = validationRegistry.validateProof(lock.agentId, "TEE", proof);
+        if (!isValid) revert ProofValidationFailed();
 
         bytes32 hashStruct = keccak256(abi.encode(
             CHANNEL_HOLD_TYPEHASH,
@@ -358,6 +368,9 @@ contract PaymentEscrow {
         if (platformFee > 0) {
             paymentToken.safeTransfer(treasury, platformFee);
         }
+        if (serviceFee > 0) {
+            paymentToken.safeTransfer(treasury, serviceFee);
+        }
 
         address expectedTba = IERC6551Registry(erc6551Registry).account(
             tbaImplementation,
@@ -368,7 +381,7 @@ contract PaymentEscrow {
         );
         if (expectedTba == address(0)) revert InvalidAddress();
 
-        uint256 agentPayout = accumulatedAmount - modelCost - platformFee;
+        uint256 agentPayout = accumulatedAmount - modelCost - platformFee - serviceFee;
         if (agentPayout > 0) {
             paymentToken.safeTransfer(expectedTba, agentPayout);
         }

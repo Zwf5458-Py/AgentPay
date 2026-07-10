@@ -419,7 +419,7 @@ contract PaymentEscrowTest is Test {
 
         // settler 结算
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
 
         // 验证通道状态
         (,,,,, channelStatus) = escrow.channels(channelId);
@@ -463,7 +463,7 @@ contract PaymentEscrowTest is Test {
 
         vm.expectRevert(PaymentEscrow.InvalidSignature.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
     }
 
     // 15. 逆向测试：状态通道超时后结算应被拦截
@@ -501,7 +501,7 @@ contract PaymentEscrowTest is Test {
 
         vm.expectRevert(PaymentEscrow.ChannelExpired.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
     }
 
     // 16. 测试状态通道退款：未超时退款失败与超时退款成功
@@ -565,7 +565,7 @@ contract PaymentEscrowTest is Test {
         // 模拟非 Settler 尝试结算
         vm.expectRevert(PaymentEscrow.NotSettler.selector);
         vm.prank(payer);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
     }
 
     // 18. 增加 test_ChannelBatchSettleZeroAddressRecipientReverts
@@ -601,7 +601,7 @@ contract PaymentEscrowTest is Test {
         // 结算传入的 agentOwner = address(0)
         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, address(0));
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, address(0));
     }
 
     // 19. 增加 test_ChannelBatchSettleZeroAmountReverts
@@ -637,7 +637,7 @@ contract PaymentEscrowTest is Test {
 
         vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
     }
 
     // 20. 增加 test_ChannelBatchSettleExceedMaxAmountReverts
@@ -674,7 +674,7 @@ contract PaymentEscrowTest is Test {
 
         vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
     }
 
     // 21. 增加 test_ChannelBatchSettleDoubleSettleReverts
@@ -710,12 +710,12 @@ contract PaymentEscrowTest is Test {
 
         // 第一遍成功结算
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
 
         // 尝试进行二次结算
         vm.expectRevert(PaymentEscrow.InvalidStatus.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
     }
 
     // 22. 测试批量结算资金流入 TBA 账户并且 payer 收到退款
@@ -759,7 +759,7 @@ contract PaymentEscrowTest is Test {
 
         // settler 结算
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, agentOwner);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, agentOwner);
 
         // 验证资金：TBA 账户收到 300，payer 收到退款 200
         assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + accumulatedAmount);
@@ -800,7 +800,7 @@ contract PaymentEscrowTest is Test {
         address nonTbaRecipient = address(0x999);
         vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
         vm.prank(settler);
-        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, nonTbaRecipient);
+        escrow.batchSettle(channelId, accumulatedAmount, 500 * 10**6, nonce, expiration, signature, dummyProof, nonTbaRecipient);
     }
 
     // 24. 测试 TBA.execute 只有 NFT owner 可调用
@@ -901,7 +901,7 @@ contract PaymentEscrowTest is Test {
         uint16 platformBps = 1000; // 10%
 
         uint256 expectedPlatformFee = (accumulatedAmount * platformBps) / 10000; // 60 USDC
-        uint256 expectedAgentPayout = accumulatedAmount - modelCost - expectedPlatformFee; // 340 USDC
+        uint256 expectedAgentPayout = accumulatedAmount - modelCost - expectedPlatformFee - serviceFee; // 240 USDC
         uint256 expectedRemainder = maxAmount - accumulatedAmount; // 400 USDC
 
         uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
@@ -934,6 +934,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
 
         // 校验通道状态
@@ -948,7 +950,7 @@ contract PaymentEscrowTest is Test {
 
         // 校验余额
         assertEq(usdc.balanceOf(modelProvider), modelProviderBalanceBefore + modelCost);
-        assertEq(usdc.balanceOf(treasury), treasuryBalanceBefore + expectedPlatformFee);
+        assertEq(usdc.balanceOf(treasury), treasuryBalanceBefore + expectedPlatformFee + serviceFee);
         assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + expectedAgentPayout);
         assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + expectedRemainder);
     }
@@ -1001,6 +1003,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
 
         // treasury 是零地址时应该 Revert
@@ -1018,6 +1022,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
     }
 
@@ -1069,6 +1075,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
     }
 
@@ -1120,6 +1128,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
     }
 
@@ -1171,6 +1181,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
     }
 
@@ -1223,6 +1235,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
     }
 
@@ -1273,6 +1287,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
 
         // 第二次结算，应该 Revert InvalidStatus
@@ -1290,6 +1306,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
     }
 
@@ -1343,6 +1361,8 @@ contract PaymentEscrowTest is Test {
             nonce,
             expiration,
             signature
+        ,
+            dummyProof
         );
     }
 }

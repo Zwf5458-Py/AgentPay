@@ -8,10 +8,14 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Content Security Policy -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' https: http: 'unsafe-inline' 'unsafe-eval' data:; connect-src 'self' http://localhost:8080 http://localhost:8545 http://127.0.0.1:8080 http://127.0.0.1:3001 http://127.0.0.1:8545 ws://localhost:* ws://127.0.0.1:*;">
     <!-- Marked.js for Markdown Rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/lib/marked.umd.min.js" crossorigin="anonymous"></script>
+    <!-- DOMPurify for XSS Protection -->
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js" integrity="sha256-VjG837bN6t/uT3i+3jQ+tL9SOnA1+hV0qj3eGZ/U92I=" crossorigin="anonymous"></script>
     <!-- Ethers.js CDN for Wallet Integration -->
-    <script src="https://cdn.ethers.io/lib/ethers-5.6.umd.min.js" type="application/javascript"></script>
+    <script src="https://cdn.ethers.io/lib/ethers-5.6.umd.min.js" type="application/javascript" crossorigin="anonymous"></script>
     <style>
         :root {
             --bg-color: #07040f;
@@ -825,7 +829,7 @@
                 <div class="form-group" id="privateKeyGroup">
                     <label for="privateKey">以太坊私钥 / 助记词 (Private Key / Seed Phrase)</label>
                     <div class="input-wrapper">
-                        <input type="password" id="privateKey" class="neon-input" placeholder="输入 64 位十六进制私钥或助记词进行模拟测试 (例如 0x3a4f...)" value="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80">
+                        <input type="password" id="privateKey" class="neon-input" placeholder="输入测试私钥 (例如 Anvil 第一个账户私钥: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80)">
                         <button type="button" id="toggleKeyBtn" class="input-action-btn">显示</button>
                     </div>
                 </div>
@@ -1734,7 +1738,7 @@ contract SafeEtherStore is ReentrancyGuard {
                     }
                     
                     const output = resJson.output || "";
-                    reportContent.innerHTML = marked.parse(output);
+                    reportContent.innerHTML = DOMPurify.sanitize(marked.parse(output));
                     
                     // 计算账单
                     const actualCost = 50000; // 每次固定 $0.05 USDC
@@ -1787,7 +1791,7 @@ contract SafeEtherStore is ReentrancyGuard {
                     }
                     
                     const output = resJson.output || "";
-                    reportContent.innerHTML = marked.parse(output);
+                    reportContent.innerHTML = DOMPurify.sanitize(marked.parse(output));
                     
                     modelCostVal.textContent = "0.000000 USDC";
                     serviceFeeVal.textContent = "0.000000 USDC";
@@ -2017,7 +2021,7 @@ contract SafeEtherStore is ReentrancyGuard {
                 }
                 
                 const output = resJson.output || "";
-                reportContent.innerHTML = marked.parse(output);
+                reportContent.innerHTML = DOMPurify.sanitize(marked.parse(output));
                 
                 setStepState('audit', 'completed');
                 
@@ -2125,7 +2129,7 @@ contract SafeEtherStore is ReentrancyGuard {
                 }
                 
                 const output = resJson.output || "";
-                reportContent.innerHTML = marked.parse(output);
+                reportContent.innerHTML = DOMPurify.sanitize(marked.parse(output));
                 
                 modelCostVal.textContent = "0.000000 USDC";
                 serviceFeeVal.textContent = "0.000000 USDC";
@@ -2171,7 +2175,7 @@ contract SafeEtherStore is ReentrancyGuard {
 
 *Ready for cryptographic audit.*`;
             
-            reportContent.innerHTML = marked.parse(initialPlaceholderMarkdown);
+            reportContent.innerHTML = DOMPurify.sanitize(marked.parse(initialPlaceholderMarkdown));
             reportStatusText.textContent = '系统就绪';
         });
     </script>

@@ -1,5 +1,6 @@
 # Build Stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.25-alpine AS builder
+ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download

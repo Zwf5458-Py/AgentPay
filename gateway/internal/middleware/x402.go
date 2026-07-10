@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"log"
 
 	"gateway/internal/stripe"
 	"gateway/internal/queue"
@@ -153,15 +154,16 @@ func X402Middleware(next http.Handler) http.Handler {
 			// 密码学签名验证与安全隔离
 			isProd := os.Getenv("APP_ENV") == "production"
 			clientAddress := os.Getenv("CLIENT_ADDRESS")
+			allowMock := os.Getenv("ALLOW_MOCK_SIGNATURE") != "false"
 
 			isMockSig := !strings.HasPrefix(sig, "0x") || len(sig) != 132
 
 			if isMockSig {
-				if isProd {
+				if isProd || !allowMock {
 					trigger402(w)
 					return
 				}
-				// 非生产环境继续放行 mock-signature (用于兼容测试用例)
+				// 仅在显式允许且非生产环境时继续放行 mock-signature (用于兼容测试用例)
 			} else {
 				signerAddr, err := RecoverEIP712Signer(channelID, holdAmount, nonce, expiration, sig)
 				if err != nil {
@@ -175,7 +177,8 @@ func X402Middleware(next http.Handler) http.Handler {
 						return
 					}
 				} else if isProd {
-					// 生产模式无 clientAddress 配置阻断防线
+					// 生产模式无 clientAddress 配置阻断防线并触发紧急警告日志
+					log.Printf("[CRITICAL ERROR] Gateway is running in PRODUCTION mode, but CLIENT_ADDRESS is NOT configured. All cryptographic requests will be blocked for safety!")
 					trigger402(w)
 					return
 				}

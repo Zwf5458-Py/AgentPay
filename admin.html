@@ -8,6 +8,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Content Security Policy -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' https: http: 'unsafe-inline' 'unsafe-eval' data:; connect-src 'self' http://localhost:8080 http://localhost:8545 http://127.0.0.1:8080 http://127.0.0.1:3001 http://127.0.0.1:8545 ws://localhost:* ws://127.0.0.1:*;">
+    <!-- DOMPurify for XSS Protection -->
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js" integrity="sha256-VjG837bN6t/uT3i+3jQ+tL9SOnA1+hV0qj3eGZ/U92I=" crossorigin="anonymous"></script>
     <style>
         :root {
             /* Backgrounds & Overlay Colors */
@@ -664,7 +668,7 @@
                 <div class="form-group">
                     <label for="adminSecretInput">Admin Secret Key</label>
                     <div class="input-wrapper">
-                        <input type="password" id="adminSecretInput" value="password12345" class="neon-input">
+                        <input type="password" id="adminSecretInput" placeholder="输入管理密钥 (Admin Secret Key)" class="neon-input">
                     </div>
                 </div>
                 <button id="saveConfigBtn" class="action-btn">Save Config</button>
@@ -737,20 +741,13 @@
     <div id="toast" style="position: fixed; bottom: 20px; right: 20px; background: rgba(18, 12, 36, 0.95); border: 1px solid var(--neon-cyan); padding: 0.75rem 1.5rem; border-radius: 8px; box-shadow: 0 0 15px var(--neon-cyan-glow); color: var(--text-primary); z-index: 9999; display: none; font-size: 0.85rem; font-family: var(--font-mono); transition: all 0.3s ease;"></div>
 
     <script>
-        // 配置持久化
         const GATEWAY_URL_KEY = 'agentpay_gateway_url';
-        const ADMIN_SECRET_KEY = 'agentpay_admin_secret';
-
-        // 初始化输入框的值
-        document.addEventListener('DOMContentLoaded', () => {
+        
+        window.addEventListener('DOMContentLoaded', () => {
             const savedUrl = localStorage.getItem(GATEWAY_URL_KEY);
-            const savedSecret = localStorage.getItem(ADMIN_SECRET_KEY);
 
             if (savedUrl) {
                 document.getElementById('gatewayUrlInput').value = savedUrl;
-            }
-            if (savedSecret) {
-                document.getElementById('adminSecretInput').value = savedSecret;
             }
 
             // 首次加载数据
@@ -760,10 +757,9 @@
         // 保存配置
         document.getElementById('saveConfigBtn').addEventListener('click', () => {
             const url = document.getElementById('gatewayUrlInput').value.trim();
-            const secret = document.getElementById('adminSecretInput').value.trim();
 
             localStorage.setItem(GATEWAY_URL_KEY, url);
-            localStorage.setItem(ADMIN_SECRET_KEY, secret);
+            // 密钥安全：不落入 localStorage，每次加载手输或用内存状态
 
             showToast('Configuration saved successfully');
             refreshAll();
@@ -887,11 +883,11 @@
                 const tasks = await res.json();
                 renderTasks(tasks);
             } catch (err) {
-                document.getElementById('tasksTableBody').innerHTML = `
+                document.getElementById('tasksTableBody').innerHTML = DOMPurify.sanitize(`
                     <tr>
                         <td colspan="5" style="text-align: center; color: var(--neon-rose);">Failed to load tasks queue</td>
                     </tr>
-                `;
+                `);
                 throw err;
             }
         }
@@ -901,11 +897,11 @@
             tbody.innerHTML = '';
 
             if (!tasks || tasks.length === 0) {
-                tbody.innerHTML = `
+                tbody.innerHTML = DOMPurify.sanitize(`
                     <tr>
                         <td colspan="5" style="text-align: center; color: var(--text-muted);">No active tasks in queue</td>
                     </tr>
-                `;
+                `);
                 return;
             }
 
@@ -929,7 +925,7 @@
                     statusClass = 'pending';
                 }
                 
-                tdStatus.innerHTML = `<span class="badge badge-${statusClass}">${t.status}</span>`;
+                tdStatus.innerHTML = DOMPurify.sanitize(`<span class="badge badge-${statusClass}">${t.status}</span>`);
                 tr.appendChild(tdStatus);
 
                 // Retry Count

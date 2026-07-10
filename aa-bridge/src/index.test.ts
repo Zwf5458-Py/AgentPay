@@ -75,6 +75,7 @@ describe('AA Bridge API Integration Tests - split-settle', () => {
         nonce: '1',
         expiration: '9999999999',
         signature: '0xsignature',
+        proof: '0xproof',
         agentId: 100,
         escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
       },
@@ -90,7 +91,7 @@ describe('AA Bridge API Integration Tests - split-settle', () => {
       modelProvider: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
       modelProviderPayout: '200',
       platformFee: '50', // 1000 * 500 / 10000 = 50
-      agentPayout: '750', // 1000 - 200 - 50 = 750
+      agentPayout: '650', // 1000 - 200 - 50 - 100 = 650
       recipient: '0x4444444444444444444444444444444444444444',
     });
   });
@@ -142,6 +143,7 @@ describe('AA Bridge API Integration Tests - split-settle', () => {
         nonce: '1',
         expiration: '9999999999',
         signature: '0xsignature',
+        proof: '0xproof',
         agentId: 100,
       },
     });
@@ -167,6 +169,7 @@ describe('AA Bridge API Integration Tests - split-settle', () => {
         nonce: '1',
         expiration: '9999999999',
         signature: '0xsignature',
+        proof: '0xproof',
         agentId: 100,
       },
     });
@@ -194,6 +197,7 @@ describe('AA Bridge API Integration Tests - split-settle', () => {
         nonce: '1',
         expiration: '9999999999',
         signature: '0xsignature',
+        proof: '0xproof',
         agentId: 100,
         escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
       },
@@ -237,6 +241,7 @@ describe('AA Bridge API Integration Tests - split-settle', () => {
           nonce: '1',
           expiration: '9999999999',
           signature: '0xsignature',
+          proof: '0xproof',
           agentId: 100,
           escrowAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
         },
