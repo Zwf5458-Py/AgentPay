@@ -8,3 +8,6 @@ sdk/run_e2e.js
 gateway/bin/
 gateway/gateway.db*
 
+.env
+
+

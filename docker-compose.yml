@@ -17,8 +17,9 @@ services:
       - PORT=3001
       - RPC_URL=http://anvil:8545
       - DEV_MODE=true
-      - PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-      - INTERNAL_SECRET=default-compose-secret
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - INTERNAL_SECRET=${INTERNAL_SECRET}
+      - ESCROW_ADDRESS=${ESCROW_ADDRESS}
     depends_on:
       - anvil
 
@@ -42,8 +43,9 @@ services:
       - PORT=8080
       - ELIZA_AGENT_URL=http://agent:3002
       - AA_BRIDGE_URL=http://aa-bridge:3001/aa/settle
-      - ESCROW_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
-      - INTERNAL_SECRET=default-compose-secret
+      - ESCROW_ADDRESS=${ESCROW_ADDRESS}
+      - INTERNAL_SECRET=${INTERNAL_SECRET}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
     depends_on:
       - agent
       - aa-bridge
