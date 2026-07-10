@@ -130,6 +130,20 @@ contract PaymentEscrowTest is Test {
         usdc.approve(address(escrow), type(uint256).max);
     }
 
+    // 0. 验证 EIP-712 域分隔符名称为 "AgentPay"
+    function test_DomainSeparatorName() public view {
+        bytes32 expectedDomainSeparator = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("AgentPay")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(escrow)
+            )
+        );
+        assertEq(escrow.DOMAIN_SEPARATOR(), expectedDomainSeparator);
+    }
+
     // 1. 测试正常资金锁定与释放流程
     function test_LockAndReleaseSuccess() public {
         uint256 amount = 100 * 10**6;
