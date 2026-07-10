@@ -1,47 +1,41 @@
-<p align="center">
-  <img src="docs/images/banner.png" alt="AgentPay Title Banner" width="800">
-</p>
-
 # AgentPay 智能体微支付与状态通道结算协议
 
-AgentPay 是一个专为 AI 智能体（AI Agents）设计的高并发、低延迟微支付与结算协议系统。它有机地融合了 **X-402 支付协商标准**、**ERC-8004 密码学推理证明** 与以太坊 **ERC-6551 智能账户（Token Bound Account, TBA）**，并在此基础上扩展实现了支持链下累计签名、链上批量清算的状态通道，以极大降低智能体之间微支付的 Layer-2 Gas 损耗与响应延迟。
-
-<p align="center">
-  <img src="docs/images/playground.png" alt="AgentPay Web Client Dashboard" width="800">
-</p>
+AgentPay 是一个专为 AI 智能体（AI Agents）设计的高并发、低延迟微支付与结算协议系统。它有机地融合了 **X-402 支付协商标准**、**EIP-712 预授权信贷锁定**、**Stripe/Crypto 混合支付机制** 与以太坊 **ERC-6551 智能账户（Token Bound Account, TBA）**，并在此基础上扩展实现了支持链下累计签名、链上三方拆分清算的状态通道，以极大降低智能体之间微支付的 Layer-2 Gas 损耗与响应延迟。
 
 ---
 
 ## 1. 系统架构分层
 
-整个项目采用了微服务分层设计，以保障高并发网关吞吐与链上安全清算防线的隔离：
+整个项目采用了微服务分层设计，以保障高并发网关吞吐、混合支付路由与特权管理监控大屏的隔离：
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│                    Client TS SDK                       │
+│            Client Portal & Admin Portal                │
+│    - client.html (MetaMask 插件/私钥直签/Stripe 弹窗)    │
+│    - admin.html (霓虹毛玻璃特权看板，数据实时监控)       │
 └──────────────────────────┬─────────────────────────────┘
-                           │ 1. POST /agent/execute
+                           │ 1. API 访问 / X-402 交互自愈
                            ▼
 ┌────────────────────────────────────────────────────────┐
 │             Go Gateway (微支付协商限流网关)              │
 │    - Token Bucket Rate Limiter (IP 限流防御)           │
-│    - X-402 Challenge intercept (捕获与重定向)           │
-│    - SQLite Persistent Queue (防阻断任务持久化)          │
-│    - EIP-712 ChannelHold Auth & Receipt Settle         │
+│    - X-402 Challenge intercept (捕获与法币/代币重定向)   │
+│    - SQLite DB Queue (防双花防重放 stripe/crypto 锁)    │
+│    - Admin API Security (生产环境空密钥安全熔断)         │
 └──────────────────────────┬─────────────────────────────┘
                            │ 2. 异步投递结算任务 (CORS / Secret)
                            ▼
 ┌────────────────────────────────────────────────────────┐
 │            Smart Account Bridge (AA 网桥)              │
-│    - Kernel Smart Account (零知识会话密钥分配)          │
 │    - Auto-Deploy TBA (反查并自动部署未初始化 TBA)         │
+│    - escrowConfigCache (RPC 多节点缓存与静态优化)        │
 └──────────────────────────┬─────────────────────────────┘
-                           │ 3. 链上批量结算
+                           │ 3. 链上批量拆分分成结算
                            ▼
 ┌────────────────────────────────────────────────────────┐
 │             Solidity Contracts (智能合约)              │
-│    - PaymentEscrow.sol (累计签名状态通道/USDC 划扣)      │
-│    - AgentTokenBoundAccount.sol (ERC-6551 执行账户)    │
+│    - PaymentEscrow.sol (分流拆分 splitSettle 与抽佣)     │
+│    - AgentTokenBoundAccount.sol (ERC-6551 收款账户)    │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -49,31 +43,31 @@ AgentPay 是一个专为 AI 智能体（AI Agents）设计的高并发、低延�
 
 ## 2. 核心特性
 
-- **X-402 协议自愈与状态通道集成**：当客户端发起没有授权的请求时，网关返回 HTTP 402 挑战。客户端 SDK 自动在链上锁定资金，本地通过 Promise 排队锁累加消费额度并自签名，网关识别放行，实现“即付即用，单次扣费”。
-- **EIP-712 链下信贷锁定与清算自愈 (Pre-auth Hold & Settle Receipt)**：
-  - 针对高并发与高价值 Agent 任务，网关对未授权请求发起大额 Hold 挑战（如 0.05 USDC 的微额度）。
-  - 智能体 SDK 本地生成 EIP-712 `ChannelHold` 签名。网关使用 `crypto.SigToPub` 进行密码学签名恢复和有效性验证（包括 Expiration 过期校验与格式审计）。
-  - 任务完成后，网关用 ECDSA 密钥签署最终的 `Settle Receipt` 凭证回传，客户端核实后自动将确认额修正回落为 `lastConfirmedSpend + actualCost`，实现全链下零 Gas 费的信贷解冻。
-- **高性能 Go 持久化队列**：Go Gateway 采用 SQLite 作为本地持久化任务队列（使用 CGO-free 纯 Go 驱动，WAL 模式以及连接数控制防死锁），网关拦截 proof 后只入库即返回，消除阻塞，并由后台协程 Worker 配合指数级退避算法执行异步链上结算。支持通过 `channelID:nonce` 复合主键防范并发 SQLite 写入的主键冲突。
-- **动态 TBA 收款安全防线**：AA Bridge 在结算时通过合约动态派生计算专属 TBA 收款地址。若收款地址未部署则自动上链部署，且托管合约限制释放时接收方必须完全等于派生 TBA，锁死资金流向。
-- **抗 DDOS 与 IP 欺骗限流中间件**：网关最外层配备令牌桶限流，超限返回 429。内置 5 分钟 TTL 定期垃圾回收，防范海量随机 IP 伪造攻击造成的内存泄漏；仅在 `TRUST_PROXY=true` 时才采信 `X-Forwarded-For`。
-- **高质感调试沙盒 (Playground)**：提供开箱即用、拥有毛玻璃科技感美学的 `playground.html` 单页。内置了并发排队锁，展示信贷锁定 Hold Amount 和 Settle Receipt 自愈过程，支持纯前端 Mock 演示与本地后端直连联调。
+- **X-402 协议自愈与双模混合支付**：当客户端发起没有授权的请求时，网关返回 HTTP 402 挑战。客户端 SDK 会根据用户的偏好选择 **Crypto 代币通道** 或 **Stripe 法币渠道**。
+- **Stripe 双模法币 Popup 交互与防双花锁**：
+  - 前端支持弹窗拉起 Stripe 会话，隔离 Mock（2s 自动关闭）与真实环境（轮询 `popup.closed`）的窗口关闭机制。
+  - 网关设计了 SQLite 独占锁的防双花状态机表 `consumed_stripe_sessions`，支持 `TryLock` -> `Verify` -> `Commit` 的三段式状态校验锁，彻底杜绝重放攻击，并在冷启动时自愈清理 pending 死锁状态。
+- **智能合约 splitSettle 三方拆分结算**：
+  - 合约完美支持将实际消费额分成给：平台（限 10% Platform Bps 抽佣硬防线）、AI 服务商（服务费）和模型提供商（模型分成），从根本上规避重入风险。
+  - 网关执行计费保底轧账公式，防止大额模型费下扣减抽佣溢出导致 revert：`actualCost = (modelCost + serviceFeeVal) * 10000 / (10000 - platformBps)`。
+- **特权大屏看板与管理组加固**：
+  - 拥有磨砂毛玻璃未来霓虹美学风格的 `admin.html`，展示累计结算金额、平台收入与 Stripe 统计。
+  - 所有特权管理与调试接口均受 `AdminAuthMiddleware` 保护。生产环境下若未配置 `INTERNAL_SECRET` 则**直接强熔断（返回 401）**，开发环境下则单次警告放行，防护极其严密。
+- **DevOps 一键自动化部署 (`deploy.sh`)**：
+  - 根目录内置 `deploy.sh` 部署脚本，自检 Docker、Docker Compose、Foundry 和 Python3 依赖。
+  - 一键编译并运行 Anvil 节点（带 RPC 连通和 1s 缓冲等待），动态运行智能合约编译发布，利用 Python 提取 `PaymentEscrow` 地址，并重新导出（re-export）当前 Shell 环境以规避 Docker Compose 环境变量覆盖优先级 Bug，最后拉起微服务进行 cURL 安全隔离和健康度轮询测试。
 
 ---
 
 ## 3. 技术栈与模块目录
 
 - **`contracts/`**：以太坊智能合约部分，基于 Foundry 编译测试。
-  - `PaymentEscrow.sol`：状态通道累计清算与超时清退合约。
-  - `AgentTokenBoundAccount.sol`：满足 6551 规范的智能体收款控制账户。
+  - `PaymentEscrow.sol`：状态通道累计三方拆分清算与超时清退合约。
 - **`gateway/`**：微支付协商网关，基于 Go 开发。
-  - 核心功能：限流、X-402 预授权校验拦截、Settle Receipt 签名生成、SQLite 持久化任务队列。
-- **`aa-bridge/`**：零知识账户桥接器，基于 Fastify + Viem + TypeScript 开发。
-  - 核心功能：TBA 地址反查与自动部署，发起合约交互结算。
-- **`agent/`**：模拟智能体推理计算，基于 Fastify + TypeScript 开发。
-  - 核心功能：生成符合 ERC-8004 的推理证明 Header `X-Agent-Proof`。
-- **`sdk/`**：客户端 TS SDK。
-  - 核心功能：402 拦截重试、并发串行排队锁（具有 `.finally()` 销毁防 Promise 内存泄露设计）、EIP-712 预授权本地签名、清算凭证解密更新。
+  - 核心功能：限流、X-402 挑战拦截、Stripe 客户端核销、SQLite 持久化防双花双模任务队列、Admin 加固。
+- **`aa-bridge/`**：智能账户桥接器，基于 Fastify + Viem + TypeScript 开发。
+- **`agent/`**：模拟智能体推理计算，基于 Fastify + TypeScript 开发，可执行结构化 Solidity 安全审计。
+- **`sdk/`**：客户端 TS SDK，支持 Promise 排队锁销毁与 EIP-712 签名。
 
 ---
 
@@ -85,8 +79,16 @@ AgentPay 是一个专为 AI 智能体（AI Agents）设计的高并发、低延�
 - Node.js (推荐 v20+)
 - Go (推荐 v1.21+)
 - Foundry (编译 Solidity 必备)
+- Python3
 
-### 4.2 单元测试验证
+### 4.2 一键部署运行
+在项目根目录下执行以下脚本，即可全自动部署合约、写入环境变量、并拉起整个微服务容器组：
+```bash
+./deploy.sh
+```
+部署成功后，控制台会输出带有 ASCII 横幅的访问指南及随机生成的管理 Secret。
+
+### 4.3 单元测试验证
 您可以分别进入对应目录下执行测试：
 
 - **智能合约测试**：
@@ -99,84 +101,18 @@ AgentPay 是一个专为 AI 智能体（AI Agents）设计的高并发、低延�
   ```
 - **AA 网桥测试**：
   ```bash
-  cd aa-bridge && npm install && npm run test
+  cd aa-bridge && npm run test
   ```
 - **TS SDK 测试**：
   ```bash
-  cd sdk && npm install && npm run test
+  cd sdk && npm run test
   ```
 
-### 4.3 启动一键联调环境 (Docker Compose)
-在项目根目录下执行以下命令，将一键拉起 Anvil 私链以及所有微服务：
-```bash
-docker compose up --build
-```
-启动后访问接口：
-- 网关唯一公开入口：`http://127.0.0.1:8080/agent/execute`
-
 ---
 
-## 5. Web 端沙盒调试工具 (Playground)
+## 5. 前端面板访问入口
 
-我们为开发者预置了开箱即用的可视化沙盒，用于体验 Mock 演示或直连本地后端调试。
-
-<p align="center">
-  <img src="docs/images/playground.png" alt="AgentPay Web Client Playground" width="800">
-</p>
-
-### 5.1 使用方法
-1. **启动本地静态服务器**：
-   在项目根目录下，使用 Python 启动本地 Web 服务：
-   ```bash
-   python3 -m http.server 8000
-   ```
-2. **访问面板**：
-   在浏览器中打开：`http://localhost:8000/playground.html`。
-3. **双轨测试模式**：
-   - **Mock 演示模式**：开启时无需启动任何后端进程，双击 `Execute` 或 `Concurrent Execute` 即可在控制台和 Timeline 时序图中动态查看 402 自愈与 Promise 并发排队锁、信贷预授权锁定、清算凭证解冻自愈的运作过程。
-   - **本地直连调试**：开启时，面板红绿灯会自动检测本地 8080 和 3001 的健康状况。点击 Execute 会发送真实请求，中间面板的 SQLite 后台队列监视表每隔 2 秒自动刷新。
-
-### 5.2 本地直连环境启动说明
-为了跑通本地直连（direct）模式下的完整微支付与清算自愈流程，您需要在不同终端窗口中启动以下 3 个微服务：
-
-1. **AA Bridge 网桥微服务**（使用 `tsx` 强兼容引擎启动，默认绑定 3001 端口）：
-   ```bash
-   cd aa-bridge
-   # 在 .env 中填入拥有 Base Sepolia 余额的 PRIVATE_KEY 与 INTERNAL_SECRET=testsecret
-   npm run dev
-   ```
-2. **Agent 模拟推理智能体**（默认绑定 3002 端口）：
-   ```bash
-   cd agent
-   npm run dev
-   ```
-3. **Go Gateway 代理网关**（默认绑定 8080 端口）：
-   ```bash
-   cd gateway
-   export ELIZA_AGENT_URL=http://127.0.0.1:3002
-   export AA_BRIDGE_URL=http://127.0.0.1:3001/aa/settle
-   export INTERNAL_SECRET=testsecret
-   export CHAIN_ID=84532
-   export GATEWAY_PRIVATE_KEY=您的以太坊私钥
-   ./bin/gateway
-   ```
-
-### 5.3 调试技巧
-- **私钥可见性明暗切换**：在高级连接设置中，点击“客户端私钥”输入框右侧的眼睛👀图标，可一键切换可见性以核查私钥准确度。
-- **清空 SQLite 调试队列**：如果多次测试导致 SQLite 任务流水线被大量 `Failed` 任务塞满，可以点击流水线标题右侧的 **`清空队列 (Clear)`** 按钮一键擦除，重新发起全新的 402 预授权以查看最新任务如何成功扭转为 `Success` 状态。
-
----
-
-## 6. 协议清算逻辑细节
-
-### 6.1 预授权信贷挑战 (Channel Hold)
-状态通道预授权采用 EIP-712 规范，类型散列配置如下：
-$$\text{computedHash} = \text{keccak256}(\text{abi.encode}(\text{ChannelHold(bytes32 channelId,uint256 holdAmount,uint256 nonce,uint256 expiration)}, \text{channelId}, \text{holdAmount}, \text{nonce}, \text{expiration}))$$
-
-### 6.2 链上乐观结算 (Batch Settle)
-在结算阶段，网关作为 `settler` 可以单方面在链上提交结算。合约的 `batchSettle` 会验证客户端（Payer）签署的原始 `ChannelHold` 签名（包含锁定上限额度 `holdAmount`），只要网关提交的实际扣款金额 `accumulatedAmount` 不超过 `holdAmount`，合约即通过验证，无需客户端再次签署 final 签名。这彻底杜绝了客户端离线导致网关资金被卡死的风险：
-$$\text{hashStruct} = \text{keccak256}(\text{abi.encode}(\text{CHANNEL\_HOLD\_TYPEHASH}, \text{channelId}, \text{holdAmount}, \text{nonce}, \text{expiration}))$$
-$$\text{digest} = \text{keccak256}(\text{abi.encodePacked}(\text{"\textbackslash x19\textbackslash x01"}, \text{DOMAIN\_SEPARATOR}, \text{hashStruct}))$$
-$$\text{signer} = \text{ECDSA.recover}(\text{digest}, \text{signature})$$
-*(验证还原出的 `signer` 必须等于通道的 `payer`)*
-
+- **智能体审计客户端**：[client.html](file:///Users/oraclez/code/AgentPay/client.html)
+  - 可体验 Solidity 安全审计助手，使用 MetaMask 签名 / 本地私钥直签或 Stripe Popup 弹窗完成 X-402 链下自愈结算。
+- **特权大屏仪表盘**：[admin.html](file:///Users/oraclez/code/AgentPay/admin.html)
+  - 填入部署脚本生成的 Secret，可实时刷新结算金额、重试挂起/失败的任务，或清空 Stripe 缓存。
