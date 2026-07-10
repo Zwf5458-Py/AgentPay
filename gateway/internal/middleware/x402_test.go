@@ -920,7 +920,8 @@ func TestX402Middleware_StripeValid(t *testing.T) {
 	handler := middleware.X402Middleware(nextHandler)
 
 	req := httptest.NewRequest("POST", "/agent/execute", nil)
-	req.Header.Set("Authorization", "Bearer stripe:cs_mock_test123")
+	mockSessionID := fmt.Sprintf("cs_mock_test_%d", time.Now().UnixNano())
+	req.Header.Set("Authorization", "Bearer stripe:"+mockSessionID)
 	rr := httptest.NewRecorder()
 
 	handler.ServeHTTP(rr, req)
@@ -928,17 +929,17 @@ func TestX402Middleware_StripeValid(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
 	}
-	if capturedToken != "stripe:cs_mock_test123" {
-		t.Errorf("Expected token 'stripe:cs_mock_test123', got %q", capturedToken)
+	if capturedToken != "stripe:"+mockSessionID {
+		t.Errorf("Expected token 'stripe:%s', got %q", mockSessionID, capturedToken)
 	}
-	if capturedLockID != "cs_mock_test123" {
-		t.Errorf("Expected lockID 'cs_mock_test123', got %q", capturedLockID)
+	if capturedLockID != mockSessionID {
+		t.Errorf("Expected lockID '%s', got %q", mockSessionID, capturedLockID)
 	}
 	if capturedPaymentMethod != "stripe" {
 		t.Errorf("Expected paymentMethod 'stripe', got %q", capturedPaymentMethod)
 	}
-	if capturedStripeSessionID != "cs_mock_test123" {
-		t.Errorf("Expected stripeSessionID 'cs_mock_test123', got %q", capturedStripeSessionID)
+	if capturedStripeSessionID != mockSessionID {
+		t.Errorf("Expected stripeSessionID '%s', got %q", mockSessionID, capturedStripeSessionID)
 	}
 }
 
@@ -955,6 +956,32 @@ func TestX402Middleware_StripeInvalid(t *testing.T) {
 
 	if rr.Code != http.StatusPaymentRequired {
 		t.Errorf("Expected status %d, got %d", http.StatusPaymentRequired, rr.Code)
+	}
+}
+
+func TestX402Middleware_StripeDoubleSpend(t *testing.T) {
+	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	mockSessionID := fmt.Sprintf("cs_mock_double_%d", time.Now().UnixNano())
+	
+	// 首次请求放行
+	req1 := httptest.NewRequest("POST", "/agent/execute", nil)
+	req1.Header.Set("Authorization", "Bearer stripe:"+mockSessionID)
+	rr1 := httptest.NewRecorder()
+	handler.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusOK {
+		t.Errorf("Expected first request to succeed, got status %d", rr1.Code)
+	}
+
+	// 二次重放请求阻断
+	req2 := httptest.NewRequest("POST", "/agent/execute", nil)
+	req2.Header.Set("Authorization", "Bearer stripe:"+mockSessionID)
+	rr2 := httptest.NewRecorder()
+	handler.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusPaymentRequired {
+		t.Errorf("Expected double spend request to be blocked with 402, got status %d", rr2.Code)
 	}
 }
 

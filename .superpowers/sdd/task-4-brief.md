@@ -1,41 +1,48 @@
-# Task 4 Brief: Extend Gateway SQLite Queue & Task Fields
+# Task 4 Brief: Update client.html to support Stripe Checkout Popup Flow
 
-**Goal**: Extend the SQLite database schema and QueueManager task enqueuing to store all EIP-712 pre-authorization and split settlement parameters, and send them to the AA Bridge when executing the settlement tasks.
+**Goal**: Upgrade `client.html` with payment mode tabs (Crypto Channel / Stripe Fiat), handle creation of Stripe sessions, mock checkout page behavior, timeline adjustments, and invoice rendering under Stripe payment mode.
 
 **Files**:
-- Modify: `gateway/internal/queue/sqlite_queue.go`
-- Modify: `gateway/internal/proxy/reverse.go`
-- Test: `gateway/internal/queue/sqlite_queue_test.go`
-- Test: `gateway/internal/proxy/proxy_hold_test.go`
+- Modify: `client.html`
 
 **Instructions**:
-1. In `gateway/internal/queue/sqlite_queue.go`, extend the `SettleTask` struct to include:
-   - `ChannelID string`
-   - `HoldAmount uint64`
-   - `Nonce uint64`
-   - `Expiration uint64`
-   - `Signature string`
-   - `AccumulatedAmount uint64`
-   - `ModelCost uint64`
-   - `ServiceFee uint64`
-   - `ModelProvider string`
-   - `Treasury string`
-   - `PlatformBps uint16`
-   - `AgentID int64`
-2. Update the `initDB` function to alter or create the `settle_tasks` table with these new columns:
-   `channel_id TEXT`, `hold_amount INTEGER`, `nonce INTEGER`, `expiration INTEGER`, `signature TEXT`, `accumulated_amount INTEGER`, `model_cost INTEGER`, `service_fee INTEGER`, `model_provider TEXT`, `treasury TEXT`, `platform_bps INTEGER`, `agent_id INTEGER`.
-   Note: Since we use `CREATE TABLE IF NOT EXISTS`, if the table already exists, the new columns won't be created in existing dbs. Ensure that we dynamically run helper check/alter statements or create the table with these columns initially. (For clean tests/fresh dbs, having them in `CREATE TABLE` query is sufficient; for existing local `gateway.db`, you may drop/alter it or write defensive alter statements).
-3. Update `Enqueue` method signature and query in `sqlite_queue.go`:
-   `func (qm *QueueManager) Enqueue(lockID, proof, agentOwner, escrowAddress string, taskDetails *SettleTask) error`
-   (Or overload it, or change signature directly. Changing the signature and adapting caller is cleaner).
-4. Update `getPendingTasks` select query to scan these new columns into `SettleTask`.
-5. Update `processSingleTask` to check if it's a channel settlement (`task.ChannelID != ""`). If so, send a POST to the `/aa/split-settle` endpoint (you can compute it by replacing `/aa/settle` with `/aa/split-settle` in `qm.bridgeURL` string) with a JSON body containing all the split-settle properties. If it's a legacy lock-based task, keep the original `/aa/settle` payload structure.
-6. In `gateway/internal/proxy/reverse.go`'s `ModifyResponse`:
-   - If `X-Agent-Proof` is found, check if it's a channel request (middleware channel context is present).
-   - If it is a channel request, calculate `modelCost` from `X-Agent-Cost` (fallbacks as specified in code), platform fee (`actualCost * platformBps / 10000`), and `serviceFee = actualCost - platformFee - modelCost`.
-   - Read signature, expiration, holdAmount, nonce, and channelID from middleware context.
-   - Read platformBps, modelProvider, treasury configs from environment variables or helper methods.
-   - Enqueue all of these details via the updated `QueueManager.Enqueue` method.
-7. Update all unit tests in `sqlite_queue_test.go` and `proxy_hold_test.go` to adapt to the new `Enqueue` signature.
-8. Verify all tests in `gateway/internal/queue` and `gateway/internal/proxy` pass.
-9. Commit changes.
+1. Open `client.html`.
+2. Add a payment strategy selector UI section above the Wallet Control card:
+   - Elements: A tab bar with two tabs:
+     - `🔗 链上支付 (Crypto Channel)` (id `paymentCryptoTab`, active by default)
+     - `💳 法币支付 (Stripe)` (id `paymentStripeTab`)
+3. Handle Tab switching behavior:
+   - Set a global variable `activePaymentStrategy = "crypto"` or `"stripe"`.
+   - When `"crypto"` is selected:
+     - Show the entire simulated wallet connection card and related controls.
+     - The timeline should display the 5-step on-chain lifecycle: Request → Challenge → Sign → Audit → Settle.
+     - Clear any Stripe notes.
+   - When `"stripe"` is selected:
+     - Hide the simulated wallet connection card (or collapse it).
+     - Show a simplified Stripe checkout details note: "使用信用卡通过 Stripe 收银台进行按次支付，每次固定 $0.05 USDC 等值法币。".
+     - Enable the `Execute Audit` button directly (no wallet connection required for Stripe mode).
+     - The timeline should adjust to a 4-step structure: Request → Challenge → Stripe Pay → Audit (removing Sign and Settle). Update step IDs dynamically.
+4. Implement `executeAudit` handler modifications to support Stripe payment Strategy:
+   - When `activePaymentStrategy === "stripe"`:
+     - **Step 1 (Request)**: Call `POST /agent/execute` with no authorization.
+     - **Step 2 (Challenge)**: Intercept HTTP 402. Read `X-402-Payment-Methods` and confirm `"fiat-stripe"` is supported.
+     - **Step 3 (Stripe Pay)**:
+       - Update timeline Step Stripe Pay to `active`.
+       - Call Gateway route `POST /stripe/create-session` sending `{ "amount": 50000, "agentId": agentId }` to retrieve `sessionId` and `url`.
+       - Open a popup window using `window.open(url, "StripeCheckout", "width=600,height=700")`.
+       - In Mock Mode (since `url` returned is a local redirect page `http://.../stripe/success?session_id=...` or mock page):
+         - Monitor the popup window or simulate its completion after a short delay (e.g. 2 seconds) by closing it.
+         - Update timeline Step Stripe Pay to `completed`.
+     - **Step 4 (Audit)**:
+       - Update timeline Step Audit to `active`.
+       - Send the second request to `/agent/execute` with header `Authorization: Bearer stripe:<sessionId>`.
+       - Verify HTTP 200 response, render the Markdown audit report.
+       - Verify receipt details: Stripe mode returns headers `X-402-Payment-Method: stripe` and `X-402-Stripe-Session`.
+       - Update the Invoice details panel:
+         - Display "支付策略: 信用卡支付 (Stripe)"
+         - Cost: 0.050000 USDC
+         - platformFee, serviceFee, modelCost: dynamically split if `X-Agent-Cost` header is present, or display as card checkout values.
+         - Refunded: 0.000000 USDC (fiat payment is exact, no hold refund).
+         - Update Step Audit to `completed`.
+5. Ensure layout styles remain premium and dark neon glassmorphic.
+6. Commit changes.

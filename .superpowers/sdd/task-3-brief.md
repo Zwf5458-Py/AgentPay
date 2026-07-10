@@ -1,20 +1,29 @@
-# Task 3 Brief: Update Gateway X-402 Middleware Headers & Configs
+# Task 3 Brief: Modify ModifyResponse to Exclude On-chain Settlement under Stripe mode
 
-**Goal**: Update the gateway middleware to include split-settlement information in the 402 challenge response headers and expose them in CORS.
+**Goal**: Exclude EIP-712 settlement receipt generation and SQLite enqueuing in `gateway/internal/proxy/reverse.go` if the request is paid via Stripe.
 
 **Files**:
-- Modify: `gateway/internal/middleware/x402.go`
-- Modify: `gateway/cmd/gateway/main.go` (CORS headers list)
-- Test: `gateway/internal/middleware/x402_test.go`
+- Modify: `gateway/internal/proxy/reverse.go`
+- Modify: `gateway/internal/proxy/proxy_hold_test.go`
 
 **Instructions**:
-1. Locate `trigger402` function in `gateway/internal/middleware/x402.go`.
-2. Update it to set the following headers in 402 responses:
-   - `X-402-Platform-Bps`: value of environment variable `PLATFORM_BPS` (default is `"10"`, i.e., 0.1%).
-   - `X-402-Model-Provider`: value of environment variable `MODEL_PROVIDER_ADDRESS` (default is `"0x90F79bf6EB2c4f870365E785982E1f101E93b906"`).
-   - `X-402-Payment-Methods`: `"crypto-channel,fiat-stripe"`.
-3. Locate CORS middleware in `gateway/cmd/gateway/main.go`. Update `Access-Control-Expose-Headers` list to include:
-   `X-402-Platform-Bps, X-402-Model-Provider, X-402-Payment-Methods, X-402-Hold-Amount, X-402-Settle-Receipt, X-402-Currency, X-402-Chain, X-402-Version`.
-4. Update `gateway/internal/middleware/x402_test.go` where it mocks CORS headers to also include the new headers in the expose list.
-5. Verify all tests in `gateway/internal/middleware` pass.
+1. Open `gateway/internal/proxy/reverse.go`.
+2. Inside `ModifyResponse` function:
+   - Retrieve `paymentMethod` from request context:
+     `paymentMethod := middleware.GetPaymentMethod(ctx)`
+   - If `paymentMethod == "stripe"`:
+     - Get the `stripeSessionID` from context:
+       `stripeSessionID := middleware.GetStripeSessionID(ctx)`
+     - Skip the database enqueuing (`wrapper.QueueManager.Enqueue`) and Settle Receipt generation logic.
+     - Set the header `X-402-Payment-Method: stripe` and `X-402-Stripe-Session: <stripeSessionID>` on the response `res.Header`.
+     - Log: `[Proxy] Request paid via Stripe session <stripeSessionID>. Skipping chain settlement receipt signing.`.
+     - Proceed normally (allowing downstream response output to pass through).
+3. If `paymentMethod` is not `"stripe"` (either empty, legacy, or `"channel"`):
+   - Keep the existing logic (calculate `actualCost`, enqueue task, append `X-402-Settle-Receipt`).
+4. Align Go tests in `gateway/internal/proxy/proxy_hold_test.go`:
+   - Add unit test to verify that if request carries `stripe:` prefix Bearer token (meaning `paymentMethod` is `"stripe"`):
+     - No `X-402-Settle-Receipt` header is present.
+     - `X-402-Payment-Method: stripe` and `X-402-Stripe-Session` are set.
+     - SQLite queue task is NOT created.
+5. Ensure all proxy tests build and pass successfully.
 6. Commit changes.

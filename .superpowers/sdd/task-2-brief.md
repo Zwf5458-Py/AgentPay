@@ -1,50 +1,32 @@
-# Task 2 Brief: Implement `splitSettle` in PaymentEscrow.sol
+# Task 2 Brief: Upgrade X402Middleware to support Bearer stripe:<session_id> Credentials
 
-**Goal**: Implement the `splitSettle` function to distribute funds to model provider, platform treasury, and the agent's TBA, and refund the remainder to the user.
+**Goal**: Support Stripe-paid requests by parsing and verifying `Bearer stripe:<session_id>` authorization header in the X-402 middleware.
 
 **Files**:
-- Modify: `contracts/src/payment/PaymentEscrow.sol`
-- Test: `contracts/test/PaymentEscrowTest.t.sol`
+- Modify: `gateway/internal/middleware/x402.go`
+- Modify: `gateway/internal/middleware/x402_test.go`
 
 **Instructions**:
-1. Add `ChannelSplitSettled` event to `PaymentEscrow.sol`:
-   ```solidity
-   event ChannelSplitSettled(
-       bytes32 indexed channelId,
-       uint256 agentPayout,
-       uint256 modelPayout,
-       uint256 platformFee,
-       address modelProvider,
-       address treasury
-   );
-   ```
-2. Implement the `splitSettle` function:
-   ```solidity
-   function splitSettle(
-       bytes32 channelId,
-       uint256 accumulatedAmount,
-       uint256 modelCost,
-       uint256 serviceFee,
-       address modelProvider,
-       address treasury,
-       uint16  platformBps,
-       uint256 holdAmount,
-       uint256 nonce,
-       uint256 expiration,
-       bytes   calldata signature
-   ) external onlySettler
-   ```
-   Detailed logic:
-   - Validate addresses, status is Locked, channel is not expired, accumulatedAmount > 0 and <= maxAmount, holdAmount == maxAmount.
-   - Verify EIP-712 signature against ChannelHold hash struct. Signer must be the payer.
-   - Calculate platform fee: `platformFee = accumulatedAmount * platformBps / 10000`.
-   - Verify that `modelCost + serviceFee + platformFee <= accumulatedAmount`.
-   - Update lock status to `Released`, and set `settledAmount = accumulatedAmount`.
-   - Safely transfer `modelCost` to `modelProvider` (if > 0), `platformFee` to `treasury` (if > 0).
-   - Resolve agent's TBA address dynamically using `erc6551Registry.account(...)`.
-   - Transfer the remaining `agentPayout = accumulatedAmount - modelCost - platformFee` to the TBA (if > 0).
-   - Refund the remainder `lock.maxAmount - accumulatedAmount` back to the payer.
-   - Emit `ChannelSplitSettled`.
-3. Add a Foundry unit test `testSplitSettle()` in `contracts/test/PaymentEscrowTest.t.sol` to verify the splits, signature validation, transfers, and remainder refunds.
-4. Verify all tests pass: `forge test`
-5. Commit changes.
+1. Open `gateway/internal/middleware/x402.go`.
+2. Introduce context keys or values to denote payment method (e.g. `PaymentMethodContextKey` value `"x402_payment_method"`).
+3. In `X402Middleware`:
+   - Inspect the incoming token (the parsed string after `Bearer ` prefix).
+   - Check if token starts with `"stripe:"` (e.g. `strings.HasPrefix(token, "stripe:")`).
+   - If it matches:
+     - Extract `sessionID` by removing the `"stripe:"` prefix (e.g. `strings.TrimPrefix(token, "stripe:")`).
+     - Retrieve the Stripe client instance initialized in main (or dynamically initialize a `stripe.NewStripeClient` reading environment variables).
+     - Call `VerifyCheckoutSession(sessionID)` to confirm if it has been fully paid.
+     - If the session is NOT valid or unpaid, call `trigger402(w)` and return.
+     - If valid/paid, inject the following details into the request context:
+       - `TokenContextKey` = token (`stripe:<session_id>`)
+       - `LockIDContextKey` = `sessionID`
+       - PaymentMethodContextKey = `"stripe"`
+       - StripeSessionIDContextKey = `sessionID`
+     - Call `next.ServeHTTP(w, r.WithContext(ctx))` and return.
+4. Export context accessors:
+   - `GetPaymentMethod(ctx context.Context) string`
+   - `GetStripeSessionID(ctx context.Context) string`
+5. Align unit tests in `gateway/internal/middleware/x402_test.go` to test this route:
+   - Add a test `TestX402Middleware_StripeValid` and `TestX402Middleware_StripeInvalid`.
+   - Mock Stripe verification (since Stripe client in test environment defaults to Mock Mode if environment variables are not set, it will easily return verified for `cs_mock_` sessions).
+6. Commit changes.

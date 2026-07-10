@@ -17,6 +17,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"sync"
+)
+
+var (
+	consumedStripeSessions   = make(map[string]bool)
+	consumedStripeSessionsMu sync.Mutex
 )
 
 type contextKey string
@@ -67,6 +73,15 @@ func X402Middleware(next http.Handler) http.Handler {
 				return
 			}
 
+			// 防重放/双花：验证 sessionID 是否已被消费
+			consumedStripeSessionsMu.Lock()
+			isConsumed := consumedStripeSessions[sessionID]
+			consumedStripeSessionsMu.Unlock()
+			if isConsumed {
+				trigger402(w)
+				return
+			}
+
 			stripeKey := os.Getenv("STRIPE_SECRET_KEY")
 			stripeClient := stripe.NewStripeClient(stripeKey)
 
@@ -75,6 +90,11 @@ func X402Middleware(next http.Handler) http.Handler {
 				trigger402(w)
 				return
 			}
+
+			// 验证成功后标记为已消费
+			consumedStripeSessionsMu.Lock()
+			consumedStripeSessions[sessionID] = true
+			consumedStripeSessionsMu.Unlock()
 
 			ctx := r.Context()
 			ctx = context.WithValue(ctx, TokenContextKey, token)

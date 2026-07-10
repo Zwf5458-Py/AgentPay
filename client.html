@@ -1655,19 +1655,26 @@ contract SafeEtherStore is ReentrancyGuard {
                     reportStatusText.textContent = '正在等待信用卡支付完成 (Stripe Pay)...';
                     const popup = window.open(checkoutUrl, "StripeCheckout", "width=600,height=700");
                     
-                    // 监控弹窗关闭或在 2 秒后强制关闭
+                    // 监控弹窗状态：Mock 模式下 2 秒后自动关闭（10 次 200ms 轮询），真实模式下等待用户支付完成关闭窗口
                     await new Promise(async (resolve) => {
                         let timer;
                         let count = 0;
-                        const maxCount = 10; // 2 seconds (10 * 200ms)
+                        const isMock = sessionId.startsWith('cs_mock_');
                         timer = setInterval(() => {
                             count++;
-                            if (!popup || popup.closed || count >= maxCount) {
-                                clearInterval(timer);
-                                if (popup && !popup.closed) {
-                                    popup.close();
+                            if (isMock) {
+                                if (!popup || popup.closed || count >= 10) {
+                                    clearInterval(timer);
+                                    if (popup && !popup.closed) {
+                                        popup.close();
+                                    }
+                                    resolve();
                                 }
-                                resolve();
+                            } else {
+                                if (!popup || popup.closed) {
+                                    clearInterval(timer);
+                                    resolve();
+                                }
                             }
                         }, 200);
                     });

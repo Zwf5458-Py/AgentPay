@@ -120,6 +120,17 @@ func main() {
 		})
 	})
 
+	r.Post("/stripe/webhook", func(w http.ResponseWriter, r *http.Request) {
+		sigHeader := r.Header.Get("Stripe-Signature")
+		if sigHeader == "" && os.Getenv("APP_ENV") == "production" {
+			http.Error(w, "Missing Stripe-Signature header", http.StatusBadRequest)
+			return
+		}
+		log.Println("[Stripe Webhook] Received webhook event notification.")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"success"}`))
+	})
+
 	// 调试接口：获取最近的 10 个结算任务
 	r.Get("/debug/tasks", func(w http.ResponseWriter, r *http.Request) {
 		tasks, err := queueMgr.GetLatestTasks(10)
