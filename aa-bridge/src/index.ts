@@ -5,7 +5,9 @@ import { getSmartAccountAddress, getAccountBalance } from './kernel/account.js';
 import { grantPermission } from './kernel/permissions.js';
 import { createPublicClient, createWalletClient, http, isAddress, pad, stringToHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { baseSepolia } from 'viem/chains';
+import { baseSepolia, foundry } from 'viem/chains';
+const envChainId = Number(process.env.CHAIN_ID) || 31337;
+const currentChain = envChainId === 31337 ? foundry : baseSepolia;
 import { getRpcTransport } from './utils/rpc.js';
 
 dotenv.config();
@@ -83,7 +85,7 @@ async function checkIsDeployed(address: string): Promise<boolean> {
   try {
     const rpcUrl = process.env.RPC_URL || 'https://sepolia.base.org';
     const publicClient = createPublicClient({
-      chain: baseSepolia,
+      chain: currentChain,
       transport: getRpcTransport(rpcUrl),
     });
     const bytecode = await publicClient.getBytecode({ address: address as `0x${string}` });
@@ -280,13 +282,13 @@ server.post('/aa/settle', {
 
       const account = privateKeyToAccount(privateKey);
       const publicClient = createPublicClient({
-        chain: baseSepolia,
+        chain: currentChain,
         transport: getRpcTransport(rpcUrl),
       });
 
       const walletClient = createWalletClient({
         account,
-        chain: baseSepolia,
+        chain: currentChain,
         transport: getRpcTransport(rpcUrl),
       });
 
@@ -339,7 +341,7 @@ server.post('/aa/settle', {
 
       // 2. 计算专属 TBA 账户地址
       const salt = '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`;
-      const chainId = BigInt(baseSepolia.id);
+      const chainId = BigInt(currentChain.id);
 
       let computedTBA: string;
       try {
@@ -494,13 +496,13 @@ server.post('/aa/settle', {
 
       const account = privateKeyToAccount(privateKey);
       const publicClient = createPublicClient({
-        chain: baseSepolia,
+        chain: currentChain,
         transport: getRpcTransport(rpcUrl),
       });
 
       const walletClient = createWalletClient({
         account,
-        chain: baseSepolia,
+        chain: currentChain,
         transport: getRpcTransport(rpcUrl),
       });
 
@@ -720,13 +722,13 @@ server.post('/aa/split-settle', {
 
     const account = privateKeyToAccount(privateKey);
     const publicClient = createPublicClient({
-      chain: baseSepolia,
+      chain: currentChain,
       transport: getRpcTransport(rpcUrl),
     });
 
     const walletClient = createWalletClient({
       account,
-      chain: baseSepolia,
+      chain: currentChain,
       transport: getRpcTransport(rpcUrl),
     });
 
@@ -778,7 +780,7 @@ server.post('/aa/split-settle', {
 
     // 2. 计算专属 TBA 账户地址
     const salt = '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`;
-    const chainId = BigInt(baseSepolia.id);
+    const chainId = BigInt(currentChain.id);
 
     let computedTBA: string;
     try {
@@ -949,7 +951,7 @@ server.get('/aa/account/:agentId', async (request, reply) => {
       try {
         const rpcUrl = process.env.RPC_URL || 'https://sepolia.base.org';
         const publicClient = createPublicClient({
-          chain: baseSepolia,
+          chain: currentChain,
           transport: getRpcTransport(rpcUrl),
         });
 

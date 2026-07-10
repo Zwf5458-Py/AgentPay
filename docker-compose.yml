@@ -20,6 +20,7 @@ services:
       - PRIVATE_KEY=${PRIVATE_KEY}
       - INTERNAL_SECRET=${INTERNAL_SECRET}
       - ESCROW_ADDRESS=${ESCROW_ADDRESS}
+      - CHAIN_ID=${CHAIN_ID:-31337}
     depends_on:
       - anvil
 
@@ -46,6 +47,7 @@ services:
       - ESCROW_ADDRESS=${ESCROW_ADDRESS}
       - INTERNAL_SECRET=${INTERNAL_SECRET}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - CHAIN_ID=${CHAIN_ID:-31337}
     depends_on:
       - agent
       - aa-bridge

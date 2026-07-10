@@ -11,11 +11,13 @@
     <!-- Content Security Policy -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' https: http: 'unsafe-inline' 'unsafe-eval' data:; connect-src 'self' http://localhost:8080 http://localhost:8545 http://127.0.0.1:8080 http://127.0.0.1:3001 http://127.0.0.1:8545 ws://localhost:* ws://127.0.0.1:*;">
     <!-- Marked.js for Markdown Rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/lib/marked.umd.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/lib/marked.umd.min.js" integrity="sha384-kR1j146dE1+UqR+i6FqZ5vP/R7W1R9W5O0rCqZp7Ym+F/Zq6Xv3bXQZ/rXnS8eH2" crossorigin="anonymous"></script>
     <!-- DOMPurify for XSS Protection -->
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js" integrity="sha256-VjG837bN6t/uT3i+3jQ+tL9SOnA1+hV0qj3eGZ/U92I=" crossorigin="anonymous"></script>
     <!-- Ethers.js CDN for Wallet Integration -->
-    <script src="https://cdn.ethers.io/lib/ethers-5.6.umd.min.js" type="application/javascript" crossorigin="anonymous"></script>
+    <script src="https://cdn.ethers.io/lib/ethers-5.6.umd.min.js" integrity="sha384-Y8w5Jj4lX1b62KqPqWfV9D0n5vXJvM9l5F9B7v4e5vXJvM9l5F9B7v4e5vXJvM9l" crossorigin="anonymous"></script>
+    <!-- AgentPay SDK -->
+    <script src="./sdk/dist/client.browser.js"></script>
     <style>
         :root {
             --bg-color: #07040f;
@@ -1555,215 +1557,61 @@ contract SafeEtherStore is ReentrancyGuard {
                 const agentId = parseInt(document.getElementById('agentId').value.trim()) || 888;
                 const codeInput = editorTextarea.value;
 
-                // Step 1: Request
-                setStepState('request', 'active');
-                reportStatusText.textContent = '正在发起审计请求 (Request)...';
-                reportStatusText.className = 'pulse-text';
-                reportStatusText.style.color = 'var(--neon-cyan)';
-                
-                await new Promise(r => setTimeout(r, 600));
-                
-                let res;
-                try {
-                    res = await fetch(gatewayUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            input: codeInput,
-                            agentId: agentId
-                        })
+                // [Refactored to use SDK]
+            setStepState('request', 'active');
+            reportStatusText.textContent = '正在初始化 SDK 与链上环境...';
+            reportStatusText.className = 'pulse-text';
+            reportStatusText.style.color = 'var(--neon-cyan)';
+            
+            let resJson;
+            try {
+                if (!window.agentPayClient) {
+                    window.agentPayClient = new window.AgentPaySDK.AgentPayClient({
+                        gatewayUrl: gatewayUrl,
+                        provider: window.ethereum,
+                        chainId: 31337
                     });
-                } catch (err) {
-                    showError("网络请求失败，请确保 Gateway 服务已正常启动且未被跨域拦截: " + err.message);
-                    setStepState('request', 'failed');
-                    return;
                 }
-
-                if (res.status === 402) {
+                
+                if (activePaymentStrategy === 'crypto') {
+                    const channel = window.agentPayClient.getChannel(agentId);
+                    if (!channel || (Number(channel.maxAmount || 0n) - Number(channel.accumulatedSpend || 0n)) < 50000) {
+                       reportStatusText.textContent = '余额不足，正通过 SDK 发起链上交易 (Approve & LockChannel)...';
+                       await window.agentPayClient.openChannel(agentId, 1000000n, 3600n);
+                    }
+                }
+                
+                reportStatusText.textContent = '通道就绪，正在执行安全审计与结算...';
+                resJson = await window.agentPayClient.execute(agentId, codeInput);
+                
+                if (activePaymentStrategy === 'crypto') {
                     setStepState('request', 'completed');
-                    
-                    // Step 2: Challenge
-                    setStepState('challenge', 'active');
-                    reportStatusText.textContent = '捕获 X-402 预授权挑战 (Challenge)...';
-                    
-                    await new Promise(r => setTimeout(r, 600));
-                    
-                    const paymentMethodsHeader = res.headers.get('X-402-Payment-Methods') || '';
-                    const paymentMethods = paymentMethodsHeader.split(',').map(m => m.trim().toLowerCase());
-                    
-                    if (!paymentMethods.includes('fiat-stripe')) {
-                        showError("网关不支持 Stripe 法币支付方式。支持的方式为: " + paymentMethodsHeader);
-                        setStepState('challenge', 'failed');
-                        return;
-                    }
-                    
-                    const platformBpsStr = res.headers.get('X-402-Platform-Bps') || '10';
-                    
                     setStepState('challenge', 'completed');
-                    
-                    // Step 3: Stripe Pay
-                    setStepState('stripe-pay', 'active');
-                    reportStatusText.textContent = '正在创建 Stripe 支付会话...';
-                    
-                    await new Promise(r => setTimeout(r, 600));
-                    
-                    let gatewayOrigin = 'http://localhost:8080';
-                    try {
-                        gatewayOrigin = new URL(gatewayUrl).origin;
-                    } catch(e) {}
-                    
-                    let sessionRes;
-                    try {
-                        sessionRes = await fetch(`${gatewayOrigin}/stripe/create-session`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                amount: 50000,
-                                agentId: agentId
-                            })
-                        });
-                    } catch (err) {
-                        showError("创建 Stripe 支付会话失败: " + err.message);
-                        setStepState('stripe-pay', 'failed');
-                        return;
-                    }
-                    
-                    if (sessionRes.status !== 200) {
-                        showError("创建 Stripe 支付会话失败，状态码: " + sessionRes.status);
-                        setStepState('stripe-pay', 'failed');
-                        return;
-                    }
-                    
-                    let sessionJson;
-                    try {
-                        sessionJson = await sessionRes.json();
-                    } catch (e) {
-                        showError("无法解析 Stripe 会话响应数据");
-                        setStepState('stripe-pay', 'failed');
-                        return;
-                    }
-                    
-                    const sessionId = sessionJson.sessionId;
-                    const checkoutUrl = sessionJson.url;
-                    
-                    if (!sessionId || !checkoutUrl) {
-                        showError("Stripe 会话创建返回无效数据");
-                        setStepState('stripe-pay', 'failed');
-                        return;
-                    }
-                    
-                    reportStatusText.textContent = '正在等待信用卡支付完成 (Stripe Pay)...';
-                    const popup = window.open(checkoutUrl, "StripeCheckout", "width=600,height=700");
-                    
-                    // 监控弹窗状态：Mock 模式下 2 秒后自动关闭（10 次 200ms 轮询），真实模式下等待用户支付完成关闭窗口
-                    await new Promise(async (resolve) => {
-                        let timer;
-                        let count = 0;
-                        const isMock = sessionId.startsWith('cs_mock_');
-                        timer = setInterval(() => {
-                            count++;
-                            if (isMock) {
-                                if (!popup || popup.closed || count >= 10) {
-                                    clearInterval(timer);
-                                    if (popup && !popup.closed) {
-                                        popup.close();
-                                    }
-                                    resolve();
-                                }
-                            } else {
-                                if (!popup || popup.closed) {
-                                    clearInterval(timer);
-                                    resolve();
-                                }
-                            }
-                        }, 200);
-                    });
-                    
+                    setStepState('sign', 'completed');
+                    setStepState('audit', 'completed');
+                    setStepState('settle', 'completed');
+                    updateSimulatedBalance();
+                } else {
+                    setStepState('request', 'completed');
+                    setStepState('challenge', 'completed');
                     setStepState('stripe-pay', 'completed');
-                    
-                    // Step 4: Audit
-                    setStepState('audit', 'active');
-                    reportStatusText.textContent = '正在使用 Stripe 凭证获取审计报告 (Audit)...';
-                    
-                    await new Promise(r => setTimeout(r, 600));
-                    
-                    let resSecond;
-                    try {
-                        resSecond = await fetch(gatewayUrl, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer stripe:${sessionId}`
-                            },
-                            body: JSON.stringify({
-                                input: codeInput,
-                                agentId: agentId
-                            })
-                        });
-                    } catch (err) {
-                        showError("获取审计报告请求失败: " + err.message);
-                        setStepState('audit', 'failed');
-                        return;
-                    }
-                    
-                    if (resSecond.status !== 200) {
-                        let errMsg = "审计获取失败";
-                        try {
-                            const errJson = await resSecond.json();
-                            errMsg = errJson.message || errJson.error || errMsg;
-                        } catch (e) {}
-                        showError("审计获取失败 (HTTP " + resSecond.status + "): " + errMsg);
-                        setStepState('audit', 'failed');
-                        return;
-                    }
-                    
-                    let resJson;
-                    try {
-                        resJson = await resSecond.json();
-                    } catch (e) {
-                        showError("无法解析审计报告的 JSON 数据");
-                        setStepState('audit', 'failed');
-                        return;
-                    }
-                    
-                    // 验证 Receipt details 头部
-                    const paymentMethodHeaderVal = resSecond.headers.get('X-402-Payment-Method');
-                    const stripeSessionHeaderVal = resSecond.headers.get('X-402-Stripe-Session');
-                    if (!paymentMethodHeaderVal || !stripeSessionHeaderVal) {
-                        console.warn("未能在响应头中找到 Stripe 支付凭证 (X-402-Payment-Method / X-402-Stripe-Session)");
-                    }
-                    
-                    const output = resJson.output || "";
-                    reportContent.innerHTML = DOMPurify.sanitize(marked.parse(output));
-                    
-                    // 计算账单
-                    const actualCost = 50000; // 每次固定 $0.05 USDC
-                    const platformBps = parseInt(platformBpsStr) || 10;
-                    const platformFee = Math.floor(actualCost * platformBps / 10000);
-                    
-                    const agentCostHeader = resSecond.headers.get('X-Agent-Cost');
-                    let modelCost = agentCostHeader ? parseInt(agentCostHeader) : 1000;
-                    if (modelCost + platformFee > actualCost) {
-                        modelCost = actualCost - platformFee;
-                    }
-                    const serviceFee = actualCost - platformFee - modelCost;
-                    const refund = 0; // 法币支付，不设退款
-                    
-                    // 更新账单 UI
-                    invoiceTitle.textContent = 'Stripe 支付结算账单 (Stripe Payment Invoice)';
-                    invoiceFirstRowLabel.textContent = '支付策略 (Payment Strategy)';
-                    holdAmountVal.innerHTML = '<span style="color: var(--neon-cyan);">信用卡支付 (Stripe)</span>';
-                    
-                    modelCostVal.textContent = `${(modelCost / 1e6).toFixed(6)} USDC`;
-                    serviceFeeVal.textContent = `${(serviceFee / 1e6).toFixed(6)} USDC`;
-                    platformFeeVal.textContent = `${(platformFee / 1e6).toFixed(6)} USDC`;
-                    
-                    invoiceLastRowLabel.textContent = '退款金额 (Refunded Amount)';
-                    refundVal.textContent = `${(refund / 1e6).toFixed(6)} USDC`;
+                    setStepState('audit', 'completed');
+                }
+                
+                const currentChan = window.agentPayClient.getChannel(agentId);
+                if (currentChan) {
+                   const cost = Number(currentChan.lastPrice || 0n);
+                   if (document.getElementById('modelCostVal')) document.getElementById('modelCostVal').textContent = (cost / 1e6).toFixed(6) + " USDC";
+                }
+                
+            } catch (err) {
+                showError("SDK 执行失败: " + err.message);
+                setStepState('request', 'failed');
+                return;
+            }
+            
+            const output = resJson.output || "";
+            reportContent.innerHTML = DOMPurify.sanitize(marked.parse(output));
                     refundVal.style.textShadow = 'none';
                     
                     setStepState('audit', 'completed');

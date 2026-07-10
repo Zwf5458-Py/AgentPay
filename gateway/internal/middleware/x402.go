@@ -349,7 +349,7 @@ func GetEIP712DomainSeparator(verifyingContract string) []byte {
 	nameHash := crypto.Keccak256([]byte("AgentPay"))
 	versionHash := crypto.Keccak256([]byte("1"))
 
-	chainIDVal := int64(11155111)
+	chainIDVal := int64(31337)
 	if envChainID := os.Getenv("CHAIN_ID"); envChainID != "" {
 		if cid, err := strconv.ParseInt(envChainID, 10, 64); err == nil {
 			chainIDVal = cid

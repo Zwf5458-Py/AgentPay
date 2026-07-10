@@ -15,6 +15,7 @@
   3. **Stripe 双模法币支付与双花锁 (Phase 3)**：集成 Stripe 真实/Mock 支付网关；网关在 SQLite 注册 `consumed_stripe_sessions` 防双花状态机表并创建状态索引，支持 `TryLock` -> `Verify` -> `Commit` 锁，杜绝重启重放；前端实现弹窗轮询。
   4. **管理员仪表大屏与安全加固 (Phase 4)**：开发了 `admin.html` 暗黑霓虹管理看板；设计了受 `AdminAuthMiddleware` 保护的 `/admin/*` 特权管理与 `/debug/*` 数据库特权操作接口，生产环境下缺失 Secret 直接阻断熔断，保障库表安全；打通特权手动 retry 重试与 Stripe 缓存清空。
   5. **自动化 DevOps 部署与自愈校验 (Phase 5)**：编写了 `deploy.sh` 全自动化一键部署运维脚本。支持环境依赖防御检测、Anvil 节点就绪缓冲等待、自动化合约部署与 python 脚本高容错地址解析注入、Docker 编排启动、十秒健康轮询和 cURL 安全隔离测试断言。
+  6. **真通道链路与 ChainID 统一 (Phase 6)**：移除了前端薄弱的 402 HTTP 本地模拟机制，完全复用并深度重构 `sdk/client.ts`。实现真链上交易 `approve` 与 `lockChannel`，解析 `Receipt Log` 捕获分配的 `channelId` 并置入前端所有的 EIP-712 签名，后端严格防御 `Nonce` 与 `Gateway` 签名验证机制。统一四方微服务环境变量 `CHAIN_ID`。
 
 ---
 
@@ -41,6 +42,10 @@
 
 ### 2.4 DevOps 一键部署与 Shell 环境覆写
 - **Re-export 机制**：一键部署脚本 `deploy.sh` 自动提取 PaymentEscrow 的新部署合约地址并写入 `.env`，并在 Host 当前 Shell 中执行 `export ESCROW_ADDRESS=$ESCROW_ADDR` 重载环境变量。解决了 Docker-compose 启动容器时因 Host 宿主机残留 mock 变量优先级较高，导致新部署地址未被容器采信的 Bug。
+
+### 2.5 SDK 真链上通道重构 (True On-Chain Channels)
+- **状态管理收敛**：原生 HTML 前端摒弃了近两百行脆弱的 localStorage 本地伪造状态计算，通过 ESBuild 打包 `client.browser.js` 将 SDK 完全集成到浏览器环境。
+- **强验证拦截**：网关回流的结算凭证 `X-402-Settle-Receipt` 将受到 SDK 端的强制 `Nonce` 时序验证与 `Gateway Address` ECDSA 签名交叉恢复校验。阻止任何绕过链上注册伪造余额的可能性。
 
 ---
 
