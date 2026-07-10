@@ -83,6 +83,15 @@ contract PaymentEscrow {
         uint256 refundedAmount
     );
 
+    event ChannelSplitSettled(
+        bytes32 indexed channelId,
+        uint256 agentPayout,
+        uint256 modelPayout,
+        uint256 platformFee,
+        address modelProvider,
+        address treasury
+    );
+
     error InvalidAmount();
     error NotSettler();
     error InvalidStatus();
@@ -298,6 +307,84 @@ contract PaymentEscrow {
         }
 
         emit ChannelSettled(channelId, agentOwner, accumulatedAmount);
+    }
+
+    function splitSettle(
+        bytes32 channelId,
+        uint256 accumulatedAmount,
+        uint256 modelCost,
+        uint256 serviceFee,
+        address modelProvider,
+        address treasury,
+        uint16  platformBps,
+        uint256 holdAmount,
+        uint256 nonce,
+        uint256 expiration,
+        bytes   calldata signature
+    ) external onlySettler {
+        if (modelProvider == address(0) || treasury == address(0)) revert InvalidAddress();
+
+        ChannelLock storage lock = channels[channelId];
+        if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
+        if (block.timestamp > lock.expiresAt) revert ChannelExpired();
+        if (accumulatedAmount == 0 || accumulatedAmount > lock.maxAmount) revert InvalidAmount();
+        if (holdAmount != lock.maxAmount) revert InvalidAmount();
+
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            holdAmount,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            DOMAIN_SEPARATOR,
+            hashStruct
+        ));
+        address signer = ECDSA.recover(digest, signature);
+        if (signer != lock.payer) revert InvalidSignature();
+
+        uint256 platformFee = (accumulatedAmount * platformBps) / 10000;
+        if (modelCost + serviceFee + platformFee > accumulatedAmount) revert InvalidAmount();
+
+        lock.status = PaymentStatus.Released;
+        lock.settledAmount = accumulatedAmount;
+
+        if (modelCost > 0) {
+            paymentToken.safeTransfer(modelProvider, modelCost);
+        }
+        if (platformFee > 0) {
+            paymentToken.safeTransfer(treasury, platformFee);
+        }
+
+        address expectedTba = IERC6551Registry(erc6551Registry).account(
+            tbaImplementation,
+            bytes32(0),
+            block.chainid,
+            agentIdentityRegistry,
+            lock.agentId
+        );
+        if (expectedTba == address(0)) revert InvalidAddress();
+
+        uint256 agentPayout = accumulatedAmount - modelCost - platformFee;
+        if (agentPayout > 0) {
+            paymentToken.safeTransfer(expectedTba, agentPayout);
+        }
+
+        uint256 remainder = lock.maxAmount - accumulatedAmount;
+        if (remainder > 0) {
+            paymentToken.safeTransfer(lock.payer, remainder);
+        }
+
+        emit ChannelSplitSettled(
+            channelId,
+            agentPayout,
+            modelCost,
+            platformFee,
+            modelProvider,
+            treasury
+        );
     }
 
     function refundChannel(bytes32 channelId) external {

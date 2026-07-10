@@ -856,4 +856,442 @@ contract PaymentEscrowTest is Test {
 
         assertEq(stateAfter, stateBefore + 1);
     }
+
+    // 26. 测试 splitSettle 成功路径
+    function test_SplitSettleSuccess() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+        address modelProvider = address(0x4);
+        address treasury = address(0x5);
+
+        // 充值并授权
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        uint256 maxAmount = 1000 * 10**6;
+        uint256 duration = 3600;
+
+        // 锁定通道
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, maxAmount, duration);
+
+        // 线下生成 EIP-712 签名
+        uint256 accumulatedAmount = 600 * 10**6;
+        uint256 nonce = 123;
+        uint256 expiration = 3600;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            maxAmount,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        uint256 modelCost = 200 * 10**6;
+        uint256 serviceFee = 100 * 10**6;
+        uint16 platformBps = 1000; // 10%
+
+        uint256 expectedPlatformFee = (accumulatedAmount * platformBps) / 10000; // 60 USDC
+        uint256 expectedAgentPayout = accumulatedAmount - modelCost - expectedPlatformFee; // 340 USDC
+        uint256 expectedRemainder = maxAmount - accumulatedAmount; // 400 USDC
+
+        uint256 payerBalanceBefore = usdc.balanceOf(customPayer);
+        uint256 modelProviderBalanceBefore = usdc.balanceOf(modelProvider);
+        uint256 treasuryBalanceBefore = usdc.balanceOf(treasury);
+        uint256 agentOwnerBalanceBefore = usdc.balanceOf(agentOwner);
+
+        // 预期抛出事件
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit PaymentEscrow.ChannelSplitSettled(
+            channelId,
+            expectedAgentPayout,
+            modelCost,
+            expectedPlatformFee,
+            modelProvider,
+            treasury
+        );
+
+        // settler 结算
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            modelCost,
+            serviceFee,
+            modelProvider,
+            treasury,
+            platformBps,
+            maxAmount,
+            nonce,
+            expiration,
+            signature
+        );
+
+        // 校验通道状态
+        (
+            ,,,
+            uint256 channelSettledAmount,,
+            PaymentEscrow.PaymentStatus channelStatus
+        ) = escrow.channels(channelId);
+
+        assertEq(uint256(channelStatus), 2); // Released
+        assertEq(channelSettledAmount, accumulatedAmount);
+
+        // 校验余额
+        assertEq(usdc.balanceOf(modelProvider), modelProviderBalanceBefore + modelCost);
+        assertEq(usdc.balanceOf(treasury), treasuryBalanceBefore + expectedPlatformFee);
+        assertEq(usdc.balanceOf(agentOwner), agentOwnerBalanceBefore + expectedAgentPayout);
+        assertEq(usdc.balanceOf(customPayer), payerBalanceBefore + expectedRemainder);
+    }
+
+    // 27. 测试 splitSettle 零地址校验拦截
+    function test_SplitSettleZeroAddressReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+        address modelProvider = address(0x4);
+        address treasury = address(0x5);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 1000 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 600 * 10**6;
+        uint256 nonce = 123;
+        uint256 expiration = 3600;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            1000 * 10**6,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // modelProvider 是零地址时应该 Revert
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            200 * 10**6,
+            100 * 10**6,
+            address(0),
+            treasury,
+            1000,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+
+        // treasury 是零地址时应该 Revert
+        vm.expectRevert(PaymentEscrow.InvalidAddress.selector);
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            200 * 10**6,
+            100 * 10**6,
+            modelProvider,
+            address(0),
+            1000,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+    }
+
+    // 28. 测试 splitSettle 非 settler 拦截
+    function test_SplitSettleNonSettlerReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+        address modelProvider = address(0x4);
+        address treasury = address(0x5);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 1000 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 600 * 10**6;
+        uint256 nonce = 123;
+        uint256 expiration = 3600;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            1000 * 10**6,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // 非 settler 账户调用应该 Revert
+        vm.expectRevert(PaymentEscrow.NotSettler.selector);
+        vm.prank(customPayer);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            200 * 10**6,
+            100 * 10**6,
+            modelProvider,
+            treasury,
+            1000,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+    }
+
+    // 29. 测试 splitSettle 签名错误拦截
+    function test_SplitSettleInvalidSignatureReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+        address modelProvider = address(0x4);
+        address treasury = address(0x5);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 1000 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 600 * 10**6;
+        uint256 nonce = 123;
+        uint256 expiration = 3600;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            1000 * 10**6,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        // 用错误的私钥签名
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xBAD, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        vm.expectRevert(PaymentEscrow.InvalidSignature.selector);
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            200 * 10**6,
+            100 * 10**6,
+            modelProvider,
+            treasury,
+            1000,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+    }
+
+    // 30. 测试 splitSettle 超支拦截 (modelCost + serviceFee + platformFee > accumulatedAmount)
+    function test_SplitSettleExceedAccumulatedAmountReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+        address modelProvider = address(0x4);
+        address treasury = address(0x5);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 1000 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 600 * 10**6;
+        uint256 nonce = 123;
+        uint256 expiration = 3600;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            1000 * 10**6,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // modelCost = 400, serviceFee = 200, platformBps = 1000 (platformFee = 60).
+        // 400 + 200 + 60 = 660 > 600, 应该 Revert
+        vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            400 * 10**6,
+            200 * 10**6,
+            modelProvider,
+            treasury,
+            1000,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+    }
+
+    // 31. 测试 splitSettle 状态不正确拦截 (例如，二次结算)
+    function test_SplitSettleInvalidStatusReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+        address modelProvider = address(0x4);
+        address treasury = address(0x5);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 1000 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 600 * 10**6;
+        uint256 nonce = 123;
+        uint256 expiration = 3600;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            1000 * 10**6,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // 第一次成功结算
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            200 * 10**6,
+            100 * 10**6,
+            modelProvider,
+            treasury,
+            1000,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+
+        // 第二次结算，应该 Revert InvalidStatus
+        vm.expectRevert(PaymentEscrow.InvalidStatus.selector);
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            200 * 10**6,
+            100 * 10**6,
+            modelProvider,
+            treasury,
+            1000,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+    }
+
+    // 32. 测试 splitSettle 超时通道拦截
+    function test_SplitSettleExpiredReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+        address modelProvider = address(0x4);
+        address treasury = address(0x5);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 1000 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 600 * 10**6;
+        uint256 nonce = 123;
+        uint256 expiration = 3600;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            1000 * 10**6,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // 时间快进到超时
+        skip(3601);
+
+        vm.expectRevert(PaymentEscrow.ChannelExpired.selector);
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            200 * 10**6,
+            100 * 10**6,
+            modelProvider,
+            treasury,
+            1000,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+    }
 }
