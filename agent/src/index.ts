@@ -50,6 +50,31 @@ server.post('/agent/execute', async (request, reply) => {
     const llmApiKey = process.env.LLM_API_KEY || 'sk-225458@';
 
     try {
+      const systemPrompt = `你是一个顶级的 Web3 智能合约安全专家。请对用户提交的 Solidity 代码进行安全审计。
+要求必须返回以下格式的结构化 Markdown 审计报告：
+
+# 智能合约安全审计报告
+
+## 1. 漏洞概览
+- 🔴 高风险漏洞：[数量]
+- 🟡 中风险漏洞：[数量]
+- 🟢 低风险漏洞：[数量]
+
+## 2. 安全综合评分
+[分值，例如：85/100] 🛡️ [安全性评语]
+
+## 3. 漏洞详情与防范建议
+### [漏洞名称] ([风险级别])
+- **行号**: [大概行号或相关代码片段]
+- **原理说明**: [漏洞产生原因简述]
+- **防范建议**: [修复建议与安全代码示例]
+`;
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: input }
+      ];
+
       const llmResponse = await fetch(llmUrl, {
         method: 'POST',
         headers: {
@@ -58,8 +83,8 @@ server.post('/agent/execute', async (request, reply) => {
         },
         body: JSON.stringify({
           model: llmModel,
-          messages: [{ role: 'user', content: input }],
-          temperature: 0.7
+          messages: messages,
+          temperature: 0.2
         })
       });
       if (llmResponse.ok) {
