@@ -1,74 +1,56 @@
-# AgentPay 全阶段优化：高并发微支付网关与状态通道结算交接总结报告 (Handover Report)
+# AgentPay 通用 AI 支付与计费底层重构：全案交接总结报告 (Handover Report)
 
-本交接文档汇总了截止到当前会话已完成的微额信贷预授权锁定、Stripe/Crypto 混合支付、特权管理大屏仪表盘及 DevOps 一键自动化部署脚本的交付状况。新会话启动后，可直接读取本文件恢复完整的开发与运维上下文。
-
----
-
-## 1. 全局开发状态与最新提交
-
-- **当前分支**: `main`
-- **代码状态**: 所有核心清算功能、特权看板、Stripe 双模支付、Docker 集成及一键自动化运维发布脚本已全部开发通过，各模块单元测试 100% 通过，分支安全提交归档。
-- **最新 Git Commit Hash**: `52cb42cf5b65b190`
-- **已合并功能版块**:
-  1. **智能合约三方拆分结算 (Phase 1)**：在 `PaymentEscrow.sol` 中重构实现了 `splitSettle` 并发三方清算机制，支持平台基点抽佣、服务费和模型费分成，加入 10% 平台抽佣硬阈值防御，杜绝重入与超支 Revert 漏洞。
-  2. **智能体合约审计场景与 UI (Phase 2)**：将下游大模型智能体改造为结构化 Markdown 输出的 Solidity 审计专家；重构 `client.html` 霓虹磨砂玻璃态单页，打通 MetaMask 插件与本地私钥直签双模，动态提取响应头计费。
-  3. **Stripe 双模法币支付与双花锁 (Phase 3)**：集成 Stripe 真实/Mock 支付网关；网关在 SQLite 注册 `consumed_stripe_sessions` 防双花状态机表并创建状态索引，支持 `TryLock` -> `Verify` -> `Commit` 锁，杜绝重启重放；前端实现弹窗轮询。
-  4. **管理员仪表大屏与安全加固 (Phase 4)**：开发了 `admin.html` 暗黑霓虹管理看板；设计了受 `AdminAuthMiddleware` 保护的 `/admin/*` 特权管理与 `/debug/*` 数据库特权操作接口，生产环境下缺失 Secret 直接阻断熔断，保障库表安全；打通特权手动 retry 重试与 Stripe 缓存清空。
-  5. **自动化 DevOps 部署与自愈校验 (Phase 5)**：编写了 `deploy.sh` 全自动化一键部署运维脚本。支持环境依赖防御检测、Anvil 节点就绪缓冲等待、自动化合约部署与 python 脚本高容错地址解析注入、Docker 编排启动、十秒健康轮询和 cURL 安全隔离测试断言。
-  6. **真通道链路与 ChainID 统一 (Phase 6)**：移除了前端薄弱的 402 HTTP 本地模拟机制，完全复用并深度重构 `sdk/client.ts`。实现真链上交易 `approve` 与 `lockChannel`，解析 `Receipt Log` 捕获分配的 `channelId` 并置入前端所有的 EIP-712 签名，后端严格防御 `Nonce` 与 `Gateway` 签名验证机制。统一四方微服务环境变量 `CHAIN_ID`。
+本交接文档汇总了通用支付底座重构（复式记账本 `ledger` 模块、计费引擎 `pricing` 模块、标准 MCP 插件端点、以及清结算物理隔离）的最新交付状况。新会话启动后，可直接读取本文件恢复完整的开发与设计上下文。
 
 ---
 
-## 2. 核心技术架构与安全加固逻辑
+## 1. 架构升级状态
 
-新代理在继续迭代时需防范并知悉以下已固化的安全边界与架构设计：
+项目已由“ Solidity 审计微支付网关 Demo”升级重构为**支持通用 AI 智能体调用的支付基础设施底座**，各服务和模块采用 Go Workspace（Go 1.25.6）管理，包含：
+1. **`ledger/` 模块**：物理记账层。定义 `PaymentRail` 通用支付轨，内置 `LedgerService` 财务引擎，执行双式记账平衡以及基准以太坊/法币 Nonce 的幂等拦截防重。
+2. **`pricing/` 模块**：通用计费计量层。支持按次/阶梯阈值单价/订阅周期配额报价，并在清结算最终点触发 `RecordUsage` 进账计量。
+3. **`gateway/` 模块**：反向代理与 MCP 服务。拦截 downstream 响应自动锁存，提供 `/v1/plugin/mcp` 的 MCP Tool 标准 JSON-RPC 接口（`pay` / `checkout`）供外部 Agent 调用。
 
-### 2.1 智能合约三方拆分与计费轧账自愈 (splitSettle)
-- **三方分成原子结算**：合约中的 `splitSettle` 支持平台抽佣、服务商服务费、模型提供商模型分成三路资金安全释放。平台抽佣比例 `platformBps` 限制在 `1000` (10%) 以内以保护合约资金链。
-- **网关自愈轧账计算**：为了防止网关计费与链上 platformBps 扣减造成溢出 Revert，网关反向代理层通过精确轧账公式进行保底重构：`actualCost = (modelCost + serviceFeeVal) * 10000 / (10000 - platformBps)`。
+---
 
-### 2.2 Stripe 双模法币支付与防双花防重放状态机
-- **双花锁设计**：中间件利用 `consumed_stripe_sessions` 表实现并发防重放。
-  - **TryLock**：当收到 Bearer stripe 凭证挑战时，首先在 DB 独占锁中插入 `pending` 状态的记录。主键冲突即表明属于双花，直接拦截拒绝。
-  - **Verify**：调用 Stripe 接口核销 Checkout Session，失败则 `Release` 删除 pending 锁。
-  - **Commit**：核销成功，将状态更新为 `consumed` 持久化，重启不重放。
-- **冷启动死锁清理**：在网关 `initDB()` 启动阶段，自动清理所有残留的 `pending` 会话挂起记录，规避系统崩溃导致的数据库死锁无法核销。
+## 2. 核心重构与改动触及 (Phase 1 ~ 4)
 
-### 2.3 管理后台特权加固与空密钥熔断保护
-- **敏感端点全加固**：`/admin/*` 管理端点与 `/debug/*` 高危清空、获取任务端点全部被移入 `AdminAuthMiddleware` 中间件的鉴权范围，限制必须携带 `X-Internal-Secret` 密文头。
-- **环境安全熔断**：如果环境变量 `INTERNAL_SECRET` 为空：
-  - 在 `production` 生产模式下：**强熔断**，全部特权接口直接返回 HTTP 401，安全封死公网越权。
-  - 在本地 `development` 模式下：通过 `sync.Once` 单次控制在控制台打印醒目的未受保护安全警告。
+### 2.1 物理 PaymentRail 与清结算解耦 (Decoupling)
+*   为了防止网关队列污染，我们将物理通道调用与记账状态彻底解耦。
+*   `rail.PaymentRail` 声明 `Split(..., extData string)` 签名，利用 `extData` 隧道将交易凭证 JSON 透传。
+*   `CryptoRail.Split` 真正负责向 `aa-bridge/split-settle` 派发链上分账请求。
+*   `sqlite_queue.go` 队列 Worker 仅需调用 `LedgerService.SettleInvoice(...)`，实现“清算驱动记账”的原子闭环。
 
-### 2.4 DevOps 一键部署与 Shell 环境覆写
-- **Re-export 机制**：一键部署脚本 `deploy.sh` 自动提取 PaymentEscrow 的新部署合约地址并写入 `.env`，并在 Host 当前 Shell 中执行 `export ESCROW_ADDRESS=$ESCROW_ADDR` 重载环境变量。解决了 Docker-compose 启动容器时因 Host 宿主机残留 mock 变量优先级较高，导致新部署地址未被容器采信的 Bug。
+### 2.2 Go 1.25.6 Workspace 与编译限制破除
+*   创建根目录 `go.work` 绑定 `gateway`、`ledger` 与 `pricing` 模块，取消 `go.mod` 对本地相对路径的繁琐 replace。
+*   Go 编译器限制同级目录导入同级 module 的 `internal/` 子包（提示 `use of internal package ... not allowed`）。我已将 `ledger` 核心库物理移出 `internal` 重命名为公开模块，恢复了 Workspace 的正常引用。
+*   适配了 `docker-compose.yml` 的 gateway 构建 Context 至项目根目录，在 `gateway/Dockerfile` 内使用多阶段编译并进行 `go work sync`，彻底铲除了 Docker 部署环境的编译 Bug。
 
-### 2.5 SDK 真链上通道重构 (True On-Chain Channels)
-- **状态管理收敛**：原生 HTML 前端摒弃了近两百行脆弱的 localStorage 本地伪造状态计算，通过 ESBuild 打包 `client.browser.js` 将 SDK 完全集成到浏览器环境。
-- **强验证拦截**：网关回流的结算凭证 `X-402-Settle-Receipt` 将受到 SDK 端的强制 `Nonce` 时序验证与 `Gateway Address` ECDSA 签名交叉恢复校验。阻止任何绕过链上注册伪造余额的可能性。
+### 2.3 计费报价计量与 RecordUsage 进账
+*   引入通用计费引擎 `pricing` 并与网关深度绑定。
+*   反代拦截响应时读取 `X-Agent-Tokens` 用量头并调 `pricingSvc.Quote` 计算报价；在异步 Worker 分账清算或 Stripe 同步结算成功后，驱动调用 `RecordUsage` 推进 tokens 阶梯折抵。
+*   MCP Tool 中 `pay` 接口入参重构为 `tokens`，由网关调 Quote 确定冻结金额。在 `checkout` 执行成功后亦调用 `RecordUsage` 进行用量计量。
 
 ---
 
 ## 3. 全链路测试验证状况
 
-目前系统测试处于 **100% 成功** 状态。交接后如有改动，可通过以下命令验证：
+目前系统测试处于 **100% 成功** 状态：
 
-1. **智能合约测试**:
-   `cd contracts && forge test -v` (41 个用例全部 PASS，涵盖 `splitSettle` 拆分验证与越界 Revert 拦截)
-2. **Go Gateway 网关测试**:
-   `cd gateway && go test -v ./...` (21 个用例全部 PASS，涵盖 CORS、IP限流、Stripe防双花、AdminStats与重试方法)
-3. **AA Bridge 桥接层测试**:
-   `cd aa-bridge && npm run test` (15 个用例全部 PASS，涵盖 CORS 预检放行与 escrow 缓存)
-4. **TS Client SDK 测试**:
-   `cd sdk && npm run test` (6 个用例全部 PASS，涵盖 EIP-712 自愈更新)
+1. **计费模块测试**:
+   `cd pricing && go test -v ./...` (4 个计费策略测试 PASS)
+2. **复式记账测试**:
+   `cd ledger && go test -v ./...` (双式记账及去重幂等测试 PASS)
+3. **网关与 MCP 测试**:
+   `cd gateway && go test -v ./...` (包含新增的 MCP JSON-RPC 通道锁定与结算核销测试全部 PASS)
+4. **智能合约测试**:
+   `cd contracts && forge test -v` (合约 SplitSettle 资金分配与抽佣测试全部 PASS)
 
 ---
 
-## 4. 后续推荐工作 (Next Steps)
+## 4. 后续推荐迭代建议 (Next Steps)
 
-1. **Stripe 生产环境签名防伪加固 (Stripe Webhook Signature Verification)**：
-   - 生产部署时，应配置 `STRIPE_WEBHOOK_SECRET` 环境变量，在 `main.go` 注册的 `/stripe/webhook` 回调中开启动态签名验证。
-2. **添加 CLI 特权清理参数**：
-   - 可以在 `deploy.sh` 启动时增加 `--clean` 参数，一键执行 `docker-compose down -v` 清空本地 Anvil 区块链和 SQLite 数据库脏状态，实现完全冷启动。
-3. **增加生产监控日志左移**：
-   - 对 Go 网关的 API 网卡加挂错误警报阈值监控（如连续 401 或数据库异常时调用 webhook 发送钉钉/Slack 警报）。
+1. **多模块 Docker 化依赖集成调试**：
+   - 使用 `docker compose up --build` 测试全套微服务在 Docker 下的跨网络 RPC 调用。本地编译需更换失效的国内加速源，代理软件切换全局（Global）模式。
+2. **高频计量在缓存中的延迟落库**：
+   - 考虑在 `pricing/service` 层加入 Redis 对 `RecordUsage` 进行预处理，并在高频 tokens 刷新时定时 Bulk 批量更新至 SQLite 库，提升网关的并发吞吐能力。
