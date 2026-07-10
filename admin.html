@@ -636,9 +636,118 @@
             background: rgba(255, 0, 85, 0.1);
             transform: scale(1.15);
         }
-    </style>
+    
+        /* Smooth transitions */
+        body, div, header, section, input, button, table, tr, td, th, p, h1, h2, h3, span, label {
+            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        [data-theme="light"] {
+            --bg-color: #f1f3f9;
+            --panel-bg: rgba(255, 255, 255, 0.75);
+            --card-bg: rgba(255, 255, 255, 0.55);
+            --border-color: rgba(139, 92, 246, 0.15);
+            --border-hover: rgba(139, 92, 246, 0.35);
+            
+            --neon-violet: #7c3aed;
+            --neon-violet-glow: rgba(124, 58, 237, 0.15);
+            --neon-cyan: #0891b2;
+            --neon-cyan-glow: rgba(8, 145, 178, 0.15);
+            --neon-green: #16a34a;
+            --neon-green-glow: rgba(22, 163, 74, 0.15);
+            
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #64748b;
+        }
+
+        [data-theme="light"] body {
+            background-color: var(--bg-color);
+            background-image: radial-gradient(circle at top right, #e0e7ff 0%, #f1f3f9 60%, #eef2f6 100%) !important;
+        }
+
+        /* Readability overrides */
+        [data-theme="light"] input, [data-theme="light"] textarea {
+            background: rgba(255, 255, 255, 0.9) !important;
+            color: #0f172a !important;
+            border: 1px solid rgba(139, 92, 246, 0.3) !important;
+        }
+        [data-theme="light"] input::placeholder {
+            color: #94a3b8 !important;
+        }
+        [data-theme="light"] .stat-value, [data-theme="light"] .status-text {
+            text-shadow: none !important;
+            color: #0f172a !important;
+        }
+        [data-theme="light"] .stat-value.error {
+            color: #ef4444 !important;
+        }
+        [data-theme="light"] .dashboard-card {
+            box-shadow: 0 4px 15px rgba(139, 92, 246, 0.05) !important;
+        }
+        [data-theme="light"] table th {
+            background: rgba(139, 92, 246, 0.05) !important;
+            color: #0f172a !important;
+        }
+        [data-theme="light"] table td {
+            color: #475569 !important;
+        }
+
+        /* Fixed at bottom right to avoid top header status badge overlaps */
+        .floating-controls {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            display: flex;
+            gap: 0.5rem;
+            background: rgba(18, 12, 36, 0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            padding: 0.35rem;
+            border-radius: 9999px;
+            z-index: 10000;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        [data-theme="light"] .floating-controls {
+            background: rgba(255, 255, 255, 0.75);
+            border-color: rgba(139, 92, 246, 0.2);
+            box-shadow: 0 4px 20px rgba(139, 92, 246, 0.1);
+        }
+        .floating-controls .control-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-primary);
+            cursor: pointer;
+            font-family: var(--font-title, inherit);
+            font-weight: 600;
+            font-size: 0.85rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 9999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .floating-controls .control-btn:hover {
+            background: rgba(139, 92, 246, 0.2);
+            color: var(--neon-cyan);
+        }
+        [data-theme="light"] .floating-controls .control-btn:hover {
+            background: rgba(139, 92, 246, 0.1);
+            color: var(--neon-violet);
+        }
+    
+</style>
 </head>
 <body>
+
+    <div class="floating-controls">
+        <button id="langToggleBtn" class="control-btn">EN</button>
+        <button id="themeToggleBtn" class="control-btn">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M6.343 6.343l-.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z"></path></svg>
+        </button>
+    </div>
+    
     <div class="ambient-glow-1"></div>
     <div class="ambient-glow-2"></div>
     
@@ -647,7 +756,7 @@
         <header>
             <div class="header-logo-container">
                 <div class="header-logo">AP</div>
-                <h1>AgentPay <span class="gradient-text">- Admin Portal</span></h1>
+                <h1 id="appHeaderTitle"><span class="cyber-accent">AP</span> <span id="appHeaderTitleText" data-i18n="app-title">AgentPay - Admin Portal</span></h1>
             </div>
             <div class="glowing-badge">
                 <span class="status-dot"></span>
@@ -657,16 +766,16 @@
 
         <!-- Credentials Settings Card -->
         <section class="credentials-section">
-            <h2>API Gateway Connection</h2>
+            <h2 data-i18n="gateway-title">API Gateway Connection</h2>
             <div class="form-row">
                 <div class="form-group">
-                    <label for="gatewayUrlInput">Gateway URL</label>
+                    <label for="gatewayUrlInput" data-i18n="gateway-url">Gateway URL</label>
                     <div class="input-wrapper">
                         <input type="text" id="gatewayUrlInput" value="http://localhost:8080" class="neon-input">
                     </div>
                 </div>
                 <div class="form-group">
-                    <label for="adminSecretInput">Admin Secret Key</label>
+                    <label for="adminSecretInput" data-i18n="admin-secret">Admin Secret Key</label>
                     <div class="input-wrapper">
                         <input type="password" id="adminSecretInput" placeholder="输入管理密钥 (Admin Secret Key)" class="neon-input">
                     </div>
@@ -679,19 +788,19 @@
         <!-- KPI Metrics Grid -->
         <section class="kpi-section">
             <div class="kpi-card" style="--accent-color: var(--neon-cyan); --accent-glow: var(--neon-cyan-glow);">
-                <div class="kpi-label">Total Settled</div>
+                <div class="kpi-label" data-i18n="stat-settled">Total Settled</div>
                 <div class="kpi-value" id="totalSettledText">0.000000 USDC</div>
             </div>
             <div class="kpi-card" style="--accent-color: var(--neon-violet); --accent-glow: var(--neon-violet-glow);">
-                <div class="kpi-label">Platform Fees</div>
+                <div class="kpi-label" data-i18n="stat-fees">Platform Fees</div>
                 <div class="kpi-value" id="platformFeesText">0.000000 USDC</div>
             </div>
             <div class="kpi-card" style="--accent-color: var(--neon-green); --accent-glow: var(--neon-green-glow);">
-                <div class="kpi-label">Active Stripe Sessions</div>
+                <div class="kpi-label" data-i18n="stat-stripe">Active Stripe Sessions</div>
                 <div class="kpi-value" id="stripeSessionsText">0</div>
             </div>
             <div class="kpi-card" style="--accent-color: var(--neon-yellow); --accent-glow: var(--neon-yellow-glow);">
-                <div class="kpi-label">Success Rate</div>
+                <div class="kpi-label" data-i18n="stat-success">Success Rate</div>
                 <div class="kpi-value" id="successRateText">100.0%</div>
             </div>
         </section>
@@ -701,23 +810,23 @@
             <!-- Left panel: Lock Tasks Queue -->
             <section class="panel" style="--panel-accent: var(--neon-cyan); --panel-accent-glow: var(--neon-cyan-glow);">
                 <div class="panel-header">
-                    <h3>Active Lock Queue</h3>
-                    <button id="clearQueueBtn" class="clear-btn" style="--btn-border: var(--neon-rose); --btn-glow: var(--neon-rose-glow);">Clear Queue</button>
+                    <h3><span data-i18n="table-lock-title">Active Lock Queue</span></h3>
+                    <button id="clearQueueBtn" data-i18n="btn-clear-queue" class="clear-btn" style="--btn-border: var(--neon-rose); --btn-glow: var(--neon-rose-glow);">Clear Queue</button>
                 </div>
                 <div class="table-wrapper">
                     <table>
                         <thead>
                             <tr>
-                                <th>Lock ID</th>
-                                <th>Status</th>
-                                <th>Retry</th>
-                                <th>Date</th>
-                                <th>Actions</th>
+                                <th data-i18n="th-lock-id">Lock ID</th>
+                                <th data-i18n="th-status">Status</th>
+                                <th data-i18n="th-retry">Retry</th>
+                                <th data-i18n="th-date">Date</th>
+                                <th data-i18n="th-actions">Actions</th>
                             </tr>
                         </thead>
                         <tbody id="tasksTableBody">
                             <tr>
-                                <td colspan="5" style="text-align: center; color: var(--text-muted);">Loading tasks queue...</td>
+                                <td colspan="5" id="tasksLoadingCell" style="text-align: center; color: var(--text-muted);" data-i18n="loading-tasks">Loading tasks queue...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -727,8 +836,8 @@
             <!-- Right panel: Recent Stripe Sessions -->
             <section class="panel stripe-panel" style="--panel-accent: var(--neon-green); --panel-accent-glow: var(--neon-green-glow);">
                 <div class="panel-header">
-                    <h3>Recent Stripe Sessions</h3>
-                    <button id="clearStripeBtn" class="clear-btn" style="--btn-border: var(--neon-violet); --btn-glow: var(--neon-violet-glow);">Clear stripe sessions</button>
+                    <h3><span data-i18n="table-stripe-title">Recent Stripe Sessions</span></h3>
+                    <button id="clearStripeBtn" data-i18n="btn-clear-stripe" class="clear-btn" style="--btn-border: var(--neon-violet); --btn-glow: var(--neon-violet-glow);">Clear stripe sessions</button>
                 </div>
                 <ul class="session-list" id="stripeSessionsList">
                     <li style="color: var(--text-muted); font-size: 0.85rem; justify-content: center;">Loading stripe sessions...</li>
@@ -1008,7 +1117,8 @@
                 const sessionCount = currentStats.total_stripe_sessions || 0;
                 
                 if (sessionCount === 0) {
-                    stripeList.innerHTML = `<li style="color: var(--text-muted); font-size: 0.85rem; justify-content: center; border: 1px dashed var(--border-color);">No consumed sessions recorded</li>`;
+                    const noStripeMsg = currentLang === 'zh' ? '无被消费的 Stripe 会话记录' : 'No consumed sessions recorded';
+                    stripeList.innerHTML = `<li style="color: var(--text-muted); font-size: 0.85rem; justify-content: center; border: 1px dashed var(--border-color); font-weight: 500;">${noStripeMsg}</li>`;
                 } else {
                     stripeList.innerHTML = `<li style="color: var(--text-secondary); font-size: 0.85rem; justify-content: center; border: 1px dashed var(--border-color);">Total consumed Stripe sessions: ${sessionCount}</li>`;
                 }
@@ -1020,7 +1130,8 @@
             stripeList.innerHTML = '';
 
             if (!sessions || sessions.length === 0) {
-                stripeList.innerHTML = `<li style="color: var(--text-muted); font-size: 0.85rem; justify-content: center; border: 1px dashed var(--border-color);">No consumed sessions recorded</li>`;
+                const noStripeMsgClean = currentLang === 'zh' ? '无被消费的 Stripe 会话记录' : 'No consumed sessions recorded';
+                stripeList.innerHTML = `<li style="color: var(--text-muted); font-size: 0.85rem; justify-content: center; border: 1px dashed var(--border-color); font-weight: 500;">${noStripeMsgClean}</li>`;
                 return;
             }
 
@@ -1102,6 +1213,103 @@
                 showToast(`Failed to clear Stripe sessions: ${err.message}`, true);
             }
         });
-    </script>
+    
+        const i18nData = {
+            zh: {
+                "app-title": "AgentPay - 管理控制后台",
+                "gateway-title": "API 网关连接配置",
+                "gateway-url": "网关服务地址 (GATEWAY_URL)",
+                "admin-secret": "网关管理员密钥 (INTERNAL_SECRET)",
+                "stat-settled": "累计结算总额",
+                "stat-fees": "平台抽成费用",
+                "stat-stripe": "活跃 Stripe 会话",
+                "stat-success": "任务执行成功率",
+                "table-lock-title": "活跃锁定任务队列",
+                "table-stripe-title": "最近 Stripe 法币支付历史",
+                "btn-clear-queue": "清空锁定队列",
+                "btn-clear-stripe": "清空 Stripe 会话",
+                "th-lock-id": "锁定标识 (Lock ID)",
+                "th-status": "执行状态",
+                "th-retry": "重试次数",
+                "th-date": "创建日期",
+                "th-actions": "特权操作",
+                "loading-tasks": "正在加载锁定任务队列..."
+            },
+            en: {
+                "app-title": "AgentPay - Admin Portal",
+                "gateway-title": "API Gateway Connection",
+                "gateway-url": "Gateway URL",
+                "admin-secret": "Admin Secret Key",
+                "stat-settled": "Total Settled",
+                "stat-fees": "Platform Fees",
+                "stat-stripe": "Active Stripe Sessions",
+                "stat-success": "Success Rate",
+                "table-lock-title": "Active Lock Queue",
+                "table-stripe-title": "Recent Stripe Sessions",
+                "btn-clear-queue": "Clear Queue",
+                "btn-clear-stripe": "Clear stripe sessions",
+                "th-lock-id": "Lock ID",
+                "th-status": "Status",
+                "th-retry": "Retry",
+                "th-date": "Date",
+                "th-actions": "Actions",
+                "loading-tasks": "Loading tasks queue..."
+            }
+        };
+
+        let currentLang = localStorage.getItem('agentpay_lang') || 'zh';
+        function setLanguage(lang) {
+            currentLang = lang;
+            localStorage.setItem('agentpay_lang', lang);
+            document.getElementById('langToggleBtn').textContent = lang === 'zh' ? 'EN' : 'ZH';
+            
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (i18nData[lang] && i18nData[lang][key]) {
+                    el.textContent = i18nData[lang][key];
+                }
+            });
+
+            // Input Placeholder
+            const pText = lang === 'zh' ? '输入管理密钥 (Admin Secret Key)' : 'Enter Admin Secret Key';
+            if (document.getElementById('adminSecretInput')) {
+                document.getElementById('adminSecretInput').setAttribute('placeholder', pText);
+            }
+            if (document.getElementById('saveConfigBtn')) {
+                document.getElementById('saveConfigBtn').textContent = lang === 'zh' ? '保存配置' : 'Save Config';
+            }
+            if (document.getElementById('refreshBtn')) {
+                document.getElementById('refreshBtn').textContent = lang === 'zh' ? '手动刷新' : 'Refresh';
+            }
+            
+            // Trigger a minor table redraw for loading indicator if empty
+            const tasksBody = document.getElementById('tasksTableBody');
+            if (tasksBody && tasksBody.innerHTML.includes('Loading tasks queue') || tasksBody.innerHTML.includes('正在加载')) {
+                 tasksBody.innerHTML = `<td colspan="5" id="tasksLoadingCell" style="text-align: center; color: var(--text-muted); font-weight: 500;">${lang === 'zh' ? '正在加载锁定任务队列...' : 'Loading tasks queue...'}</td>`;
+            }
+        }
+
+        document.getElementById('langToggleBtn').addEventListener('click', () => {
+            setLanguage(currentLang === 'zh' ? 'en' : 'zh');
+            // Reload tables dynamically to translate runtime strings
+            if (typeof fetchLockQueue === 'function') fetchLockQueue();
+            if (typeof fetchStripeSessions === 'function') fetchStripeSessions();
+        });
+
+        document.getElementById('themeToggleBtn').addEventListener('click', () => {
+            const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', newTheme);
+            localStorage.setItem('agentpay_theme', newTheme);
+        });
+
+        // Initialize state
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedTheme = localStorage.getItem('agentpay_theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            setLanguage(currentLang);
+        });
+    
+</script>
 </body>
 </html>
