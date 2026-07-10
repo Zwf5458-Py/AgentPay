@@ -25,6 +25,24 @@ const accountsDb = new Map<
   { ownerAddress: string; salt: string; smartAccountAddress: string }
 >();
 
+const escrowConfigCache = new Map<
+  string,
+  {
+    tbaImplementation: string;
+    erc6551Registry: string;
+    agentIdentityRegistry: string;
+  }
+>();
+
+function parseChannelId(channelId: string): `0x${string}` {
+  const clean = channelId.startsWith('0x') ? channelId.slice(2) : channelId;
+  const is64Hex = clean.length === 64 && /^[0-9a-fA-F]{64}$/.test(clean);
+  if (is64Hex) {
+    return `0x${clean}`;
+  }
+  return pad(stringToHex(channelId), { size: 32 });
+}
+
 // Global Error Handler for Promise Rejections & Uncaught Errors
 server.setErrorHandler((error, request, reply) => {
   server.log.error(error);
@@ -277,34 +295,46 @@ server.post('/aa/settle', {
       let erc6551RegistryAddress: string;
       let agentIdentityRegistryAddress: string;
 
-      try {
-        tbaImplementationAddress = await publicClient.readContract({
-          address: resolvedEscrowAddress as `0x${string}`,
-          abi: escrowAbi,
-          functionName: 'tbaImplementation',
-        }) as string;
-        erc6551RegistryAddress = await publicClient.readContract({
-          address: resolvedEscrowAddress as `0x${string}`,
-          abi: escrowAbi,
-          functionName: 'erc6551Registry',
-        }) as string;
-        agentIdentityRegistryAddress = await publicClient.readContract({
-          address: resolvedEscrowAddress as `0x${string}`,
-          abi: escrowAbi,
-          functionName: 'agentIdentityRegistry',
-        }) as string;
+      const cached = escrowConfigCache.get(resolvedEscrowAddress);
+      if (cached) {
+        tbaImplementationAddress = cached.tbaImplementation;
+        erc6551RegistryAddress = cached.erc6551Registry;
+        agentIdentityRegistryAddress = cached.agentIdentityRegistry;
+      } else {
+        try {
+          tbaImplementationAddress = await publicClient.readContract({
+            address: resolvedEscrowAddress as `0x${string}`,
+            abi: escrowAbi,
+            functionName: 'tbaImplementation',
+          }) as string;
+          erc6551RegistryAddress = await publicClient.readContract({
+            address: resolvedEscrowAddress as `0x${string}`,
+            abi: escrowAbi,
+            functionName: 'erc6551Registry',
+          }) as string;
+          agentIdentityRegistryAddress = await publicClient.readContract({
+            address: resolvedEscrowAddress as `0x${string}`,
+            abi: escrowAbi,
+            functionName: 'agentIdentityRegistry',
+          }) as string;
 
-        if (devMode) {
-          if (!tbaImplementationAddress) tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
-          if (!erc6551RegistryAddress) erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
-          if (!agentIdentityRegistryAddress) agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+          if (devMode) {
+            if (!tbaImplementationAddress) tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
+            if (!erc6551RegistryAddress) erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
+            if (!agentIdentityRegistryAddress) agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+          }
+        } catch (err: any) {
+          if (!devMode) throw err;
+          // Mock 环境下 fallback 地址
+          tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
+          erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
+          agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
         }
-      } catch (err: any) {
-        if (!devMode) throw err;
-        // Mock 环境下 fallback 地址
-        tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
-        erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
-        agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+        escrowConfigCache.set(resolvedEscrowAddress, {
+          tbaImplementation: tbaImplementationAddress,
+          erc6551Registry: erc6551RegistryAddress,
+          agentIdentityRegistry: agentIdentityRegistryAddress,
+        });
       }
 
       // 2. 计算专属 TBA 账户地址
@@ -368,7 +398,7 @@ server.post('/aa/settle', {
       }
 
       // 5. 调用 batchSettle
-      const bytes32ChannelId = pad(stringToHex(channelId), { size: 32 });
+      const bytes32ChannelId = parseChannelId(channelId);
 
       if (devMode) {
         return {
@@ -701,33 +731,45 @@ server.post('/aa/split-settle', {
     let erc6551RegistryAddress: string;
     let agentIdentityRegistryAddress: string;
 
-    try {
-      tbaImplementationAddress = await publicClient.readContract({
-        address: resolvedEscrowAddress as `0x${string}`,
-        abi: escrowAbi,
-        functionName: 'tbaImplementation',
-      }) as string;
-      erc6551RegistryAddress = await publicClient.readContract({
-        address: resolvedEscrowAddress as `0x${string}`,
-        abi: escrowAbi,
-        functionName: 'erc6551Registry',
-      }) as string;
-      agentIdentityRegistryAddress = await publicClient.readContract({
-        address: resolvedEscrowAddress as `0x${string}`,
-        abi: escrowAbi,
-        functionName: 'agentIdentityRegistry',
-      }) as string;
+    const cached = escrowConfigCache.get(resolvedEscrowAddress);
+    if (cached) {
+      tbaImplementationAddress = cached.tbaImplementation;
+      erc6551RegistryAddress = cached.erc6551Registry;
+      agentIdentityRegistryAddress = cached.agentIdentityRegistry;
+    } else {
+      try {
+        tbaImplementationAddress = await publicClient.readContract({
+          address: resolvedEscrowAddress as `0x${string}`,
+          abi: escrowAbi,
+          functionName: 'tbaImplementation',
+        }) as string;
+        erc6551RegistryAddress = await publicClient.readContract({
+          address: resolvedEscrowAddress as `0x${string}`,
+          abi: escrowAbi,
+          functionName: 'erc6551Registry',
+        }) as string;
+        agentIdentityRegistryAddress = await publicClient.readContract({
+          address: resolvedEscrowAddress as `0x${string}`,
+          abi: escrowAbi,
+          functionName: 'agentIdentityRegistry',
+        }) as string;
 
-      if (devMode) {
-        if (!tbaImplementationAddress) tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
-        if (!erc6551RegistryAddress) erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
-        if (!agentIdentityRegistryAddress) agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+        if (devMode) {
+          if (!tbaImplementationAddress) tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
+          if (!erc6551RegistryAddress) erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
+          if (!agentIdentityRegistryAddress) agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+        }
+      } catch (err: any) {
+        if (!devMode) throw err;
+        tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
+        erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
+        agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
       }
-    } catch (err: any) {
-      if (!devMode) throw err;
-      tbaImplementationAddress = '0x2222222222222222222222222222222222222222';
-      erc6551RegistryAddress = '0x1111111111111111111111111111111111111111';
-      agentIdentityRegistryAddress = '0x3333333333333333333333333333333333333333';
+      escrowConfigCache.set(resolvedEscrowAddress, {
+        tbaImplementation: tbaImplementationAddress,
+        erc6551Registry: erc6551RegistryAddress,
+        agentIdentityRegistry: agentIdentityRegistryAddress,
+      });
     }
 
     // 2. 计算专属 TBA 账户地址
@@ -790,7 +832,7 @@ server.post('/aa/split-settle', {
     }
 
     // 5. 调用 splitSettle
-    const bytes32ChannelId = channelId.startsWith('0x') ? (channelId as `0x${string}`) : pad(stringToHex(channelId), { size: 32 });
+    const bytes32ChannelId = parseChannelId(channelId);
     const agentPayout = biAccumulated - biModelCost - platformFee;
 
     const payouts = {
