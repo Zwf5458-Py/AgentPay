@@ -10,6 +10,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <!-- Marked.js for Markdown Rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Ethers.js CDN for Wallet Integration -->
+    <script src="https://cdn.ethers.io/lib/ethers-5.6.umd.min.js" type="application/javascript"></script>
     <style>
         :root {
             --bg-color: #07040f;
@@ -779,16 +781,42 @@
                 <div class="card-header">
                     <h3 class="card-title">模拟钱包配置 (Wallet Simulation)</h3>
                 </div>
-                <div class="form-group">
+                <!-- Connection Mode Switch -->
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+                    <label style="margin-bottom: 0;">连接模式 (Connection Mode)</label>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <span class="template-tag active" id="modePrivateBtn" style="margin-bottom: 0; padding: 0.25rem 0.5rem; font-size: 0.75rem;">私钥模式 (Private Key)</span>
+                        <span class="template-tag" id="modeBrowserBtn" style="margin-bottom: 0; padding: 0.25rem 0.5rem; font-size: 0.75rem;">浏览器模式 (MetaMask)</span>
+                    </div>
+                </div>
+                <!-- Private Key Input Group -->
+                <div class="form-group" id="privateKeyGroup">
                     <label for="privateKey">以太坊私钥 / 助记词 (Private Key / Seed Phrase)</label>
                     <div class="input-wrapper">
                         <input type="password" id="privateKey" class="neon-input" placeholder="输入 64 位十六进制私钥或助记词进行模拟测试 (例如 0x3a4f...)" value="0x7f23a41b89cd3e54b67f18a29b01c345d67a8b9c0d1e2f3a4b5c6d7e8f901234">
                         <button type="button" id="toggleKeyBtn" class="input-action-btn">显示</button>
                     </div>
                 </div>
+                <!-- Browser Mode Status Note -->
+                <div class="form-group" id="browserWalletNote" style="display: none; padding: 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(7, 4, 15, 0.4); text-align: center;">
+                    <span style="font-size: 0.8rem; color: var(--text-secondary);">请确保已安装 MetaMask 插件，点击下方按钮唤起连接</span>
+                </div>
+                <!-- Active Connection Info (Derived indicators and Status light) -->
+                <div id="derivedAccountInfo" style="margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed rgba(255, 255, 255, 0.08); display: none;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; font-size: 0.8rem;">
+                        <span style="color: var(--text-secondary);">派生账户 (Derived Address):</span>
+                        <span id="derivedAddressText" style="font-family: var(--font-mono); color: var(--neon-cyan);">0x...</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem;">
+                        <span style="color: var(--text-secondary);">账户余额 (Balance):</span>
+                        <span id="derivedBalanceText" style="font-family: var(--font-mono); color: var(--neon-green);">10000.000000 USDC</span>
+                    </div>
+                </div>
+                <!-- Buttons Area -->
                 <div style="margin-top: 1rem; display: flex; gap: 0.75rem;">
-                    <button type="button" id="connectWalletBtn" class="secondary-neon-btn" style="flex: 1;">模拟连接钱包</button>
-                    <button type="button" id="disconnectWalletBtn" class="secondary-neon-btn" style="background: rgba(244, 63, 94, 0.05); border-color: rgba(244, 63, 94, 0.3); color: var(--neon-rose); display: none;">断开连接</button>
+                    <button type="button" id="connectPrivateKeyBtn" class="secondary-neon-btn" style="flex: 1;">Connect Private Key</button>
+                    <button type="button" id="connectBrowserWalletBtn" class="secondary-neon-btn" style="flex: 1; display: none;">Connect Browser Wallet</button>
+                    <button type="button" id="disconnectWalletBtn" class="secondary-neon-btn" style="background: rgba(244, 63, 94, 0.05); border-color: rgba(244, 63, 94, 0.3); color: var(--neon-rose); display: none; flex: 1;">断开连接 (Disconnect)</button>
                 </div>
             </div>
 
@@ -1035,7 +1063,8 @@ contract SafeEtherStore is ReentrancyGuard {
         // DOM Elements
         const privateKeyInput = document.getElementById('privateKey');
         const toggleKeyBtn = document.getElementById('toggleKeyBtn');
-        const connectWalletBtn = document.getElementById('connectWalletBtn');
+        const connectPrivateKeyBtn = document.getElementById('connectPrivateKeyBtn');
+        const connectBrowserWalletBtn = document.getElementById('connectBrowserWalletBtn');
         const disconnectWalletBtn = document.getElementById('disconnectWalletBtn');
         const executeAuditBtn = document.getElementById('executeAuditBtn');
         const statusDot = document.getElementById('statusDot');
@@ -1046,6 +1075,15 @@ contract SafeEtherStore is ReentrancyGuard {
         const reportStatusText = document.getElementById('reportStatusText');
         const templateTags = document.querySelectorAll('.template-tag');
 
+        // Mode switch elements
+        const modePrivateBtn = document.getElementById('modePrivateBtn');
+        const modeBrowserBtn = document.getElementById('modeBrowserBtn');
+        const privateKeyGroup = document.getElementById('privateKeyGroup');
+        const browserWalletNote = document.getElementById('browserWalletNote');
+        const derivedAccountInfo = document.getElementById('derivedAccountInfo');
+        const derivedAddressText = document.getElementById('derivedAddressText');
+        const derivedBalanceText = document.getElementById('derivedBalanceText');
+
         // Invoice Element IDs
         const modelCostVal = document.getElementById('modelCostVal');
         const serviceFeeVal = document.getElementById('serviceFeeVal');
@@ -1054,6 +1092,10 @@ contract SafeEtherStore is ReentrancyGuard {
 
         let isWalletConnected = false;
         let selectedTemplate = 'reentrancy';
+        let walletMode = 'private_key'; // 'private_key' | 'browser'
+        let activeWallet = null; // for Private Key: ethers.Wallet
+        let activeSigner = null; // for MetaMask: ethers.Signer
+        let activeProvider = null; // for MetaMask: ethers.providers.Web3Provider
 
         // Initialize marked options
         marked.setOptions({
@@ -1096,37 +1138,150 @@ contract SafeEtherStore is ReentrancyGuard {
             }
         });
 
-        // Connect Wallet Simulation
-        connectWalletBtn.addEventListener('click', () => {
-            if (privateKeyInput.value.trim() === '') {
+        // Mode Switching
+        modePrivateBtn.addEventListener('click', () => {
+            if (isWalletConnected && walletMode === 'private_key') return;
+            if (isWalletConnected) {
+                if (!confirm('切换模式将断开当前钱包连接，是否继续？')) return;
+                disconnectWallet();
+            }
+            walletMode = 'private_key';
+            modePrivateBtn.classList.add('active');
+            modeBrowserBtn.classList.remove('active');
+            showActiveModeButtons();
+        });
+
+        modeBrowserBtn.addEventListener('click', () => {
+            if (isWalletConnected && walletMode === 'browser') return;
+            if (isWalletConnected) {
+                if (!confirm('切换模式将断开当前钱包连接，是否继续？')) return;
+                disconnectWallet();
+            }
+            walletMode = 'browser';
+            modeBrowserBtn.classList.add('active');
+            modePrivateBtn.classList.remove('active');
+            showActiveModeButtons();
+        });
+
+        function showActiveModeButtons() {
+            if (walletMode === 'private_key') {
+                connectPrivateKeyBtn.style.display = 'block';
+                connectBrowserWalletBtn.style.display = 'none';
+                privateKeyGroup.style.display = 'block';
+                browserWalletNote.style.display = 'none';
+            } else {
+                connectPrivateKeyBtn.style.display = 'none';
+                connectBrowserWalletBtn.style.display = 'block';
+                privateKeyGroup.style.display = 'none';
+                browserWalletNote.style.display = 'block';
+            }
+        }
+
+        // Helper to update UI on successful connection
+        function updateWalletConnectionState(address, balance, mode) {
+            isWalletConnected = true;
+            walletMode = mode;
+            
+            statusDot.classList.add('connected');
+            if (mode === 'private_key') {
+                statusText.textContent = `已连接 (私钥模式): ${address.substring(0, 6)}...${address.substring(38)}`;
+            } else {
+                statusText.textContent = `已连接 (MetaMask): ${address.substring(0, 6)}...${address.substring(38)}`;
+            }
+            statusText.style.color = 'var(--neon-green)';
+            
+            derivedAddressText.textContent = address;
+            derivedBalanceText.textContent = `${parseFloat(balance).toFixed(6)} ${mode === 'browser' ? 'ETH' : 'USDC'}`;
+            derivedAccountInfo.style.display = 'block';
+            
+            connectPrivateKeyBtn.style.display = 'none';
+            connectBrowserWalletBtn.style.display = 'none';
+            disconnectWalletBtn.style.display = 'block';
+            executeAuditBtn.disabled = false;
+            executeAuditBtn.style.boxShadow = '0 0 15px var(--neon-violet-glow)';
+        }
+
+        // Connect Private Key Wallet
+        connectPrivateKeyBtn.addEventListener('click', () => {
+            const rawKey = privateKeyInput.value.trim();
+            if (rawKey === '') {
                 alert('请输入测试用以太坊私钥或助记词！');
                 return;
             }
-            isWalletConnected = true;
-            statusDot.classList.add('connected');
-            statusText.textContent = '已连接到模拟钱包 (Simulated Connected)';
-            statusText.style.color = 'var(--neon-green)';
-            
-            connectWalletBtn.style.display = 'none';
-            disconnectWalletBtn.style.display = 'block';
-            executeAuditBtn.disabled = false;
-            
-            // Focus visually
-            executeAuditBtn.style.boxShadow = '0 0 15px var(--neon-violet-glow)';
+
+            // Validate private key (64 hex characters, optional 0x prefix) or mnemonic
+            const hexReg = /^(0x)?[0-9a-fA-F]{64}$/;
+            try {
+                if (hexReg.test(rawKey)) {
+                    const key = rawKey.startsWith('0x') ? rawKey : '0x' + rawKey;
+                    activeWallet = new ethers.Wallet(key);
+                } else if (rawKey.split(' ').length >= 12) {
+                    activeWallet = ethers.Wallet.fromMnemonic(rawKey);
+                } else {
+                    alert('无效的私钥格式！私钥必须为 64 位十六进制字符，或 12 个单词的助记词。');
+                    return;
+                }
+                
+                const address = activeWallet.address;
+                // Query balance (chain query if connected, or default mock values in mock mode)
+                let balance = "10000.000000"; // default mock value
+                updateWalletConnectionState(address, balance, "private_key");
+            } catch (e) {
+                alert('连接钱包失败：' + e.message);
+            }
         });
 
-        // Disconnect Wallet Simulation
-        disconnectWalletBtn.addEventListener('click', () => {
+        // Connect Browser Wallet (MetaMask)
+        connectBrowserWalletBtn.addEventListener('click', async () => {
+            if (typeof window.ethereum === 'undefined') {
+                alert('未检测到 MetaMask 浏览器钱包，请先安装！');
+                return;
+            }
+            try {
+                const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                if (accounts.length === 0) {
+                    alert('未选择任何账户！');
+                    return;
+                }
+                activeProvider = new ethers.providers.Web3Provider(window.ethereum);
+                activeSigner = activeProvider.getSigner();
+                const address = await activeSigner.getAddress();
+                
+                let balance = "10000.000000";
+                try {
+                    const ethBalance = await activeProvider.getBalance(address);
+                    balance = ethers.utils.formatEther(ethBalance);
+                } catch (e) {
+                    console.warn("无法获取链上余额，已使用模拟余额", e);
+                }
+                
+                updateWalletConnectionState(address, balance, "browser");
+            } catch (error) {
+                alert('连接浏览器钱包失败: ' + error.message);
+            }
+        });
+
+        // Disconnect Wallet Function
+        function disconnectWallet() {
             isWalletConnected = false;
+            activeWallet = null;
+            activeSigner = null;
+            activeProvider = null;
+            
             statusDot.classList.remove('connected');
             statusText.textContent = '模拟钱包未连接 (Disconnected)';
             statusText.style.color = 'var(--text-secondary)';
             
-            connectWalletBtn.style.display = 'block';
+            derivedAccountInfo.style.display = 'none';
+            
             disconnectWalletBtn.style.display = 'none';
+            showActiveModeButtons();
+            
             executeAuditBtn.disabled = true;
             executeAuditBtn.style.boxShadow = 'none';
-        });
+        }
+
+        disconnectWalletBtn.addEventListener('click', disconnectWallet);
 
         // Select templates
         templateTags.forEach(tag => {
