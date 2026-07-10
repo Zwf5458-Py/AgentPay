@@ -55,6 +55,9 @@ func TestX402Middleware_NoToken(t *testing.T) {
 		{"X-402-Chain", "base-sepolia"},
 		{"X-402-Payment-Address", escrowAddr},
 		{"X-402-Version", "1"},
+		{"X-402-Platform-Bps", "10"},
+		{"X-402-Model-Provider", "0x90F79bf6EB2c4f870365E785982E1f101E93b906"},
+		{"X-402-Payment-Methods", "crypto-channel,fiat-stripe"},
 		{"Content-Type", "application/json"},
 	}
 
@@ -77,6 +80,56 @@ func TestX402Middleware_NoToken(t *testing.T) {
 	}
 	if !strings.Contains(resp.Message, "micropayment required") {
 		t.Errorf("Expected message to contain 'micropayment required', got %q", resp.Message)
+	}
+}
+
+func TestX402Middleware_NoToken_EnvVars(t *testing.T) {
+	// 设置环境变量以便测试
+	escrowAddr := "0xTestEscrowAddress123"
+	os.Setenv("ESCROW_ADDRESS", escrowAddr)
+	os.Setenv("PLATFORM_BPS", "25")
+	os.Setenv("MODEL_PROVIDER_ADDRESS", "0xProviderAddressABC")
+	defer func() {
+		os.Unsetenv("ESCROW_ADDRESS")
+		os.Unsetenv("PLATFORM_BPS")
+		os.Unsetenv("MODEL_PROVIDER_ADDRESS")
+	}()
+
+	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/agent/execute", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	// 验证 402 状态码
+	if rr.Code != http.StatusPaymentRequired {
+		t.Errorf("Expected status code %d, got %d", http.StatusPaymentRequired, rr.Code)
+	}
+
+	// 验证 Header 注入
+	headers := []struct {
+		key   string
+		value string
+	}{
+		{"X-402-Price", "1000"},
+		{"X-402-Currency", "USDC"},
+		{"X-402-Chain", "base-sepolia"},
+		{"X-402-Payment-Address", escrowAddr},
+		{"X-402-Version", "1"},
+		{"X-402-Platform-Bps", "25"},
+		{"X-402-Model-Provider", "0xProviderAddressABC"},
+		{"X-402-Payment-Methods", "crypto-channel,fiat-stripe"},
+		{"Content-Type", "application/json"},
+	}
+
+	for _, h := range headers {
+		got := rr.Header().Get(h.key)
+		if got != h.value {
+			t.Errorf("Header %s: expected %q, got %q", h.key, h.value, got)
+		}
 	}
 }
 
@@ -468,7 +521,7 @@ func TestCORS_OPTIONS(t *testing.T) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-Secret")
-			w.Header().Set("Access-Control-Expose-Headers", "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof")
+			w.Header().Set("Access-Control-Expose-Headers", "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof, X-402-Platform-Bps, X-402-Model-Provider, X-402-Payment-Methods, X-402-Hold-Amount, X-402-Settle-Receipt, X-402-Currency, X-402-Chain, X-402-Version")
 			
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(http.StatusOK)
@@ -495,7 +548,7 @@ func TestCORS_OPTIONS(t *testing.T) {
 		"Access-Control-Allow-Origin":  "*",
 		"Access-Control-Allow-Methods": "POST, GET, OPTIONS, PUT, DELETE",
 		"Access-Control-Allow-Headers": "Content-Type, Authorization, X-Internal-Secret",
-		"Access-Control-Expose-Headers": "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof",
+		"Access-Control-Expose-Headers": "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof, X-402-Platform-Bps, X-402-Model-Provider, X-402-Payment-Methods, X-402-Hold-Amount, X-402-Settle-Receipt, X-402-Currency, X-402-Chain, X-402-Version",
 	}
 
 	for key, expectedValue := range expectedHeaders {

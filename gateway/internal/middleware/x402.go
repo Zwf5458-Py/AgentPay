@@ -208,6 +208,15 @@ func trigger402(w http.ResponseWriter) {
 		escrowAddr = "0x5FbDB2315678afecb367f032d93F642f64180aa3" // 默认回退 Mock 地址
 	}
 
+	platformBps := os.Getenv("PLATFORM_BPS")
+	if platformBps == "" {
+		platformBps = "10"
+	}
+	modelProvider := os.Getenv("MODEL_PROVIDER_ADDRESS")
+	if modelProvider == "" {
+		modelProvider = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+	}
+
 	w.Header().Set("X-402-Price", "1000")
 	w.Header().Set("X-402-Currency", "USDC")
 	w.Header().Set("X-402-Chain", "base-sepolia")
@@ -215,6 +224,9 @@ func trigger402(w http.ResponseWriter) {
 	w.Header().Set("X-402-Version", "1")
 	w.Header().Set("X-402-Payment-Type", "channel")
 	w.Header().Set("X-402-Hold-Amount", "50000")
+	w.Header().Set("X-402-Platform-Bps", platformBps)
+	w.Header().Set("X-402-Model-Provider", modelProvider)
+	w.Header().Set("X-402-Payment-Methods", "crypto-channel,fiat-stripe")
 	w.Header().Set("Content-Type", "application/json")
 
 	w.WriteHeader(http.StatusPaymentRequired) // 402
