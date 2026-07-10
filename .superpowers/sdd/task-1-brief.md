@@ -1,31 +1,25 @@
-# Task 1 Brief: Extend SQLite Queue & Register Gateway Admin Routes
+# Task 1 Brief: Refine Docker Compose & Add deploy.sh Shell Orchestrator
 
-**Goal**: Expose `/admin/*` API endpoints in Go Gateway to fetch statistics, retrieve the complete task queue, trigger manual task retry, and clear Stripe sessions. Secure these endpoints using `X-Internal-Secret` middleware validation.
+**Goal**: Prepare `docker-compose.yml` to read variables dynamically from `.env` and write the initial template for `deploy.sh` to check dependencies and spin up Anvil.
 
 **Files**:
-- Modify: `gateway/internal/queue/sqlite_queue.go`
-- Modify: `gateway/cmd/gateway/main.go`
-- Modify: `gateway/internal/queue/sqlite_queue_test.go`
+- Modify: `docker-compose.yml`
+- Create: `deploy.sh`
 
 **Instructions**:
-1. Open `gateway/internal/queue/sqlite_queue.go`.
-2. Add `GetAdminStats() (map[string]interface{}, error)` on `QueueManager`:
-   - Query `SELECT TOTAL(accumulated_amount) FROM settle_tasks WHERE status = 'success'`.
-   - Query `SELECT TOTAL(accumulated_amount * platform_bps / 10000) FROM settle_tasks WHERE status = 'success'`.
-   - Query `SELECT COUNT(*) FROM consumed_stripe_sessions`.
-   - Query task status counts for `'success'`, `'pending'`, and `'failed'`.
-   - Return map with keys: `total_settled_usdc`, `total_platform_fees_usdc`, `total_stripe_sessions`, `success_tasks`, `pending_tasks`, `failed_tasks`.
-3. Add `ManualRetryTask(lockID string) error` on `QueueManager`:
-   - Execute: `UPDATE settle_tasks SET status = 'pending', retry_count = 0, next_retry_at = ? WHERE lock_id = ?`.
-4. Add `ClearStripeSessions() error` on `QueueManager`:
-   - Execute: `DELETE FROM consumed_stripe_sessions`.
-5. Open `gateway/cmd/gateway/main.go`.
-6. Add `AdminAuthMiddleware(next http.Handler) http.Handler`:
-   - Check if `INTERNAL_SECRET` env var is configured. If set, check if header `X-Internal-Secret` matches it. If not, return HTTP 401 Unauthorized.
-7. Register routes under `/admin` routing group (with `CORSMiddleware` and `AdminAuthMiddleware` applied):
-   - `GET /admin/stats`: calls `queueMgr.GetAdminStats()`.
-   - `GET /admin/tasks`: returns all tasks (e.g. `SELECT lock_id, proof, agent_owner, escrow_address, status, retry_count, created_at FROM settle_tasks ORDER BY id DESC`). Define `queueMgr.GetAllTasks()` returning task objects.
-   - `POST /admin/tasks/retry`: parses `{ "lock_id": "..." }`, calls `queueMgr.ManualRetryTask(...)`.
-   - `POST /admin/stripe-sessions/clear`: calls `queueMgr.ClearStripeSessions()`.
-8. Update `gateway/internal/queue/sqlite_queue_test.go` to cover these new helper methods and test that manual retry correctly updates tasks.
-9. Commit changes.
+1. Open `docker-compose.yml`.
+2. Update environment variables in the YAML services to fallback to environment variables or local `.env` values:
+   - `gateway` service environment should read `ESCROW_ADDRESS=${ESCROW_ADDRESS}` and `INTERNAL_SECRET=${INTERNAL_SECRET}` and `STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}`.
+   - `aa-bridge` service environment should read `ESCROW_ADDRESS=${ESCROW_ADDRESS}` and `INTERNAL_SECRET=${INTERNAL_SECRET}` and `PRIVATE_KEY=${PRIVATE_KEY}`.
+3. Create `deploy.sh` in the root workspace directory.
+4. Inside `deploy.sh`:
+   - Add prerequisite checks: check if `docker` is running, if `docker-compose` is available, and if `forge` is installed.
+   - If `.env` doesn't exist, create it from a template, generating a random `INTERNAL_SECRET` and writing default test values:
+     - `INTERNAL_SECRET=testsecret_xxx` (randomized)
+     - `PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80` (Anvil Account 0)
+     - `STRIPE_SECRET_KEY=mock_sk_test`
+     - `GATEWAY_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d` (Anvil Account 1 for gateway settler)
+   - Add logic to spin up Anvil:
+     `docker-compose up -d anvil`
+   - Wait for Anvil to be ready by sending cURL JSON-RPC requests to `http://localhost:8545` in a loop (up to 15 seconds) until it returns successful block number or version.
+5. Commit changes.

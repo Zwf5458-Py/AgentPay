@@ -1,35 +1,27 @@
-# Task 3 Brief: Connect API calls and Implement Manual Retry in admin.html
+# Task 3 Brief: Compile/Boot docker images & run Gateway health checks
 
-**Goal**: Bind client-side JavaScript in `admin.html` to real API endpoints of Go Gateway, implementing authorization, real-time fetching, formatting stats, manual retry triggers, and database flush actions.
+**Goal**: Implement docker image building, orchestration of the full stack (Gateway, AA Bridge, Agent helper), wait loop for Gateway responsiveness, and automated cURL health checks.
 
 **Files**:
-- Modify: `admin.html`
+- Modify: `deploy.sh`
 
 **Instructions**:
-1. Open `admin.html`.
-2. Extract interactive UI elements:
-   - Config inputs: Gateway Origin (id `gatewayUrlInput`), Admin Secret Key (id `adminSecretInput`).
-   - Refresh button: id `refreshBtn`.
-   - Clear Queue button: id `clearQueueBtn`.
-   - Clear Stripe Sessions button: id `clearStripeBtn`.
-   - KPI metrics text elements:
-     - `total_settled_usdc` (id `totalSettledText`)
-     - `total_platform_fees_usdc` (id `platformFeesText`)
-     - `total_stripe_sessions` (id `stripeSessionsText`)
-     - `success_rate` (calculated as `success_tasks / (success_tasks + failed_tasks) * 100` or from gateway, id `successRateText`).
-   - Table bodies: Tasks Queue table body (id `tasksTableBody`), Stripe Sessions list container (id `stripeSessionsList`).
-3. Implement `fetchStats()`, `fetchTasks()`, and `fetchStripeSessions()`:
-   - Make HTTP requests to Gateway endpoint URL (e.g. `${gatewayOrigin}/admin/stats`).
-   - Attach `X-Internal-Secret` header containing the value of `adminSecretInput`.
-   - Display a visual loading indicator or toast notification when fetching.
-   - Format micro-units to USDC string (dividing by `1e6` to output 6 decimal places).
-   - Render tasks in list. Match statuses with correct CSS tags:
-     - `success`: green glow
-     - `pending`/`retrying`: orange glow
-     - `failed`: red glow
-   - For non-success tasks, add a `[重试 (Retry)]` button calling `POST /admin/tasks/retry` passing `{ "lock_id": lockId }`. Refresh dashboard after completion.
-4. Bind `clearQueueBtn` and `clearStripeBtn` to call Gateway debug clears (e.g. `/debug/tasks/clear` and `/admin/stripe-sessions/clear` respectively). Confirm before executing.
-5. In addition to instructions:
-   - Adjust `--neon-violet` style to `#ff00ff` to precisely conform with Spec guidelines.
-   - Adjust stripe clear button text from "Clear Sessions" to "Clear stripe sessions" to conform with Spec guidelines.
-6. Commit changes.
+1. Open `deploy.sh`.
+2. Right after updating `.env` with the escrow address:
+   - Print: "Building and starting services via Docker Compose..."
+   - Run: `docker-compose up -d --build aa-bridge agent gateway` (Make sure to support both `docker-compose` and `docker compose` depending on the detected command from Task 1).
+   - Wait/sleep 5 seconds (to allow Go server to bind and start listening).
+3. Implement Gateway health checks:
+   - Print: "Verifying Go Gateway health & API access security..."
+   - Target URL: `http://localhost:8080/admin/stats`
+   - Test 1 (Unauthorized block): Send a cURL query without the `X-Internal-Secret` header. Confirm it returns status code `401`. If it returns something else, print failure and exit 1.
+   - Test 2 (Authorized stats check): Send a cURL query with header `X-Internal-Secret: $INTERNAL_SECRET` (loaded from `.env`). Confirm it returns status code `200` and contains the expected JSON structure (like `"success_tasks"` or similar keys). If it fails or returns error, print failure and exit 1.
+4. Render successful deployment guidelines:
+   - Print a nice ASCII banner "AgentPay Deployed successfully!"
+   - Output links:
+     - Client panel: `file:///Users/oraclez/code/AgentPay/client.html`
+     - Admin dashboard: `file:///Users/oraclez/code/AgentPay/admin.html`
+     - Escrow address: `$ESCROW_ADDR`
+     - Gateway URL: `http://localhost:8080`
+     - Admin Secret: `$INTERNAL_SECRET`
+5. Commit changes.

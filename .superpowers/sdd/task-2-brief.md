@@ -1,27 +1,38 @@
-# Task 2 Brief: Create admin.html UI Layout & Design System
+# Task 2 Brief: Automate Foundry contract deployment & address extraction
 
-**Goal**: Create a static web interface `admin.html` with a premium dark neon glassmorphism style consistent with `client.html`.
+**Goal**: Implement contract compilation/broadcast deployment, parse the deployed `PaymentEscrow` address, and dynamically inject it into `.env`.
 
 **Files**:
-- Create: `admin.html`
+- Modify: `deploy.sh`
 
 **Instructions**:
-1. Scaffold `admin.html` in the repository root directory.
-2. In the style system:
-   - Fonts: Import Inter and Outfit google fonts.
-   - Core Styling Variables: Define colors for deep dark purple/black backgrounds (`#07040f`), border glows, neon cyan (`#00f0ff`), neon violet (`#ff00ff`), neon green/emerald (`#00ff66`), neon rose (`#ff0055`), and warnings/yellow (`#ffaa00`).
-   - Use glassmorphic card design (`backdrop-filter: blur(15px); background: rgba(20, 10, 35, 0.45)`).
-3. DOM Structure:
-   - Header: Displaying "AgentPay - Admin Portal" and a Connection Status Badge with an indicator light.
-   - Credentials Card: Input box for API Gateway URL (default `http://localhost:8080`) and Admin Secret Key (type `password`).
-   - KPI Dashboard block:
-     - 4 Glowing Cards:
-       - Total Settled (USDC)
-       - Total Platform Fees (USDC)
-       - Active Stripe Sessions
-       - Success Rate (%)
-   - Split view Layout:
-     - Left panel (Tasks Queue): A Table exhibiting Lock ID, Status, Retry count, Date, and Actions column. Provide a "Clear Queue" button at table header.
-     - Right panel (Stripe Sessions): A list displaying nuclear-styled consumed Stripe Session IDs and a "Clear stripe sessions" button at list header.
-4. Render static mocked values in both KPI blocks and tables as placeholders to evaluate visual correctness.
+1. Open `deploy.sh`.
+2. Right after the Anvil connection polling loop finishes successfully:
+   - Print: "Deploying PaymentEscrow contracts to local Anvil..."
+   - Change directory to `contracts/`.
+   - Compile and deploy contracts:
+     `forge script script/Deploy.s.sol:DeployScript --rpc-url http://localhost:8545 --broadcast`
+   - Check if the script succeeded. If it fails, report error and exit 1.
+3. Extract the deployed address from Foundry broadcast:
+   - Check if `contracts/broadcast/Deploy.s.sol/31337/run-latest.json` exists.
+   - Run a Python inline snippet (or awk/grep) to parse this JSON file and print the `contractAddress` of `PaymentEscrow`. Specifically:
+     ```bash
+     ESCROW_ADDR=$(python3 -c "
+     import json, sys
+     try:
+         with open('contracts/broadcast/Deploy.s.sol/31337/run-latest.json') as f:
+             data = json.load(f)
+             for tx in data.get('transactions', []):
+                 if tx.get('contractName') == 'PaymentEscrow':
+                     print(tx['contractAddress'])
+                     sys.exit(0)
+     except Exception as e:
+         print('', end='')
+         sys.exit(1)
+     ")
+     ```
+   - Assert that `ESCROW_ADDR` is not empty and matches a valid 42-character Ethereum address format (starts with `0x` and has length 42). If invalid, print error and exit 1.
+4. Inject the address into `.env`:
+   - Replace the `ESCROW_ADDRESS=...` line in the root `.env` file with `ESCROW_ADDRESS=$ESCROW_ADDR`.
+   - Print: "Extracted PaymentEscrow address: $ESCROW_ADDR and updated .env".
 5. Commit changes.
