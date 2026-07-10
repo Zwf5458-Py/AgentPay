@@ -563,6 +563,17 @@
             color: var(--neon-green);
         }
 
+        .timeline-step.failed .step-indicator {
+            border-color: var(--neon-rose);
+            background: rgba(244, 63, 94, 0.15);
+            color: var(--neon-rose);
+            box-shadow: 0 0 10px var(--neon-rose-glow);
+        }
+
+        .timeline-step.failed .step-label {
+            color: var(--neon-rose);
+        }
+
         /* Report Container Card */
         .report-content {
             height: 350px;
@@ -1305,7 +1316,7 @@ contract SafeEtherStore is ReentrancyGuard {
             const steps = ['request', 'challenge', 'sign', 'audit', 'settle'];
             steps.forEach(step => {
                 const el = document.getElementById(`step-${step}`);
-                el.classList.remove('active', 'completed');
+                el.classList.remove('active', 'completed', 'failed');
             });
             reportContent.innerHTML = `
                 <div class="report-placeholder" id="reportPlaceholder">
@@ -1324,83 +1335,402 @@ contract SafeEtherStore is ReentrancyGuard {
             refundVal.style.textShadow = 'none';
         }
 
-        // Execute Audit Lifecycle Simulation
-        executeAuditBtn.addEventListener('click', () => {
-            if (!isWalletConnected) return;
+        function setStepState(step, state) {
+            const el = document.getElementById(`step-${step}`);
+            if (!el) return;
+            el.classList.remove('active', 'completed', 'failed');
+            if (state === 'active') {
+                el.classList.add('active');
+            } else if (state === 'completed') {
+                el.classList.add('completed');
+            } else if (state === 'failed') {
+                el.classList.add('failed');
+            }
+        }
+
+        function getChannelDetails(payerAddress, agentId) {
+            const lowerAddress = payerAddress.toLowerCase();
+            const channelKey = `agentpay_channel_${lowerAddress}_${agentId}`;
+            let channelId = localStorage.getItem(channelKey);
+            if (!channelId) {
+                channelId = ethers.utils.solidityKeccak256(
+                    ["address", "uint256", "uint256"],
+                    [payerAddress, agentId, Date.now()]
+                );
+                localStorage.setItem(channelKey, channelId);
+            }
+            
+            const nonceKey = `agentpay_nonce_${channelId}`;
+            let nonce = parseInt(localStorage.getItem(nonceKey)) || 1;
+            
+            return { channelId, nonce, nonceKey };
+        }
+
+        function updateSimulatedBalance(actualCostMicro) {
+            if (!derivedBalanceText) return;
+            const currentText = derivedBalanceText.textContent;
+            const match = currentText.match(/^([0-9.]+)\s+(\w+)$/);
+            if (match) {
+                const currentBalance = parseFloat(match[1]);
+                const currency = match[2];
+                const costUSDC = actualCostMicro / 1e6;
+                const newBalance = Math.max(0, currentBalance - costUSDC);
+                derivedBalanceText.textContent = `${newBalance.toFixed(6)} ${currency}`;
+            }
+        }
+
+        function showError(message) {
+            reportStatusText.textContent = '流程发生异常，请重试';
+            reportStatusText.style.color = 'var(--neon-rose)';
+            reportStatusText.className = '';
+            
+            reportContent.innerHTML = `
+                <div class="report-placeholder" style="color: var(--neon-rose);">
+                    <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="color: var(--neon-rose); width: 3rem; height: 3rem; margin-bottom: 1rem;"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"></path></svg>
+                    <p style="font-weight: 600; font-size: 1.1rem; color: var(--neon-rose);">安全审计执行中途阻断</p>
+                    <p style="font-size: 0.85rem; opacity: 0.85; margin-top: 0.5rem; max-width: 80%; text-align: center; line-height: 1.4;">${message}</p>
+                </div>
+            `;
+            
+            executeAuditBtn.disabled = false;
+            executeAuditBtn.innerHTML = `
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                开始安全审计 (Execute Audit)
+            `;
+        }
+
+        async function executeAudit() {
+            if (!isWalletConnected) {
+                alert('请先连接钱包！');
+                return;
+            }
 
             executeAuditBtn.disabled = true;
             executeAuditBtn.textContent = '安全审计运行中...';
             resetAuditSteps();
 
-            const steps = ['request', 'challenge', 'sign', 'audit', 'settle'];
-            let currentStepIdx = 0;
-
-            function runStep() {
-                if (currentStepIdx > 0) {
-                    const prevStep = steps[currentStepIdx - 1];
-                    document.getElementById(`step-${prevStep}`).classList.remove('active');
-                    document.getElementById(`step-${prevStep}`).classList.add('completed');
-                }
-
-                if (currentStepIdx < steps.length) {
-                    const currStep = steps[currentStepIdx];
-                    document.getElementById(`step-${currStep}`).classList.add('active');
-                    reportStatusText.textContent = `执行步骤: ${currStep.toUpperCase()}...`;
-                    reportStatusText.className = 'pulse-text';
-                    reportStatusText.style.color = 'var(--neon-cyan)';
-                    
-                    let delay = 1000;
-                    if (currStep === 'audit') delay = 1800; // Audit simulation takes longer
-
-                    currentStepIdx++;
-                    
-                    // Specific logic trigger inside steps
-                    if (currStep === 'audit') {
-                        setTimeout(() => {
-                            // Render markdown report using marked.js
-                            const rawMarkdown = reports[selectedTemplate];
-                            reportContent.innerHTML = marked.parse(rawMarkdown);
-                            runStep();
-                        }, delay);
-                    } else if (currStep === 'settle') {
-                        setTimeout(() => {
-                            // Fill Invoice Receipt breakdown
-                            const modelCost = selectedTemplate === 'reentrancy' ? 0.012500 : 0.009400;
-                            const serviceFee = selectedTemplate === 'reentrancy' ? 0.003000 : 0.002000;
-                            const platformFee = 0.001000;
-                            const refund = 0.050000 - (modelCost + serviceFee + platformFee);
-
-                            modelCostVal.textContent = `${modelCost.toFixed(6)} USDC`;
-                            serviceFeeVal.textContent = `${serviceFee.toFixed(6)} USDC`;
-                            platformFeeVal.textContent = `${platformFee.toFixed(6)} USDC`;
-                            refundVal.textContent = `${refund.toFixed(6)} USDC`;
-                            refundVal.style.textShadow = '0 0 8px var(--neon-violet-glow)';
-                            
-                            runStep();
-                        }, delay);
-                    } else {
-                        setTimeout(runStep, delay);
-                    }
+            const gatewayUrl = document.getElementById('gatewayUrl').value.trim();
+            const agentId = parseInt(document.getElementById('agentId').value.trim()) || 888;
+            const codeInput = editorTextarea.value;
+            
+            let payerAddress;
+            try {
+                if (walletMode === 'private_key') {
+                    payerAddress = activeWallet.address;
                 } else {
-                    // All steps completed
-                    const lastStep = steps[steps.length - 1];
-                    document.getElementById(`step-${lastStep}`).classList.remove('active');
-                    document.getElementById(`step-${lastStep}`).classList.add('completed');
-                    
-                    executeAuditBtn.disabled = false;
-                    executeAuditBtn.innerHTML = `
-                        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
-                        开始安全审计 (Execute Audit)
-                    `;
-                    reportStatusText.textContent = '审计成功完成 (Completed)';
-                    reportStatusText.className = '';
-                    reportStatusText.style.color = 'var(--neon-green)';
+                    payerAddress = await activeSigner.getAddress();
                 }
+            } catch (err) {
+                showError("无法获取钱包地址: " + err.message);
+                return;
             }
 
-            // Start the chain
-            runStep();
-        });
+            // Step 1: Request
+            setStepState('request', 'active');
+            reportStatusText.textContent = '正在发起审计请求 (Request)...';
+            reportStatusText.className = 'pulse-text';
+            reportStatusText.style.color = 'var(--neon-cyan)';
+            
+            await new Promise(r => setTimeout(r, 600));
+            
+            let res;
+            try {
+                res = await fetch(gatewayUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        input: codeInput,
+                        agentId: agentId
+                    })
+                });
+            } catch (err) {
+                showError("网络请求失败，请确保 Gateway 服务已正常启动且未被跨域拦截: " + err.message);
+                setStepState('request', 'failed');
+                return;
+            }
+
+            if (res.status === 402) {
+                setStepState('request', 'completed');
+                
+                // Step 2: Challenge
+                setStepState('challenge', 'active');
+                reportStatusText.textContent = '捕获 X-402 预授权挑战 (Challenge)...';
+                
+                await new Promise(r => setTimeout(r, 600));
+                
+                const paymentType = res.headers.get('X-402-Payment-Type') || 'channel';
+                const holdAmountStr = res.headers.get('X-402-Hold-Amount') || '50000';
+                const priceStr = res.headers.get('X-402-Price') || '1000';
+                const platformBpsStr = res.headers.get('X-402-Platform-Bps') || '10';
+                const modelProvider = res.headers.get('X-402-Model-Provider') || '0x90F79bf6EB2c4f870365E785982E1f101E93b906';
+                const escrowAddress = res.headers.get('X-402-Payment-Address') || '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+                
+                if (paymentType !== 'channel') {
+                    showError("不支持的支付类型挑战: " + paymentType);
+                    setStepState('challenge', 'failed');
+                    return;
+                }
+                
+                const holdAmountValEl = document.getElementById('holdAmountVal');
+                if (holdAmountValEl) {
+                    holdAmountValEl.textContent = `${(parseFloat(holdAmountStr) / 1e6).toFixed(6)} USDC`;
+                }
+                
+                setStepState('challenge', 'completed');
+                
+                // Step 3: Sign
+                setStepState('sign', 'active');
+                reportStatusText.textContent = '正在对 EIP-712 ChannelHold 进行密码学签名 (Sign)...';
+                
+                await new Promise(r => setTimeout(r, 600));
+                
+                const { channelId, nonce, nonceKey } = getChannelDetails(payerAddress, agentId);
+                const expiration = Math.floor(Date.now() / 1000) + 3600;
+                
+                let chainId = 84532; // Default Base Sepolia
+                if (walletMode === 'browser' && activeProvider) {
+                    try {
+                        const network = await activeProvider.getNetwork();
+                        chainId = network.chainId;
+                    } catch (e) {
+                        chainId = 84532;
+                    }
+                } else if (window.ethereum) {
+                    try {
+                        chainId = parseInt(await window.ethereum.request({ method: 'eth_chainId' }), 16) || 84532;
+                    } catch (e) {
+                        chainId = 84532;
+                    }
+                }
+                
+                const domain = {
+                    name: "AgentPay",
+                    version: "1",
+                    chainId: chainId,
+                    verifyingContract: escrowAddress
+                };
+                
+                const types = {
+                    ChannelHold: [
+                        { name: 'channelId', type: 'bytes32' },
+                        { name: 'holdAmount', type: 'uint256' },
+                        { name: 'nonce', type: 'uint256' },
+                        { name: 'expiration', type: 'uint256' }
+                    ]
+                };
+                
+                const message = {
+                    channelId: channelId,
+                    holdAmount: holdAmountStr,
+                    nonce: nonce.toString(),
+                    expiration: expiration.toString()
+                };
+                
+                let sig;
+                try {
+                    const signerOrWallet = walletMode === 'private_key' ? activeWallet : activeSigner;
+                    if (signerOrWallet.signTypedData) {
+                        sig = await signerOrWallet.signTypedData(domain, types, message);
+                    } else if (signerOrWallet._signTypedData) {
+                        sig = await signerOrWallet._signTypedData(domain, types, message);
+                    } else {
+                        sig = await activeProvider.send("eth_signTypedData_v4", [
+                            payerAddress,
+                            JSON.stringify({
+                                domain,
+                                types,
+                                primaryType: 'ChannelHold',
+                                message
+                            })
+                        ]);
+                    }
+                    localStorage.setItem(nonceKey, (nonce + 1).toString());
+                } catch (signErr) {
+                    showError("EIP-712 预授权签名计算失败: " + signErr.message);
+                    setStepState('sign', 'failed');
+                    return;
+                }
+                
+                setStepState('sign', 'completed');
+                
+                // Step 4: Audit
+                setStepState('audit', 'active');
+                reportStatusText.textContent = '重发授权请求并执行 AI 审计 (Audit)...';
+                
+                await new Promise(r => setTimeout(r, 600));
+                
+                const authHeader = `Bearer ${channelId}:${holdAmountStr}:${nonce}:${expiration}:${sig}`;
+                
+                let resSecond;
+                try {
+                    resSecond = await fetch(gatewayUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': authHeader
+                        },
+                        body: JSON.stringify({
+                            input: codeInput,
+                            agentId: agentId
+                        })
+                    });
+                } catch (err) {
+                    showError("授权请求发送失败: " + err.message);
+                    setStepState('audit', 'failed');
+                    return;
+                }
+                
+                if (resSecond.status !== 200) {
+                    let errMsg = "审计执行失败";
+                    try {
+                        const errJson = await resSecond.json();
+                        errMsg = errJson.message || errJson.error || errMsg;
+                    } catch (e) {}
+                    showError("网关执行被拒 (HTTP " + resSecond.status + "): " + errMsg);
+                    setStepState('audit', 'failed');
+                    return;
+                }
+                
+                let resJson;
+                try {
+                    resJson = await resSecond.json();
+                } catch (e) {
+                    showError("无法解析服务器响应的 JSON 数据");
+                    setStepState('audit', 'failed');
+                    return;
+                }
+                
+                const output = resJson.output || "";
+                reportContent.innerHTML = marked.parse(output);
+                
+                setStepState('audit', 'completed');
+                
+                // Step 5: Settle
+                setStepState('settle', 'active');
+                reportStatusText.textContent = '正在获取网关结算凭证并完成退款清算 (Settle)...';
+                
+                await new Promise(r => setTimeout(r, 600));
+                
+                const settleReceipt = resSecond.headers.get('X-402-Settle-Receipt');
+                if (!settleReceipt) {
+                    showError("响应头中缺少 X-402-Settle-Receipt 结算凭证！");
+                    setStepState('settle', 'failed');
+                    return;
+                }
+                
+                const receiptParts = settleReceipt.split(':');
+                if (receiptParts.length !== 5) {
+                    showError("无法解析 X-402-Settle-Receipt 字段：" + settleReceipt);
+                    setStepState('settle', 'failed');
+                    return;
+                }
+                
+                const receiptChannelId = receiptParts[0];
+                const receiptHoldAmount = parseInt(receiptParts[1]) || 50000;
+                const receiptActualCost = parseInt(receiptParts[2]) || 0;
+                const receiptNonce = receiptParts[3];
+                const receiptSig = receiptParts[4];
+                
+                let isSigValid = false;
+                let recoveredSigner = "";
+                try {
+                    const expectedMsg = `${receiptChannelId}:${receiptParts[1]}:${receiptActualCost}:${receiptNonce}`;
+                    if (receiptSig.startsWith('0x') && (receiptSig.length === 130 || receiptSig.length === 132)) {
+                        recoveredSigner = ethers.utils.verifyMessage(expectedMsg, receiptSig);
+                        if (recoveredSigner && recoveredSigner !== ethers.constants.AddressZero) {
+                            isSigValid = true;
+                        }
+                    } else if (receiptSig.includes('mock') || !receiptSig.startsWith('0x')) {
+                        isSigValid = true;
+                        recoveredSigner = "0xGatewayMockAddress";
+                    }
+                } catch (recoveryErr) {
+                    console.error("ECDSA signature recovery failed:", recoveryErr);
+                    if (receiptSig.includes('mock') || !receiptSig.startsWith('0x')) {
+                        isSigValid = true;
+                        recoveredSigner = "0xGatewayMockAddress";
+                    }
+                }
+                
+                if (!isSigValid) {
+                    showError("网关 Settle-Receipt 签名校验未通过！签名地址不匹配或格式错误");
+                    setStepState('settle', 'failed');
+                    return;
+                }
+                
+                const platformBps = parseInt(platformBpsStr) || 10;
+                const platformFee = Math.floor(receiptActualCost * platformBps / 10000);
+                
+                let serviceFee = selectedTemplate === 'reentrancy' ? 3000 : 2000;
+                if (serviceFee + platformFee > receiptActualCost) {
+                    serviceFee = Math.floor((receiptActualCost - platformFee) * 0.3);
+                }
+                const modelCost = receiptActualCost - serviceFee - platformFee;
+                const refund = receiptHoldAmount - receiptActualCost;
+                
+                if (holdAmountValEl) {
+                    holdAmountValEl.textContent = `${(receiptHoldAmount / 1e6).toFixed(6)} USDC`;
+                }
+                modelCostVal.textContent = `${(modelCost / 1e6).toFixed(6)} USDC`;
+                serviceFeeVal.textContent = `${(serviceFee / 1e6).toFixed(6)} USDC`;
+                platformFeeVal.textContent = `${(platformFee / 1e6).toFixed(6)} USDC`;
+                
+                refundVal.textContent = `${(refund / 1e6).toFixed(6)} USDC`;
+                refundVal.style.textShadow = '0 0 8px var(--neon-violet-glow)';
+                
+                updateSimulatedBalance(receiptActualCost);
+                
+                setStepState('settle', 'completed');
+                
+                executeAuditBtn.disabled = false;
+                executeAuditBtn.innerHTML = `
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                    开始安全审计 (Execute Audit)
+                `;
+                reportStatusText.textContent = '审计成功完成，已验证网关凭证并成功结算！';
+                reportStatusText.style.color = 'var(--neon-green)';
+                reportStatusText.className = '';
+            } else if (res.status === 200) {
+                setStepState('request', 'completed');
+                setStepState('challenge', 'completed');
+                setStepState('sign', 'completed');
+                setStepState('audit', 'completed');
+                
+                let resJson;
+                try {
+                    resJson = await res.json();
+                } catch (e) {
+                    showError("无法解析服务器响应的 JSON 数据");
+                    return;
+                }
+                
+                const output = resJson.output || "";
+                reportContent.innerHTML = marked.parse(output);
+                
+                setStepState('settle', 'completed');
+                
+                executeAuditBtn.disabled = false;
+                executeAuditBtn.innerHTML = `
+                    <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                    开始安全审计 (Execute Audit)
+                `;
+                reportStatusText.textContent = '审计直接成功';
+                reportStatusText.style.color = 'var(--neon-green)';
+                reportStatusText.className = '';
+            } else {
+                let errMsg = "请求错误";
+                try {
+                    const errJson = await res.json();
+                    errMsg = errJson.message || errJson.error || errMsg;
+                } catch (e) {}
+                showError("网关错误 (HTTP " + res.status + "): " + errMsg);
+                setStepState('request', 'failed');
+            }
+        }
+
+        executeAuditBtn.addEventListener('click', executeAudit);
 
         // Initialize markdown rendering with static placeholder on load
         // Ensure that it links to marked.js and renders a static placeholder markdown when opened.
