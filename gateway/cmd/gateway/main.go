@@ -13,6 +13,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"gateway/internal/middleware"
+	"gateway/internal/plugin"
 	"gateway/internal/proxy"
 	"gateway/internal/queue"
 	"gateway/internal/stripe"
@@ -108,6 +109,9 @@ func main() {
 	stripeClient := stripe.NewStripeClient(stripeKey)
 
 	// 路由注册
+	mcpHandler := plugin.NewMcpHandler(ledgerService, queueMgr)
+	r.Handle("/v1/plugin/mcp", mcpHandler)
+
 	r.Route("/agent", func(r chi.Router) {
 		r.Use(middleware.X402Middleware)
 		r.Handle("/execute", proxyHandler)

@@ -1,0 +1,213 @@
+package plugin
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+
+	"gateway/internal/queue"
+	"ledger/rail"
+	"ledger/service"
+)
+
+type McpHandler struct {
+	ledgerSvc *service.LedgerService
+	queueMgr  *queue.QueueManager
+}
+
+func NewMcpHandler(ledgerSvc *service.LedgerService, queueMgr *queue.QueueManager) *McpHandler {
+	return &McpHandler{
+		ledgerSvc: ledgerSvc,
+		queueMgr:  queueMgr,
+	}
+}
+
+type JsonRpcRequest struct {
+	JsonRpc string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	ID      interface{}     `json:"id"`
+}
+
+type JsonRpcResponse struct {
+	JsonRpc string      `json:"jsonrpc"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   interface{} `json:"error,omitempty"`
+	ID      interface{} `json:"id"`
+}
+
+func (h *McpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req JsonRpcRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON-RPC request", http.StatusBadRequest)
+		return
+	}
+
+	var result interface{}
+	var err error
+
+	switch req.Method {
+	case "tools/list":
+		result = h.handleListTools()
+	case "tools/call":
+		result, err = h.handleCallTool(r.Context(), req.Params)
+	default:
+		err = fmt.Errorf("method not found: %s", req.Method)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var resp JsonRpcResponse
+	resp.JsonRpc = "2.0"
+	resp.ID = req.ID
+
+	if err != nil {
+		resp.Error = map[string]interface{}{
+			"code":    -32603,
+			"message": err.Error(),
+		}
+	} else {
+		resp.Result = result
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *McpHandler) handleListTools() interface{} {
+	return map[string]interface{}{
+		"tools": []map[string]interface{}{
+			{
+				"name":        "pay",
+				"description": "Lock funds in AgentPay channel for an AI invocation",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"agentId": map[string]interface{}{
+							"type":        "integer",
+							"description": "The unique ID of the agent",
+						},
+						"amountUsdc": map[string]interface{}{
+							"type":        "number",
+							"description": "The amount to lock in USDC (e.g. 0.50)",
+						},
+					},
+					"required": []string{"agentId", "amountUsdc"},
+				},
+			},
+			{
+				"name":        "checkout",
+				"description": "Settle and clear the locked invoice with actual consumption cost",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"invoiceId": map[string]interface{}{
+							"type":        "string",
+							"description": "The Invoice ID returned by pay tool",
+						},
+						"actualCostUsdc": map[string]interface{}{
+							"type":        "number",
+							"description": "The actual cost to clear in USDC (e.g. 0.35)",
+						},
+						"nonce": map[string]interface{}{
+							"type":        "string",
+							"description": "Idempotent nonce key",
+						},
+					},
+					"required": []string{"invoiceId", "actualCostUsdc"},
+				},
+			},
+		},
+	}
+}
+
+func (h *McpHandler) handleCallTool(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	var callReq struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(params, &callReq); err != nil {
+		return nil, err
+	}
+
+	if h.ledgerSvc == nil {
+		return nil, fmt.Errorf("ledger service is not configured on this node")
+	}
+
+	switch callReq.Name {
+	case "pay":
+		var args struct {
+			AgentID    int64   `json:"agentId"`
+			AmountUsdc float64 `json:"amountUsdc"`
+		}
+		if err := json.Unmarshal(callReq.Arguments, &args); err != nil {
+			return nil, err
+		}
+
+		microAmount := uint64(args.AmountUsdc * 1e6)
+		payer := "mcp_client_default"
+		inv, err := h.ledgerSvc.CreateInvoice(ctx, payer, strconv.FormatInt(args.AgentID, 10), microAmount, "crypto")
+		if err != nil {
+			return nil, err
+		}
+
+		return map[string]interface{}{
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": fmt.Sprintf("Successfully locked funds. InvoiceID: %s, Locked: %.6f USDC", inv.ID, args.AmountUsdc),
+				},
+			},
+		}, nil
+
+	case "checkout":
+		var args struct {
+			InvoiceID      string   `json:"invoiceId"`
+			ActualCostUsdc float64  `json:"actualCostUsdc"`
+			Nonce          string   `json:"nonce"`
+		}
+		if err := json.Unmarshal(callReq.Arguments, &args); err != nil {
+			return nil, err
+		}
+
+		microCost := uint64(args.ActualCostUsdc * 1e6)
+		nonceStr := args.Nonce
+		if nonceStr == "" {
+			nonceStr = fmt.Sprintf("mcp_nonce_%s", args.InvoiceID)
+		}
+
+		// 默认分账：80% 分配给智能体所有者，20% 作为平台抽成
+		agentOwner := "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" // Anvil default
+		platformTreasury := "0x15d34AAf54a67C68101F309492526a9000025B7b"
+
+		agentPayout := uint64(float64(microCost) * 0.8)
+		platformPayout := microCost - agentPayout
+
+		payouts := []rail.Payout{
+			{Target: agentOwner, Amount: agentPayout},
+			{Target: platformTreasury, Amount: platformPayout},
+		}
+
+		err := h.ledgerSvc.SettleInvoice(ctx, args.InvoiceID, microCost, payouts, nonceStr)
+		if err != nil {
+			return nil, err
+		}
+
+		return map[string]interface{}{
+			"content": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": fmt.Sprintf("Successfully settled invoice %s. Bookkeeping recorded: %.6f USDC distributed.", args.InvoiceID, args.ActualCostUsdc),
+				},
+			},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unknown tool name: %s", callReq.Name)
+	}
+}
