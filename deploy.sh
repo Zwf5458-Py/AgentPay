@@ -152,4 +152,67 @@ with open(env_path, 'w') as f:
 
 echo "Extracted PaymentEscrow address: $ESCROW_ADDR and updated .env"
 
-echo "=== Deployment Successful ==="
+# 5. Build and start remaining services via Docker Compose
+echo "Building and starting services via Docker Compose..."
+$DOCKER_COMPOSE_CMD up -d --build aa-bridge agent gateway
+
+echo "Waiting 5 seconds for services to bind and start listening..."
+sleep 5
+
+# 6. Verify Go Gateway health & API access security
+echo "Verifying Go Gateway health & API access security..."
+
+# Load (or reload) environmental variables to ensure we have the correct INTERNAL_SECRET
+set -a
+. "$ENV_FILE"
+set +a
+
+# Test 1 (Unauthorized block)
+echo "Running Test 1: Unauthorized check (no secret header)..."
+UNAUTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/admin/stats || true)
+if [ "$UNAUTH_STATUS" -ne 401 ]; then
+  echo "Failure: Expected status code 401 for unauthorized access, but got '$UNAUTH_STATUS'." >&2
+  exit 1
+fi
+echo "Test 1 Passed: Request without X-Internal-Secret was blocked with 401."
+
+# Test 2 (Authorized stats check)
+echo "Running Test 2: Authorized stats check (valid X-Internal-Secret header)..."
+AUTH_RESPONSE_RAW=$(curl -s -w "\n%{http_code}" -H "X-Internal-Secret: $INTERNAL_SECRET" http://localhost:8080/admin/stats || true)
+AUTH_STATUS=$(echo "$AUTH_RESPONSE_RAW" | tail -n 1)
+AUTH_BODY=$(echo "$AUTH_RESPONSE_RAW" | sed '$d')
+
+if [ "$AUTH_STATUS" -ne 200 ]; then
+  echo "Failure: Expected status code 200 for authorized admin stats query, but got '$AUTH_STATUS'." >&2
+  echo "Response body: $AUTH_BODY" >&2
+  exit 1
+fi
+
+if ! echo "$AUTH_BODY" | grep -q "success_tasks"; then
+  echo "Failure: Authorized stats response did not contain expected 'success_tasks' field." >&2
+  echo "Response body: $AUTH_BODY" >&2
+  exit 1
+fi
+echo "Test 2 Passed: Admin stats retrieved successfully with code 200."
+
+# 7. Render successful deployment guidelines
+echo ""
+echo "=========================================================="
+echo "    ___                 _   ___                           "
+echo "   /   | ____ ____ ___ | |_/   |____ ___  __              "
+echo "  / /| |/ __ \`/ _ / __ \ __/ /| / __ \`/ / / /              "
+echo " / ___ / /_/ /  __/ / / / /_/ ___ / /_/ / /_/ /               "
+echo "/_/  |_\\__, /\\___/_/ /_/\\__/_/  |_\\__,_/\\__, /                "
+echo "      /____/                           /____/                 "
+echo "              Deployed Successfully!                      "
+echo "=========================================================="
+echo ""
+echo "Use the following links to access the platform:"
+echo " - Client Panel:     file:///Users/oraclez/code/AgentPay/client.html"
+echo " - Admin Dashboard:  file:///Users/oraclez/code/AgentPay/admin.html"
+echo " - Escrow Address:   $ESCROW_ADDR"
+echo " - Gateway URL:      http://localhost:8080"
+echo " - Admin Secret:     $INTERNAL_SECRET"
+echo "=========================================================="
+echo ""
+
