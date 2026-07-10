@@ -65,6 +65,12 @@ if ! command -v forge >/dev/null 2>&1; then
   echo "Error: 'forge' (Foundry) is not installed." >&2
   exit 1
 fi
+
+# Check python3
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Error: 'python3' is not installed but required for config parsing." >&2
+  exit 1
+fi
 echo "Prerequisites satisfied."
 
 # 3. Boot Anvil container
@@ -126,12 +132,12 @@ try:
             if tx.get('contractName') == 'PaymentEscrow':
                 print(tx['contractAddress'])
                 sys.exit(0)
-except Exception as e:
-    print('', end='')
     sys.exit(1)
-")
+except Exception as e:
+    sys.exit(1)
+" || echo "ERROR")
 
-if [ -z "$ESCROW_ADDR" ] || [ ${#ESCROW_ADDR} -ne 42 ] || ! echo "$ESCROW_ADDR" | grep -qE '^0x[0-9a-fA-F]{40}$'; then
+if [ "$ESCROW_ADDR" = "ERROR" ] || [ -z "$ESCROW_ADDR" ] || [ ${#ESCROW_ADDR} -ne 42 ] || ! echo "$ESCROW_ADDR" | grep -qE '^0x[0-9a-fA-F]{40}$'; then
   echo "Error: Failed to extract a valid PaymentEscrow address. Got: '$ESCROW_ADDR'" >&2
   exit 1
 fi
@@ -156,21 +162,40 @@ echo "Extracted PaymentEscrow address: $ESCROW_ADDR and updated .env"
 echo "Building and starting services via Docker Compose..."
 $DOCKER_COMPOSE_CMD up -d --build aa-bridge agent gateway
 
-echo "Waiting 5 seconds for services to bind and start listening..."
-sleep 5
+echo "Waiting for Go Gateway to bind and respond..."
+MAX_GW_RETRIES=10
+GW_RETRY=0
+GW_READY=false
 
-# 6. Verify Go Gateway health & API access security
-echo "Verifying Go Gateway health & API access security..."
-
-# Load (or reload) environmental variables to ensure we have the correct INTERNAL_SECRET
+# 预先加载环境变量
 set -a
 . "$ENV_FILE"
 set +a
 
+while [ $GW_RETRY -lt $MAX_GW_RETRIES ]; do
+  STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/admin/stats || true)
+  if [ "$STATUS_CODE" = "401" ] || [ "$STATUS_CODE" = "200" ]; then
+    GW_READY=true
+    echo "Go Gateway is up! (Status Code: $STATUS_CODE)"
+    break
+  fi
+  echo "Waiting for gateway port 8080 (attempt $((GW_RETRY+1))/$MAX_GW_RETRIES)..."
+  sleep 1
+  GW_RETRY=$((GW_RETRY+1))
+done
+
+if [ "$GW_READY" = false ]; then
+  echo "Error: Go Gateway did not bind to port 8080 within timeout." >&2
+  exit 1
+fi
+
+# 6. Verify Go Gateway health & API access security
+echo "Verifying Go Gateway health & API access security..."
+
 # Test 1 (Unauthorized block)
 echo "Running Test 1: Unauthorized check (no secret header)..."
 UNAUTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/admin/stats || true)
-if [ "$UNAUTH_STATUS" -ne 401 ]; then
+if [ "$UNAUTH_STATUS" != "401" ]; then
   echo "Failure: Expected status code 401 for unauthorized access, but got '$UNAUTH_STATUS'." >&2
   exit 1
 fi
@@ -182,7 +207,7 @@ AUTH_RESPONSE_RAW=$(curl -s -w "\n%{http_code}" -H "X-Internal-Secret: $INTERNAL
 AUTH_STATUS=$(echo "$AUTH_RESPONSE_RAW" | tail -n 1)
 AUTH_BODY=$(echo "$AUTH_RESPONSE_RAW" | sed '$d')
 
-if [ "$AUTH_STATUS" -ne 200 ]; then
+if [ "$AUTH_STATUS" != "200" ]; then
   echo "Failure: Expected status code 200 for authorized admin stats query, but got '$AUTH_STATUS'." >&2
   echo "Response body: $AUTH_BODY" >&2
   exit 1
