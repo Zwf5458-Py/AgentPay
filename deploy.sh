@@ -156,7 +156,10 @@ with open(env_path, 'w') as f:
     f.write(new_content)
 " "$ESCROW_ADDR"
 
-echo "Extracted PaymentEscrow address: $ESCROW_ADDR and updated .env"
+# Re-export variables to ensure host environment variables match the updated .env values
+export ESCROW_ADDRESS=$ESCROW_ADDR
+
+echo "Extracted PaymentEscrow address: $ESCROW_ADDR and updated .env and current shell environment"
 
 # 5. Build and start remaining services via Docker Compose
 echo "Building and starting services via Docker Compose..."
