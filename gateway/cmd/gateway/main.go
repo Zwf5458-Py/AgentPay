@@ -123,6 +123,11 @@ func main() {
 	})
 
 	r.Post("/stripe/webhook", func(w http.ResponseWriter, r *http.Request) {
+		// Stripe Webhook 占位端点说明：
+		// 目前网关在 execute 审计时会主动通过 VerifyCheckoutSession 向 Stripe API 发送请求实时校验 Session 支付状态。
+		// 本端点目前作为接收支付成功异步回调的 Logging/审计日志占位端点。
+		// 生产环境部署时：需在该接口内配置官方的 HMAC-SHA256 Stripe Webhook 签名验证机制 (Stripe-Signature)，
+		// 并将已支付订单异步固化更新到 DB 的 consumed_stripe_sessions 状态中。
 		sigHeader := r.Header.Get("Stripe-Signature")
 		if sigHeader == "" && os.Getenv("APP_ENV") == "production" {
 			http.Error(w, "Missing Stripe-Signature header", http.StatusBadRequest)

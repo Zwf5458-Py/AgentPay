@@ -126,6 +126,7 @@ func (qm *QueueManager) initDB() error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
+	CREATE INDEX IF NOT EXISTS idx_consumed_stripe_status ON consumed_stripe_sessions(status);
 	`
 	if _, err := qm.db.Exec(queryStripe); err != nil {
 		return fmt.Errorf("failed to initialize stripe session table: %w", err)
