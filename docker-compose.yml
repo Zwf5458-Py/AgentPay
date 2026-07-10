@@ -7,6 +7,16 @@ services:
       - "8545:8545"
     entrypoint: ["anvil", "--host", "0.0.0.0"]
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   aa-bridge:
     build:
       context: ./aa-bridge
@@ -47,7 +57,15 @@ services:
       - ESCROW_ADDRESS=${ESCROW_ADDRESS}
       - INTERNAL_SECRET=${INTERNAL_SECRET}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - REDIS_URL=redis://redis:6379
+      - RATE_LIMIT=${RATE_LIMIT:-5}
+      - RATE_BURST=${RATE_BURST:-10}
+      - AGENT_LOCK_TTL=${AGENT_LOCK_TTL:-30}
       - CHAIN_ID=${CHAIN_ID:-31337}
     depends_on:
-      - agent
-      - aa-bridge
+      redis:
+        condition: service_healthy
+      agent:
+        condition: service_started
+      aa-bridge:
+        condition: service_started

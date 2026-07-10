@@ -21,7 +21,7 @@ func TestLedgerService(t *testing.T) {
 	defer sqliteStore.Close()
 
 	// 2. 初始化 Mock StripeRail 支付轨
-	stripeRail := rail.NewStripeRail(true)
+	stripeRail := rail.NewStripeRail("mock_test_key")
 	rails := map[string]rail.PaymentRail{
 		"stripe": stripeRail,
 	}

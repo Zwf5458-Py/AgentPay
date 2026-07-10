@@ -58,10 +58,34 @@ func main() {
 	defer cancel()
 
 	// 挂载限流中间件在最顶端，每秒充能 5 个，最大容纳 10 个
-	limiter := middleware.NewIPRateLimiter(rate.Limit(5), 10)
-	// 启动后台 Cleanup 协程，每隔 1 分钟执行一次，清除过期时间达 5 分钟的 IP 记录
-	go limiter.StartCleanup(ctx, 1*time.Minute, 5*time.Minute)
-	r.Use(middleware.RateLimitMiddleware(limiter))
+	// P4: 优先使用 Redis 分布式限流，降级为内存限流
+	redisURL := os.Getenv("REDIS_URL")
+	limiter := middleware.NewRedisRateLimiter(redisURL, rate.Limit(5), 10)
+	var fallbackLimiter *middleware.IPRateLimiter
+
+	if limiter == nil {
+		// Redis 不可用，降级为内存限流
+		fallbackLimiter = middleware.NewIPRateLimiter(rate.Limit(5), 10)
+		go fallbackLimiter.StartCleanup(ctx, 1*time.Minute, 5*time.Minute)
+		r.Use(middleware.RateLimitMiddleware(fallbackLimiter))
+	} else {
+		// Redis 限流：使用中间件包装（兼容现有 RateLimitMiddleware 签名）
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				ip := middleware.GetClientIP(req)
+				if !limiter.Allow(ip) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusTooManyRequests)
+					json.NewEncoder(w).Encode(map[string]string{
+						"error":   "rate_limit_exceeded",
+						"message": "too many requests",
+					})
+					return
+				}
+				next.ServeHTTP(w, req)
+			})
+		})
+	}
 
 	// 基础中间件
 	r.Use(chiMiddleware.Logger)
@@ -75,7 +99,8 @@ func main() {
 		log.Fatalf("Failed to initialize ledger store: %v", err)
 	}
 
-	stripeRail := rail.NewStripeRail(true)
+	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
+	stripeRail := rail.NewStripeRail(stripeKey)
 	cryptoRail := rail.NewCryptoRail(aaBridgeURL)
 
 	rails := map[string]rail.PaymentRail{
@@ -107,6 +132,9 @@ func main() {
 	// 启动后台重试 Worker
 	queueMgr.StartWorker(ctx)
 
+	// P4: 启动锁回收 Worker（每分钟扫描超时锁）
+	queueMgr.StartReclaim(ctx, 1*time.Minute)
+
 	// 创建反向代理
 	proxyHandler, err := proxy.NewReverseProxy(elizaAgentURL, aaBridgeURL, internalSecret, queueMgr)
 	if err != nil {
@@ -117,7 +145,6 @@ func main() {
 	proxyHandler.SetLedgerService(ledgerService)
 	proxyHandler.SetPricingService(pricingService)
 
-	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
 	stripeClient := stripe.NewStripeClient(stripeKey)
 
 	// 路由注册

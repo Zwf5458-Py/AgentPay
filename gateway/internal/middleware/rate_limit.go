@@ -141,3 +141,8 @@ func getIP(r *http.Request) string {
 
 	return strings.Trim(ip, "[]")
 }
+
+// GetClientIP 公共方法，供 Redis 限流中间件提取客户端 IP
+func GetClientIP(r *http.Request) string {
+	return getIP(r)
+}

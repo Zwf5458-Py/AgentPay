@@ -9,6 +9,7 @@ import { baseSepolia, foundry } from 'viem/chains';
 const envChainId = Number(process.env.CHAIN_ID) || 31337;
 const currentChain = envChainId === 31337 ? foundry : baseSepolia;
 import { getRpcTransport } from './utils/rpc.js';
+import { CircuitBreaker } from './circuit-breaker.js';
 
 dotenv.config();
 
@@ -35,6 +36,13 @@ const escrowConfigCache = new Map<
     agentIdentityRegistry: string;
   }
 >();
+
+// P4: 熔断器实例，保护 splitSettle 调用（5 次失败开路，10s 后半开探测）
+const splitSettleBreaker = new CircuitBreaker({
+  threshold: 5,
+  timeout: 10000,
+  resetTimeout: 5000,
+});
 
 function parseChannelId(channelId: string): `0x${string}` {
   const clean = channelId.startsWith('0x') ? channelId.slice(2) : channelId;
@@ -859,32 +867,36 @@ server.post('/aa/split-settle', {
       };
     }
 
-    const { request: splitSettleRequest } = await publicClient.simulateContract({
-      account,
-      address: resolvedEscrowAddress as `0x${string}`,
-      abi: escrowAbi,
-      functionName: 'splitSettle',
-      args: [
-        bytes32ChannelId,
-        biAccumulated,
-        biModelCost,
-        biServiceFee,
-        modelProvider as `0x${string}`,
-        treasury as `0x${string}`,
-        platformBps,
-        biHoldAmount,
-        biNonce,
-        biExpiration,
-        signature as `0x${string}`,
-        proof as `0x${string}`,
-      ],
-    });
+    // P4: 包装 splitSettle 调用为熔断器，防止 downstream RPC 故障雪崩
+    const result = await splitSettleBreaker.execute(async () => {
+      const { request: splitSettleRequest } = await publicClient.simulateContract({
+        account,
+        address: resolvedEscrowAddress as `0x${string}`,
+        abi: escrowAbi,
+        functionName: 'splitSettle',
+        args: [
+          bytes32ChannelId,
+          biAccumulated,
+          biModelCost,
+          biServiceFee,
+          modelProvider as `0x${string}`,
+          treasury as `0x${string}`,
+          platformBps,
+          biHoldAmount,
+          biNonce,
+          biExpiration,
+          signature as `0x${string}`,
+          proof as `0x${string}`,
+        ],
+      });
 
-    const hash = await walletClient.writeContract(splitSettleRequest);
+      const hash = await walletClient.writeContract(splitSettleRequest);
+      return hash;
+    });
 
     return {
       success: true,
-      txHash: hash,
+      txHash: result,
       computedTBA,
       payouts,
     };

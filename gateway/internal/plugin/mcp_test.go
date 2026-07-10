@@ -39,7 +39,7 @@ func TestMcpHandler(t *testing.T) {
 	defer pstore.Close()
 	pricingSvc := pricingservice.NewPricingService(pstore)
 
-	stripeRail := rail.NewStripeRail(true)
+	stripeRail := rail.NewStripeRail("mock_test_key")
 	rails := map[string]rail.PaymentRail{
 		"stripe": stripeRail,
 		"crypto": stripeRail, // 这里为了方便单元测试，让 crypto 和 stripe 都使用 stripe mock 轨道
