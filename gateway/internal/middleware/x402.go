@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"gateway/internal/stripe"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -20,13 +22,15 @@ import (
 type contextKey string
 
 const (
-	TokenContextKey      contextKey = "x402_token"
-	LockIDContextKey     contextKey = "x402_lock_id"
-	HoldAmountContextKey contextKey = "x402_hold_amount"
-	ChannelIDContextKey  contextKey = "x402_channel_id"
-	SignatureContextKey  contextKey = "x402_signature"
-	NonceContextKey      contextKey = "x402_nonce"
-	ExpirationContextKey contextKey = "x402_expiration"
+	TokenContextKey           contextKey = "x402_token"
+	LockIDContextKey          contextKey = "x402_lock_id"
+	HoldAmountContextKey      contextKey = "x402_hold_amount"
+	ChannelIDContextKey       contextKey = "x402_channel_id"
+	SignatureContextKey       contextKey = "x402_signature"
+	NonceContextKey           contextKey = "x402_nonce"
+	ExpirationContextKey      contextKey = "x402_expiration"
+	PaymentMethodContextKey   contextKey = "x402_payment_method"
+	StripeSessionIDContextKey contextKey = "x402_stripe_session_id"
 )
 
 type ErrorResponse struct {
@@ -52,6 +56,33 @@ func X402Middleware(next http.Handler) http.Handler {
 		token = strings.TrimSpace(token)
 		if token == "" {
 			trigger402(w)
+			return
+		}
+
+		// 检查 token 是否以 stripe: 开头
+		if strings.HasPrefix(token, "stripe:") {
+			sessionID := strings.TrimPrefix(token, "stripe:")
+			if sessionID == "" {
+				trigger402(w)
+				return
+			}
+
+			stripeKey := os.Getenv("STRIPE_SECRET_KEY")
+			stripeClient := stripe.NewStripeClient(stripeKey)
+
+			valid, err := stripeClient.VerifyCheckoutSession(sessionID)
+			if err != nil || !valid {
+				trigger402(w)
+				return
+			}
+
+			ctx := r.Context()
+			ctx = context.WithValue(ctx, TokenContextKey, token)
+			ctx = context.WithValue(ctx, LockIDContextKey, sessionID)
+			ctx = context.WithValue(ctx, PaymentMethodContextKey, "stripe")
+			ctx = context.WithValue(ctx, StripeSessionIDContextKey, sessionID)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
@@ -196,6 +227,22 @@ func GetNonce(ctx context.Context) string {
 // GetExpiration 从 context 中获取 expiration
 func GetExpiration(ctx context.Context) string {
 	if val, ok := ctx.Value(ExpirationContextKey).(string); ok {
+		return val
+	}
+	return ""
+}
+
+// GetPaymentMethod 从 context 中获取 payment method
+func GetPaymentMethod(ctx context.Context) string {
+	if val, ok := ctx.Value(PaymentMethodContextKey).(string); ok {
+		return val
+	}
+	return ""
+}
+
+// GetStripeSessionID 从 context 中获取 stripe session ID
+func GetStripeSessionID(ctx context.Context) string {
+	if val, ok := ctx.Value(StripeSessionIDContextKey).(string); ok {
 		return val
 	}
 	return ""

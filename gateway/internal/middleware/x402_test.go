@@ -903,5 +903,61 @@ func TestX402Middleware_EIP712InvalidSignature(t *testing.T) {
 	}
 }
 
+func TestX402Middleware_StripeValid(t *testing.T) {
+	var capturedToken string
+	var capturedLockID string
+	var capturedPaymentMethod string
+	var capturedStripeSessionID string
+
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedToken = middleware.GetToken(r.Context())
+		capturedLockID = middleware.GetLockID(r.Context())
+		capturedPaymentMethod = middleware.GetPaymentMethod(r.Context())
+		capturedStripeSessionID = middleware.GetStripeSessionID(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := middleware.X402Middleware(nextHandler)
+
+	req := httptest.NewRequest("POST", "/agent/execute", nil)
+	req.Header.Set("Authorization", "Bearer stripe:cs_mock_test123")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
+	}
+	if capturedToken != "stripe:cs_mock_test123" {
+		t.Errorf("Expected token 'stripe:cs_mock_test123', got %q", capturedToken)
+	}
+	if capturedLockID != "cs_mock_test123" {
+		t.Errorf("Expected lockID 'cs_mock_test123', got %q", capturedLockID)
+	}
+	if capturedPaymentMethod != "stripe" {
+		t.Errorf("Expected paymentMethod 'stripe', got %q", capturedPaymentMethod)
+	}
+	if capturedStripeSessionID != "cs_mock_test123" {
+		t.Errorf("Expected stripeSessionID 'cs_mock_test123', got %q", capturedStripeSessionID)
+	}
+}
+
+func TestX402Middleware_StripeInvalid(t *testing.T) {
+	handler := middleware.X402Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/agent/execute", nil)
+	req.Header.Set("Authorization", "Bearer stripe:cs_invalid_test123")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusPaymentRequired {
+		t.Errorf("Expected status %d, got %d", http.StatusPaymentRequired, rr.Code)
+	}
+}
+
+
 
 
