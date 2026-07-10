@@ -1,46 +1,36 @@
-# Task 2 Report: Implement `splitSettle` in PaymentEscrow.sol
+# Task 2 Completion Report: Create client.html UI Layout & Static Markdown Renderer
 
-## Goal
-Implement the `splitSettle` function in `PaymentEscrow.sol` to enable settling a status channel with a multi-way fee distribution (to model provider, treasury, and the agent's TBA), refunding any unused lock balance to the payer. Add corresponding unit tests in `PaymentEscrowTest.t.sol` to guarantee logic verification.
+## Status
+- **Status**: Completed 🟢
+- **Date**: 2026-07-10
+- **Developer**: Antigravity (Subagent)
 
-## Implementation Details
+## Summary of Changes
+1. **Created `client.html`**:
+   - Built a premium split-pane layout utilizing Glassmorphism design system.
+   - **Left Panel (Auditing Workspace)**:
+     - Header: "AgentPay AI Code Auditor" with glowing active badge.
+     - Wallet Control: Simulated Ethereum private key input card with Show/Hide visibility toggles and mock connection logic.
+     - Code Editor Card: Interactive textarea displaying Solidity code, equipped with scrolling-synchronized custom line numbers. Includes selectable Vulnerability Templates (Reentrancy vs. Safe) to load corresponding Solidity codes on click.
+     - Options Card: Parametrizable inputs for Agent ID (default `888`), Max Price Limit (default `15000` USDC), and Gateway URL.
+     - Execute Action Button: Disabled by default, enabled dynamically upon simulated wallet connection.
+   - **Right Panel (Feedback & Invoice)**:
+     - Request Lifecycle Timeline: Multi-step interactive flow (Request -> Challenge -> Sign -> Audit -> Settle). When user clicks "Execute Audit", steps animate through states (inactive -> active/pulsing -> completed).
+     - Report Container: Dynamic area linking to `marked.js` CDN. Renders default system guidelines Markdown on page load, and switches to corresponding Vulnerability/Security reports upon running the simulation.
+     - USDC Hold Invoice Breakdown: Detailed breakdown receipt of Initial Hold, Model Cost, Service Fee, Platform Fee, and Payer Refund. Updates automatically after Audit completion, matching selected templates' simulated parameters.
+2. **Design Language Applied**:
+   - Deep violet gradient background (`#07040f` base) with fuzzy neon cyan/violet ambient glow blobs.
+   - Half-transparent panels and cards (`backdrop-filter: blur(15px)`) with glowing neon borders.
+   - Custom fonts 'Outfit' (headings) and 'Inter' (body) fetched from Google Fonts CDN.
+   - Modern subtle glow animations, transition micro-interactions, and disabled/enabled states.
 
-### Contract Changes (`contracts/src/payment/PaymentEscrow.sol`)
-1. **Event Definition**: Added the `ChannelSplitSettled` event.
-   ```solidity
-   event ChannelSplitSettled(
-       bytes32 indexed channelId,
-       uint256 agentPayout,
-       uint256 modelPayout,
-       uint256 platformFee,
-       address modelProvider,
-       address treasury
-   );
-   ```
-2. **`splitSettle` Function**: Added the function with `onlySettler` modifier:
-   - Validated `modelProvider` and `treasury` are non-zero addresses.
-   - Performed channel status validation (`Locked` status, not expired, `accumulatedAmount` > 0 and <= `maxAmount`, `holdAmount == maxAmount`).
-   - Verified EIP-712 signature of `ChannelHold` struct against the `lock.payer`.
-   - Calculated platform fee (`accumulatedAmount * platformBps / 10000`).
-   - Verified `modelCost + serviceFee + platformFee <= accumulatedAmount`.
-   - Dynamically resolved the agent's TBA using ERC-6551 Registry.
-   - Transferred `modelCost` to `modelProvider`, `platformFee` to `treasury`, remaining `agentPayout` (`accumulatedAmount - modelCost - platformFee`) to the TBA, and refunded the remainder (`maxAmount - accumulatedAmount`) to the payer.
-   - Emitted `ChannelSplitSettled`.
+## Verification & Testing
+- **Visuals**: Confirmed consistent CSS layout, responsive columns, and scroll behavior of custom editor line numbers.
+- **Interactions**:
+  1. Tested loading: Initial placeholder Markdown correctly rendered in the right panel via `marked.js`.
+  2. Tested template tags: Clicking templates correctly swapped Solidity code in editor, sync'd line-number count, and cleared previous report/invoice states.
+  3. Tested wallet connectivity: Clicking "模拟连接钱包" changes network status to active, shows "断开连接" option, and unlocks the Audit action button.
+  4. Tested execution lifecycle: Clicking "开始安全审计" initiates step-by-step progress animation on the timeline (Request -> Challenge -> Sign -> Audit -> Settle). Settle step successfully loads template-specific invoice details and renders the final markdown audit report in the container.
 
-### Test Coverage (`contracts/test/PaymentEscrowTest.t.sol`)
-Added 7 test cases covering the new logic:
-1. `test_SplitSettleSuccess`: Verifies correct split amounts distribution, Dynamic TBA resolution, refunds, and `ChannelSplitSettled` event emission.
-2. `test_SplitSettleZeroAddressReverts`: Verifies passing `address(0)` for `modelProvider` or `treasury` reverts with `InvalidAddress`.
-3. `test_SplitSettleNonSettlerReverts`: Verifies non-settler reverts with `NotSettler`.
-4. `test_SplitSettleInvalidSignatureReverts`: Verifies forged signature reverts with `InvalidSignature`.
-5. `test_SplitSettleExceedAccumulatedAmountReverts`: Verifies fee allocation sum exceeding `accumulatedAmount` reverts with `InvalidAmount`.
-6. `test_SplitSettleInvalidStatusReverts`: Verifies double-settlement reverts with `InvalidStatus`.
-7. `test_SplitSettleExpiredReverts`: Verifies settling after channel expiration reverts with `ChannelExpired`.
-
-## Test Results
-All 40 unit tests (including the 7 new splitSettle tests) pass successfully.
-- Test Run Command: `forge test`
-- Summary: 33 tests in `PaymentEscrowTest` and 7 tests in `AgentIdentityTest` passed (40 total).
-
-## Concerns / Notes
-- None. The implementation aligns perfectly with the requirements in `task-2-brief.md`.
+## Commits
+- Commit: `feat(client): add client.html UI layout and static markdown renderer` (to be created)

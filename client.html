@@ -1,0 +1,1271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentPay AI Code Auditor</title>
+    <!-- Google Fonts: Outfit (Heading) and Inter (Body) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Marked.js for Markdown Rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #07040f;
+            --panel-bg: rgba(18, 12, 36, 0.65);
+            --card-bg: rgba(26, 20, 50, 0.45);
+            --border-color: rgba(139, 92, 246, 0.25);
+            --border-hover: rgba(139, 92, 246, 0.5);
+            
+            /* Neon Palette */
+            --neon-violet: #a78bfa;
+            --neon-violet-glow: rgba(167, 139, 250, 0.35);
+            --neon-cyan: #22d3ee;
+            --neon-cyan-glow: rgba(34, 211, 238, 0.4);
+            --neon-rose: #f43f5e;
+            --neon-rose-glow: rgba(244, 63, 94, 0.4);
+            --neon-green: #10b981;
+            --neon-green-glow: rgba(16, 185, 129, 0.4);
+            
+            /* Text Palette */
+            --text-primary: #f8fafc;
+            --text-secondary: #cbd5e1;
+            --text-muted: #64748b;
+            
+            /* Fonts */
+            --font-title: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-body: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: 'Fira Code', 'Courier New', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(91, 33, 182, 0.18) 0%, transparent 45%),
+                radial-gradient(circle at 90% 80%, rgba(8, 145, 178, 0.15) 0%, transparent 45%),
+                radial-gradient(circle at 50% 50%, rgba(15, 10, 30, 1) 0%, #07040f 100%);
+            color: var(--text-primary);
+            font-family: var(--font-body);
+            min-height: 100vh;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Ambient background glow elements */
+        .ambient-glow-1 {
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(139, 92, 246, 0.08) 0%, transparent 70%);
+            top: 10%;
+            left: 5%;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .ambient-glow-2 {
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(6, 182, 212, 0.06) 0%, transparent 70%);
+            bottom: 10%;
+            right: 5%;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        header {
+            position: relative;
+            z-index: 10;
+            padding: 1.5rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(7, 4, 15, 0.8);
+            backdrop-filter: blur(10px);
+        }
+
+        .header-title-container {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .header-logo {
+            width: 2.25rem;
+            height: 2.25rem;
+            border-radius: 8px;
+            background: linear-gradient(135deg, var(--neon-violet), var(--neon-cyan));
+            box-shadow: 0 0 15px var(--neon-violet-glow);
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--font-title);
+            font-weight: 800;
+            color: var(--bg-color);
+            font-size: 1.25rem;
+        }
+
+        header h1 {
+            font-family: var(--font-title);
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+            background: linear-gradient(to right, var(--text-primary), #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .glowing-badge {
+            background: rgba(139, 92, 246, 0.15);
+            border: 1px solid var(--neon-violet);
+            color: var(--neon-violet);
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.25rem 0.6rem;
+            border-radius: 9999px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            box-shadow: 0 0 8px rgba(139, 92, 246, 0.25);
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+
+        .glowing-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            background-color: var(--neon-violet);
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 8px var(--neon-violet);
+            animation: pulse-dot 2s infinite;
+        }
+
+        .network-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            background: rgba(255, 255, 255, 0.03);
+            padding: 0.4rem 0.8rem;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--neon-rose);
+            box-shadow: 0 0 8px var(--neon-rose-glow);
+            transition: all 0.3s ease;
+        }
+
+        .status-dot.connected {
+            background-color: var(--neon-green);
+            box-shadow: 0 0 8px var(--neon-green-glow);
+        }
+
+        main {
+            position: relative;
+            z-index: 5;
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1.15fr 0.85fr;
+            gap: 1.5rem;
+            padding: 1.5rem;
+            max-width: 1600px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        @media (max-width: 1100px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Glassmorphism Panel Wrapper */
+        .workspace-panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            padding: 1.5rem;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+            transition: border-color 0.3s ease;
+        }
+
+        .workspace-panel:hover {
+            border-color: rgba(139, 92, 246, 0.35);
+        }
+
+        .panel-title {
+            font-family: var(--font-title);
+            font-size: 1.2rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-primary);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding-bottom: 0.75rem;
+        }
+
+        /* Card Container styling */
+        .glass-card {
+            background: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 1.25rem;
+            position: relative;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .glass-card:hover {
+            border-color: var(--border-hover);
+            box-shadow: 0 0 20px rgba(139, 92, 246, 0.08);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .card-title {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        /* Form Controls */
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-group:last-child {
+            margin-bottom: 0;
+        }
+
+        label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .input-wrapper {
+            position: relative;
+        }
+
+        .neon-input {
+            width: 100%;
+            background: rgba(7, 4, 15, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            padding: 0.65rem 0.9rem;
+            font-family: var(--font-body);
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+
+        .neon-input:focus {
+            border-color: var(--neon-cyan);
+            box-shadow: 0 0 10px var(--neon-cyan-glow);
+            background: rgba(7, 4, 15, 0.85);
+        }
+
+        .neon-input:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .neon-input.code-input {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            line-height: 1.5;
+        }
+
+        .input-action-btn {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(139, 92, 246, 0.2);
+            border: 1px solid var(--neon-violet);
+            color: var(--neon-violet);
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .input-action-btn:hover {
+            background: var(--neon-violet);
+            color: var(--bg-color);
+            box-shadow: 0 0 8px var(--neon-violet-glow);
+        }
+
+        /* Editor component */
+        .editor-container {
+            display: flex;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: rgba(7, 4, 15, 0.7);
+            overflow: hidden;
+            height: 320px;
+            position: relative;
+        }
+
+        .line-numbers {
+            width: 40px;
+            padding: 0.75rem 0.5rem;
+            border-right: 1px solid rgba(255, 255, 255, 0.05);
+            background: rgba(0, 0, 0, 0.25);
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            text-align: right;
+            user-select: none;
+            overflow: hidden;
+            line-height: 1.5;
+        }
+
+        .editor-textarea {
+            flex: 1;
+            border: none;
+            background: transparent;
+            color: #e2e8f0;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            padding: 0.75rem;
+            resize: none;
+            outline: none;
+            overflow-y: auto;
+            line-height: 1.5;
+            white-space: pre;
+            tab-size: 4;
+        }
+
+        /* Vulnerability Templates List */
+        .template-selector {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            margin-bottom: 0.75rem;
+        }
+
+        .template-tag {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 0.3rem 0.6rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .template-tag:hover {
+            border-color: var(--neon-cyan);
+            color: var(--neon-cyan);
+            background: rgba(6, 182, 212, 0.05);
+        }
+
+        .template-tag.active {
+            border-color: var(--neon-violet);
+            color: var(--neon-violet);
+            background: rgba(139, 92, 246, 0.1);
+            box-shadow: 0 0 8px rgba(139, 92, 246, 0.15);
+        }
+
+        /* Action Buttons */
+        .primary-neon-btn {
+            width: 100%;
+            background: linear-gradient(135deg, var(--neon-violet), #7c3aed);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text-primary);
+            font-family: var(--font-title);
+            font-weight: 700;
+            font-size: 1rem;
+            padding: 0.9rem;
+            border-radius: 8px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .primary-neon-btn:not(:disabled):hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 25px rgba(139, 92, 246, 0.4);
+            border-color: rgba(255, 255, 255, 0.25);
+        }
+
+        .primary-neon-btn:disabled {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-muted);
+            border-color: rgba(255, 255, 255, 0.03);
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .secondary-neon-btn {
+            background: rgba(6, 182, 212, 0.1);
+            border: 1px solid var(--neon-cyan);
+            color: var(--neon-cyan);
+            font-family: var(--font-title);
+            font-weight: 600;
+            font-size: 0.85rem;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .secondary-neon-btn:hover {
+            background: var(--neon-cyan);
+            color: var(--bg-color);
+            box-shadow: 0 0 12px var(--neon-cyan-glow);
+        }
+
+        /* Multi-step Options Row */
+        .options-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        @media (max-width: 600px) {
+            .options-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Right Panel Cards */
+        /* Real-time Timeline */
+        .timeline-steps {
+            display: flex;
+            justify-content: space-between;
+            position: relative;
+            margin-top: 1rem;
+        }
+
+        .timeline-steps::before {
+            content: '';
+            position: absolute;
+            top: 14px;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: rgba(255, 255, 255, 0.05);
+            z-index: 1;
+        }
+
+        .timeline-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+            z-index: 2;
+            flex: 1;
+        }
+
+        .step-indicator {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: #161224;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .step-label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            text-align: center;
+            transition: all 0.4s ease;
+        }
+
+        /* Step States */
+        .timeline-step.active .step-indicator {
+            border-color: var(--neon-cyan);
+            box-shadow: 0 0 12px var(--neon-cyan-glow);
+            color: var(--neon-cyan);
+            background: rgba(6, 182, 212, 0.1);
+            animation: pulse-border 1.5s infinite;
+        }
+
+        .timeline-step.active .step-label {
+            color: var(--neon-cyan);
+        }
+
+        .timeline-step.completed .step-indicator {
+            border-color: var(--neon-green);
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--neon-green);
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+        }
+
+        .timeline-step.completed .step-label {
+            color: var(--neon-green);
+        }
+
+        /* Report Container Card */
+        .report-content {
+            height: 350px;
+            overflow-y: auto;
+            padding: 0.5rem;
+            border-radius: 6px;
+            font-family: var(--font-body);
+            font-size: 0.9rem;
+            line-height: 1.6;
+            color: var(--text-secondary);
+        }
+
+        /* Markdown Styling inside Report Container */
+        .report-content h1, .report-content h2, .report-content h3 {
+            font-family: var(--font-title);
+            color: var(--text-primary);
+            margin-top: 1rem;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+
+        .report-content h1 {
+            font-size: 1.35rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding-bottom: 0.4rem;
+        }
+
+        .report-content h2 {
+            font-size: 1.15rem;
+        }
+
+        .report-content p {
+            margin-bottom: 0.8rem;
+        }
+
+        .report-content ul, .report-content ol {
+            margin-left: 1.25rem;
+            margin-bottom: 0.8rem;
+        }
+
+        .report-content li {
+            margin-bottom: 0.25rem;
+        }
+
+        .report-content pre {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            padding: 0.75rem;
+            overflow-x: auto;
+            margin: 0.8rem 0;
+        }
+
+        .report-content code {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--neon-violet);
+            background: rgba(139, 92, 246, 0.08);
+            padding: 0.15rem 0.3rem;
+            border-radius: 4px;
+        }
+
+        .report-content pre code {
+            color: #cbd5e1;
+            background: transparent;
+            padding: 0;
+        }
+
+        .report-content hr {
+            border: 0;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.08);
+            margin: 1rem 0;
+        }
+
+        .report-placeholder {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        .report-placeholder svg {
+            width: 48px;
+            height: 48px;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+            opacity: 0.5;
+        }
+
+        /* Invoice breakdown Receipt Card */
+        .invoice-card {
+            border-left: 3px dashed var(--neon-violet);
+        }
+
+        .invoice-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            margin-top: 0.5rem;
+        }
+
+        .invoice-table tr {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        }
+
+        .invoice-table tr:last-child {
+            border-bottom: none;
+            font-weight: 700;
+        }
+
+        .invoice-table td {
+            padding: 0.5rem 0;
+            color: var(--text-secondary);
+        }
+
+        .invoice-table td.value {
+            text-align: right;
+            font-family: var(--font-mono);
+            color: var(--text-primary);
+        }
+
+        .invoice-table tr.highlight td {
+            color: var(--neon-cyan);
+        }
+
+        .invoice-table tr.highlight td.value {
+            color: var(--neon-cyan);
+            text-shadow: 0 0 8px var(--neon-cyan-glow);
+        }
+
+        .invoice-table tr.total-row td {
+            font-size: 0.95rem;
+            color: var(--text-primary);
+            padding-top: 0.75rem;
+            border-top: 1px dashed rgba(255, 255, 255, 0.15);
+        }
+
+        .invoice-table tr.total-row td.value {
+            color: var(--neon-violet);
+            text-shadow: 0 0 8px var(--neon-violet-glow);
+        }
+
+        /* Scrollbar styles */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.1);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(139, 92, 246, 0.2);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(139, 92, 246, 0.4);
+        }
+
+        /* Animations */
+        @keyframes pulse-dot {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.4); opacity: 0.4; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        @keyframes pulse-border {
+            0% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.4); }
+            70% { box-shadow: 0 0 0 8px rgba(34, 211, 238, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0); }
+        }
+
+        .pulse-text {
+            animation: text-glow 2s infinite ease-in-out;
+        }
+
+        @keyframes text-glow {
+            0% { text-shadow: 0 0 2px rgba(167, 139, 250, 0.1); }
+            50% { text-shadow: 0 0 10px rgba(167, 139, 250, 0.4); }
+            100% { text-shadow: 0 0 2px rgba(167, 139, 250, 0.1); }
+        }
+    </style>
+</head>
+<body>
+    <div class="ambient-glow-1"></div>
+    <div class="ambient-glow-2"></div>
+
+    <header>
+        <div class="header-title-container">
+            <div class="header-logo">A</div>
+            <h1>AgentPay AI Code Auditor</h1>
+            <span class="glowing-badge">Secured by AgentPay</span>
+        </div>
+        <div class="network-status">
+            <div id="statusDot" class="status-dot"></div>
+            <span id="statusText">模拟钱包未连接 (Disconnected)</span>
+        </div>
+    </header>
+
+    <main>
+        <!-- Left Panel: Auditing Workspace -->
+        <section class="workspace-panel">
+            <h2 class="panel-title">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
+                安全审计工作区 (Auditing Workspace)
+            </h2>
+
+            <!-- Wallet Control Card -->
+            <div class="glass-card">
+                <div class="card-header">
+                    <h3 class="card-title">模拟钱包配置 (Wallet Simulation)</h3>
+                </div>
+                <div class="form-group">
+                    <label for="privateKey">以太坊私钥 / 助记词 (Private Key / Seed Phrase)</label>
+                    <div class="input-wrapper">
+                        <input type="password" id="privateKey" class="neon-input" placeholder="输入 64 位十六进制私钥或助记词进行模拟测试 (例如 0x3a4f...)" value="0x7f23a41b89cd3e54b67f18a29b01c345d67a8b9c0d1e2f3a4b5c6d7e8f901234">
+                        <button type="button" id="toggleKeyBtn" class="input-action-btn">显示</button>
+                    </div>
+                </div>
+                <div style="margin-top: 1rem; display: flex; gap: 0.75rem;">
+                    <button type="button" id="connectWalletBtn" class="secondary-neon-btn" style="flex: 1;">模拟连接钱包</button>
+                    <button type="button" id="disconnectWalletBtn" class="secondary-neon-btn" style="background: rgba(244, 63, 94, 0.05); border-color: rgba(244, 63, 94, 0.3); color: var(--neon-rose); display: none;">断开连接</button>
+                </div>
+            </div>
+
+            <!-- Code Editor Card -->
+            <div class="glass-card" style="display: flex; flex-direction: column; flex: 1;">
+                <div class="card-header">
+                    <h3 class="card-title">智能合约源码 (Solidity Source Code)</h3>
+                </div>
+                <div class="template-selector">
+                    <span class="template-tag active" data-template="reentrancy">重入漏洞合约模板 (Reentrancy)</span>
+                    <span class="template-tag" data-template="safe">安全存取合约模板 (Safe Contract)</span>
+                </div>
+                <div class="editor-container">
+                    <div id="lineNumbers" class="line-numbers"></div>
+                    <textarea id="editorTextarea" class="editor-textarea" spellcheck="false"></textarea>
+                </div>
+            </div>
+
+            <!-- Options Card -->
+            <div class="glass-card">
+                <div class="card-header">
+                    <h3 class="card-title">网关与审计参数 (Agent Parameters)</h3>
+                </div>
+                <div class="options-row">
+                    <div class="form-group">
+                        <label for="agentId">审计代理 ID (Agent ID)</label>
+                        <input type="text" id="agentId" class="neon-input" value="888">
+                    </div>
+                    <div class="form-group">
+                        <label for="maxPrice">最大预算上限 (Max Price Limit - USDC)</label>
+                        <input type="number" id="maxPrice" class="neon-input" value="15000">
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: 1rem;">
+                    <label for="gatewayUrl">网关接口 URL (Gateway URL)</label>
+                    <input type="text" id="gatewayUrl" class="neon-input" value="http://localhost:8080/agent/execute">
+                </div>
+            </div>
+
+            <!-- Execute Button -->
+            <button type="button" id="executeAuditBtn" class="primary-neon-btn" disabled>
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                开始安全审计 (Execute Audit)
+            </button>
+        </section>
+
+        <!-- Right Panel: Audit Report & Invoice -->
+        <section class="workspace-panel">
+            <h2 class="panel-title">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                审计反馈与结算账单 (Feedback & Invoice)
+            </h2>
+
+            <!-- Real-time Timeline Card -->
+            <div class="glass-card">
+                <div class="card-header">
+                    <h3 class="card-title">审计请求状态生命周期 (Request Lifecycle)</h3>
+                </div>
+                <div class="timeline-steps">
+                    <div class="timeline-step" id="step-request">
+                        <div class="step-indicator">1</div>
+                        <div class="step-label">Request</div>
+                    </div>
+                    <div class="timeline-step" id="step-challenge">
+                        <div class="step-indicator">2</div>
+                        <div class="step-label">Challenge</div>
+                    </div>
+                    <div class="timeline-step" id="step-sign">
+                        <div class="step-indicator">3</div>
+                        <div class="step-label">Sign</div>
+                    </div>
+                    <div class="timeline-step" id="step-audit">
+                        <div class="step-indicator">4</div>
+                        <div class="step-label">Audit</div>
+                    </div>
+                    <div class="timeline-step" id="step-settle">
+                        <div class="step-indicator">5</div>
+                        <div class="step-label">Settle</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Report Container Card -->
+            <div class="glass-card" style="flex: 1; display: flex; flex-direction: column;">
+                <div class="card-header">
+                    <h3 class="card-title">AI 安全审计报告 (AI Audit Report)</h3>
+                    <span id="reportStatusText" style="font-size: 0.8rem; color: var(--text-muted);">等待生成...</span>
+                </div>
+                <div class="report-content" id="reportContent">
+                    <div class="report-placeholder" id="reportPlaceholder">
+                        <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"></path></svg>
+                        <p>请点击左侧 “开始安全审计 (Execute Audit)” 按钮<br>或者连接钱包后发起自动审计请求。</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Invoice breakdown card -->
+            <div class="glass-card invoice-card">
+                <div class="card-header">
+                    <h3 class="card-title" style="color: var(--neon-violet);">USDC 资金锁定账单 (USDC Hold Invoice)</h3>
+                </div>
+                <table class="invoice-table">
+                    <tr class="highlight">
+                        <td>初始冻结金额 (Initial Hold Amount)</td>
+                        <td class="value" id="holdAmountVal">0.050000 USDC</td>
+                    </tr>
+                    <tr>
+                        <td>模型调用开销 (Model API Cost)</td>
+                        <td class="value" id="modelCostVal">-- USDC</td>
+                    </tr>
+                    <tr>
+                        <td>安全代理服务费 (Service Fee)</td>
+                        <td class="value" id="serviceFeeVal">-- USDC</td>
+                    </tr>
+                    <tr>
+                        <td>AgentPay 平台税率 (Platform Tax)</td>
+                        <td class="value" id="platformFeeVal">-- USDC</td>
+                    </tr>
+                    <tr class="total-row">
+                        <td>付款人退款返还 (Payer Refund Amount)</td>
+                        <td class="value" id="refundVal">-- USDC</td>
+                    </tr>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        // Contract Code Templates
+        const templates = {
+            reentrancy: `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract EtherStore {
+    mapping(address => uint256) public balances;
+
+    function deposit() public payable {
+        balances[msg.sender] += msg.value;
+    }
+
+    function withdraw() public {
+        uint256 bal = balances[msg.sender];
+        require(bal > 0, "Insufficient balance");
+
+        // VULNERABILITY: External call before state update
+        (bool sent, ) = msg.sender.call{value: bal}("");
+        require(sent, "Failed to send Ether");
+
+        balances[msg.sender] = 0;
+    }
+}`,
+            safe: `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
+contract SafeEtherStore is ReentrancyGuard {
+    mapping(address => uint256) public balances;
+
+    function deposit() public payable {
+        balances[msg.sender] += msg.value;
+    }
+
+    function withdraw() public nonReentrant {
+        uint256 bal = balances[msg.sender];
+        require(bal > 0, "Insufficient balance");
+
+        // FIX: Effect before interaction
+        balances[msg.sender] = 0;
+
+        (bool sent, ) = msg.sender.call{value: bal}("");
+        require(sent, "Failed to send Ether");
+    }
+}`
+        };
+
+        // Static Report Placeholders for marked rendering
+        const reports = {
+            reentrancy: `# AI 安全审计报告：EtherStore.sol (重入漏洞检测)
+
+## 严重性摘要 (Severity Summary)
+- 🔴 **高危漏洞 (High)**: 1 个
+- 🟡 **中危漏洞 (Medium)**: 0 个
+- 🟢 **低危与建议 (Low & Info)**: 1 个
+
+---
+
+## 漏洞详细分析 (Vulnerability Analysis)
+
+### 1. 外部调用重入漏洞 (Reentrancy Vulnerability)
+- **级别**: 🔴 **CRITICAL (高危)**
+- **位置**: \`withdraw()\` 函数 (第 14-15 行)
+- **描述**: 合约在执行外部调用以转移资产 \`msg.sender.call{value: bal}("")\` 之前，没有更新用户的账户余额映射。攻击者可以通过部署恶意的接收合约，在收到以太币时利用其 \`fallback()\` 或 \`receive()\` 回调函数，在余额扣减为 0 之前反复发起对 \`withdraw()\` 的重入调用，从而抽空合约内所有沉淀资金。
+- **修复方案**:
+  1. 采用 **Checks-Effects-Interactions (检查-效果-交互)** 经典架构模式，在进行任何外部调用之前，先将用户的内部状态变量清零：
+     \`\`\`solidity
+     balances[msg.sender] = 0;
+     (bool sent, ) = msg.sender.call{value: bal}("");
+     require(sent, "Failed to send Ether");
+     \`\`\`
+  2. 使用 OpenZeppelin 精心设计的 \`ReentrancyGuard\` 库，并在 \`withdraw()\` 上附加 \`nonReentrant\` 修饰器防止重入调用。
+
+### 2. 缺少编译器版本锁锁定 (Floating Compiler Pragma)
+- **级别**: 🟢 **LOW (低危)**
+- **描述**: 合约使用了松散的编译器 Pragma 设定 \`^0.8.20\`。这允许在过高或未经完全生产测试的编译器版本上进行编译，可能引入已知的编译器本身漏洞。
+- **修复方案**: 在代码最终发布时锁定具体的编译器版本，如 \`pragma solidity 0.8.20;\`。
+
+---
+
+## AgentPay 密码学支付证明
+- **审计代理**: AI Auditor Agent #888
+- **验证人**: AgentPay 信任中继节点 (Gateway Node 1)
+- **交易哈希**: \`0x9f32e987acb0d771239ab7d812fe34eef012019ab763c5a77c8e9b110a51fc89\`
+`,
+            safe: `# AI 安全审计报告：SafeEtherStore.sol (已加固防线)
+
+## 严重性摘要 (Severity Summary)
+- 🔴 **高危漏洞 (High)**: 0 个
+- 🟡 **中危漏洞 (Medium)**: 0 个
+- 🟢 **低危与建议 (Low & Info)**: 1 个
+
+---
+
+## 漏洞评估详情
+
+### 1. 重入安全防御检验 (Reentrancy Verification)
+- **级别**: 🟢 **SECURE (已防护)**
+- **状态**: ✅ 安全通过
+- **描述**: 本合约已正确继承了 \`ReentrancyGuard\` 并将 \`nonReentrant\` 用于 \`withdraw()\` 方法。此外，代码执行了安全的 **检查-效果-交互 (CEI)** 规范，先执行了 \`balances[msg.sender] = 0\` 的内部记账清算，后执行外部转账调用。这确保了在逻辑深度执行前已完成了状态落库，阻断了回调重入的一切链路。
+
+### 2. 浮动 Pragma 编译器版本锁定
+- **级别**: 🟢 **LOW (低危)**
+- **描述**: 虽然逻辑上已经完全加固，但依然存在浮动的 Pragma 设定 \`^0.8.20\`，建议在项目真正布署到以太坊主网时将编译器版本固定为 \`0.8.20\`。
+
+---
+
+## AgentPay 密码学支付证明
+- **审计代理**: AI Auditor Agent #888
+- **服务执行**: 成功 (Success)
+- **哈希证书**: \`0x05fba716a4e3215aa65cf711d9bc18e0019280ab44ee789bcde0387a66cd9f1a\`
+`
+        };
+
+        // DOM Elements
+        const privateKeyInput = document.getElementById('privateKey');
+        const toggleKeyBtn = document.getElementById('toggleKeyBtn');
+        const connectWalletBtn = document.getElementById('connectWalletBtn');
+        const disconnectWalletBtn = document.getElementById('disconnectWalletBtn');
+        const executeAuditBtn = document.getElementById('executeAuditBtn');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const editorTextarea = document.getElementById('editorTextarea');
+        const lineNumbers = document.getElementById('lineNumbers');
+        const reportContent = document.getElementById('reportContent');
+        const reportStatusText = document.getElementById('reportStatusText');
+        const templateTags = document.querySelectorAll('.template-tag');
+
+        // Invoice Element IDs
+        const modelCostVal = document.getElementById('modelCostVal');
+        const serviceFeeVal = document.getElementById('serviceFeeVal');
+        const platformFeeVal = document.getElementById('platformFeeVal');
+        const refundVal = document.getElementById('refundVal');
+
+        let isWalletConnected = false;
+        let selectedTemplate = 'reentrancy';
+
+        // Initialize marked options
+        marked.setOptions({
+            gfm: true,
+            breaks: true
+        });
+
+        // Initialize editor content
+        editorTextarea.value = templates.reentrancy;
+        updateLineNumbers();
+
+        // Synchronize editor scroll with line numbers
+        editorTextarea.addEventListener('scroll', () => {
+            lineNumbers.scrollTop = editorTextarea.scrollTop;
+        });
+
+        editorTextarea.addEventListener('input', () => {
+            updateLineNumbers();
+        });
+
+        // Generate line numbers
+        function updateLineNumbers() {
+            const lines = editorTextarea.value.split('\n');
+            const totalLines = lines.length || 1;
+            let numbersHtml = '';
+            for (let i = 1; i <= totalLines; i++) {
+                numbersHtml += `<div>${i}</div>`;
+            }
+            lineNumbers.innerHTML = numbersHtml;
+        }
+
+        // Toggle Key Visibility
+        toggleKeyBtn.addEventListener('click', () => {
+            if (privateKeyInput.type === 'password') {
+                privateKeyInput.type = 'text';
+                toggleKeyBtn.textContent = '隐藏';
+            } else {
+                privateKeyInput.type = 'password';
+                toggleKeyBtn.textContent = '显示';
+            }
+        });
+
+        // Connect Wallet Simulation
+        connectWalletBtn.addEventListener('click', () => {
+            if (privateKeyInput.value.trim() === '') {
+                alert('请输入测试用以太坊私钥或助记词！');
+                return;
+            }
+            isWalletConnected = true;
+            statusDot.classList.add('connected');
+            statusText.textContent = '已连接到模拟钱包 (Simulated Connected)';
+            statusText.style.color = 'var(--neon-green)';
+            
+            connectWalletBtn.style.display = 'none';
+            disconnectWalletBtn.style.display = 'block';
+            executeAuditBtn.disabled = false;
+            
+            // Focus visually
+            executeAuditBtn.style.boxShadow = '0 0 15px var(--neon-violet-glow)';
+        });
+
+        // Disconnect Wallet Simulation
+        disconnectWalletBtn.addEventListener('click', () => {
+            isWalletConnected = false;
+            statusDot.classList.remove('connected');
+            statusText.textContent = '模拟钱包未连接 (Disconnected)';
+            statusText.style.color = 'var(--text-secondary)';
+            
+            connectWalletBtn.style.display = 'block';
+            disconnectWalletBtn.style.display = 'none';
+            executeAuditBtn.disabled = true;
+            executeAuditBtn.style.boxShadow = 'none';
+        });
+
+        // Select templates
+        templateTags.forEach(tag => {
+            tag.addEventListener('click', () => {
+                if (tag.classList.contains('active')) return;
+                
+                templateTags.forEach(t => t.classList.remove('active'));
+                tag.classList.add('active');
+                
+                const templateName = tag.getAttribute('data-template');
+                selectedTemplate = templateName;
+                editorTextarea.value = templates[templateName];
+                updateLineNumbers();
+
+                // Clear previous audit states
+                resetAuditSteps();
+            });
+        });
+
+        function resetAuditSteps() {
+            const steps = ['request', 'challenge', 'sign', 'audit', 'settle'];
+            steps.forEach(step => {
+                const el = document.getElementById(`step-${step}`);
+                el.classList.remove('active', 'completed');
+            });
+            reportContent.innerHTML = `
+                <div class="report-placeholder" id="reportPlaceholder">
+                    <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"></path></svg>
+                    <p>代码模板已切换，请点击 “开始安全审计 (Execute Audit)” 启动审计流程。</p>
+                </div>
+            `;
+            reportStatusText.textContent = '等待生成...';
+            reportStatusText.style.color = 'var(--text-muted)';
+            
+            // Reset Invoice Breakdown
+            modelCostVal.textContent = '-- USDC';
+            serviceFeeVal.textContent = '-- USDC';
+            platformFeeVal.textContent = '-- USDC';
+            refundVal.textContent = '-- USDC';
+            refundVal.style.textShadow = 'none';
+        }
+
+        // Execute Audit Lifecycle Simulation
+        executeAuditBtn.addEventListener('click', () => {
+            if (!isWalletConnected) return;
+
+            executeAuditBtn.disabled = true;
+            executeAuditBtn.textContent = '安全审计运行中...';
+            resetAuditSteps();
+
+            const steps = ['request', 'challenge', 'sign', 'audit', 'settle'];
+            let currentStepIdx = 0;
+
+            function runStep() {
+                if (currentStepIdx > 0) {
+                    const prevStep = steps[currentStepIdx - 1];
+                    document.getElementById(`step-${prevStep}`).classList.remove('active');
+                    document.getElementById(`step-${prevStep}`).classList.add('completed');
+                }
+
+                if (currentStepIdx < steps.length) {
+                    const currStep = steps[currentStepIdx];
+                    document.getElementById(`step-${currStep}`).classList.add('active');
+                    reportStatusText.textContent = `执行步骤: ${currStep.toUpperCase()}...`;
+                    reportStatusText.className = 'pulse-text';
+                    reportStatusText.style.color = 'var(--neon-cyan)';
+                    
+                    let delay = 1000;
+                    if (currStep === 'audit') delay = 1800; // Audit simulation takes longer
+
+                    currentStepIdx++;
+                    
+                    // Specific logic trigger inside steps
+                    if (currStep === 'audit') {
+                        setTimeout(() => {
+                            // Render markdown report using marked.js
+                            const rawMarkdown = reports[selectedTemplate];
+                            reportContent.innerHTML = marked.parse(rawMarkdown);
+                            runStep();
+                        }, delay);
+                    } else if (currStep === 'settle') {
+                        setTimeout(() => {
+                            // Fill Invoice Receipt breakdown
+                            const modelCost = selectedTemplate === 'reentrancy' ? 0.012500 : 0.009400;
+                            const serviceFee = selectedTemplate === 'reentrancy' ? 0.003000 : 0.002000;
+                            const platformFee = 0.001000;
+                            const refund = 0.050000 - (modelCost + serviceFee + platformFee);
+
+                            modelCostVal.textContent = `${modelCost.toFixed(6)} USDC`;
+                            serviceFeeVal.textContent = `${serviceFee.toFixed(6)} USDC`;
+                            platformFeeVal.textContent = `${platformFee.toFixed(6)} USDC`;
+                            refundVal.textContent = `${refund.toFixed(6)} USDC`;
+                            refundVal.style.textShadow = '0 0 8px var(--neon-violet-glow)';
+                            
+                            runStep();
+                        }, delay);
+                    } else {
+                        setTimeout(runStep, delay);
+                    }
+                } else {
+                    // All steps completed
+                    const lastStep = steps[steps.length - 1];
+                    document.getElementById(`step-${lastStep}`).classList.remove('active');
+                    document.getElementById(`step-${lastStep}`).classList.add('completed');
+                    
+                    executeAuditBtn.disabled = false;
+                    executeAuditBtn.innerHTML = `
+                        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                        开始安全审计 (Execute Audit)
+                    `;
+                    reportStatusText.textContent = '审计成功完成 (Completed)';
+                    reportStatusText.className = '';
+                    reportStatusText.style.color = 'var(--neon-green)';
+                }
+            }
+
+            // Start the chain
+            runStep();
+        });
+
+        // Initialize markdown rendering with static placeholder on load
+        // Ensure that it links to marked.js and renders a static placeholder markdown when opened.
+        window.addEventListener('DOMContentLoaded', () => {
+            const initialPlaceholderMarkdown = `# 静态占位审计系统准备就绪
+欢迎使用 **AgentPay AI Code Auditor** 智能审计系统。
+
+### 功能说明
+- **代码工作区**: 左侧支持直接编辑智能合约，也可以一键导入系统内置的脆弱性模板或安全合约模板。
+- **钱包模拟器**: 输入私钥/助记词并点击“模拟连接钱包”进行链上代理授权与额度扣减模拟。
+- **报告生命周期**: 点击“开始安全审计”将依次启动 **Request -> Challenge -> Sign -> Audit -> Settle** 密码学结算全生命周期，并在右侧生成真实的审计与退款结果。
+
+> [!NOTE]
+> 目前审计报告为模拟分析结果。在完全部署后，系统将通过 **AgentPay 密码学支付通道** 驱动外部高性能代理执行多维度静态分析与形式化验证，根据真实的计算消耗自动退还多余额度。
+
+*Ready for cryptographic audit.*`;
+            
+            reportContent.innerHTML = marked.parse(initialPlaceholderMarkdown);
+            reportStatusText.textContent = '系统就绪';
+        });
+    </script>
+</body>
+</html>
