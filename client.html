@@ -804,7 +804,7 @@
                 <div class="form-group" id="privateKeyGroup">
                     <label for="privateKey">以太坊私钥 / 助记词 (Private Key / Seed Phrase)</label>
                     <div class="input-wrapper">
-                        <input type="password" id="privateKey" class="neon-input" placeholder="输入 64 位十六进制私钥或助记词进行模拟测试 (例如 0x3a4f...)" value="0x7f23a41b89cd3e54b67f18a29b01c345d67a8b9c0d1e2f3a4b5c6d7e8f901234">
+                        <input type="password" id="privateKey" class="neon-input" placeholder="输入 64 位十六进制私钥或助记词进行模拟测试 (例如 0x3a4f...)" value="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80">
                         <button type="button" id="toggleKeyBtn" class="input-action-btn">显示</button>
                     </div>
                 </div>
@@ -861,9 +861,15 @@
                         <input type="number" id="maxPrice" class="neon-input" value="15000">
                     </div>
                 </div>
-                <div class="form-group" style="margin-top: 1rem;">
-                    <label for="gatewayUrl">网关接口 URL (Gateway URL)</label>
-                    <input type="text" id="gatewayUrl" class="neon-input" value="http://localhost:8080/agent/execute">
+                <div class="options-row" style="margin-top: 1rem;">
+                    <div class="form-group">
+                        <label for="gatewayUrl">网关接口 URL (Gateway URL)</label>
+                        <input type="text" id="gatewayUrl" class="neon-input" value="http://localhost:8080/agent/execute">
+                    </div>
+                    <div class="form-group">
+                        <label for="gatewayAddress">网关结算地址 (Gateway Address)</label>
+                        <input type="text" id="gatewayAddress" class="neon-input" value="0xF1DB65d699d5B409E77692783098197F80DbA174">
+                    </div>
                 </div>
             </div>
 
@@ -1639,7 +1645,8 @@ contract SafeEtherStore is ReentrancyGuard {
                     const expectedMsg = `${receiptChannelId}:${receiptParts[1]}:${receiptActualCost}:${receiptNonce}`;
                     if (receiptSig.startsWith('0x') && (receiptSig.length === 130 || receiptSig.length === 132)) {
                         recoveredSigner = ethers.utils.verifyMessage(expectedMsg, receiptSig);
-                        if (recoveredSigner && recoveredSigner !== ethers.constants.AddressZero) {
+                        const expectedGateway = document.getElementById('gatewayAddress').value.trim();
+                        if (recoveredSigner && recoveredSigner.toLowerCase() === expectedGateway.toLowerCase()) {
                             isSigValid = true;
                         }
                     } else if (receiptSig.includes('mock') || !receiptSig.startsWith('0x')) {
@@ -1663,11 +1670,14 @@ contract SafeEtherStore is ReentrancyGuard {
                 const platformBps = parseInt(platformBpsStr) || 10;
                 const platformFee = Math.floor(receiptActualCost * platformBps / 10000);
                 
-                let serviceFee = selectedTemplate === 'reentrancy' ? 3000 : 2000;
-                if (serviceFee + platformFee > receiptActualCost) {
-                    serviceFee = Math.floor((receiptActualCost - platformFee) * 0.3);
+                // 从响应头 X-Agent-Cost 动态读取模型费用，回退默认值 1000
+                const agentCostHeader = resSecond.headers.get('X-Agent-Cost');
+                let modelCost = agentCostHeader ? parseInt(agentCostHeader) : 1000;
+                if (modelCost + platformFee > receiptActualCost) {
+                    modelCost = receiptActualCost - platformFee;
                 }
-                const modelCost = receiptActualCost - serviceFee - platformFee;
+                
+                const serviceFee = receiptActualCost - platformFee - modelCost;
                 const refund = receiptHoldAmount - receiptActualCost;
                 
                 if (holdAmountValEl) {
@@ -1708,6 +1718,11 @@ contract SafeEtherStore is ReentrancyGuard {
                 
                 const output = resJson.output || "";
                 reportContent.innerHTML = marked.parse(output);
+                
+                modelCostVal.textContent = "0.000000 USDC";
+                serviceFeeVal.textContent = "0.000000 USDC";
+                platformFeeVal.textContent = "0.000000 USDC";
+                refundVal.textContent = "0.000000 USDC";
                 
                 setStepState('settle', 'completed');
                 
