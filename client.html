@@ -787,8 +787,29 @@
                 安全审计工作区 (Auditing Workspace)
             </h2>
 
+            <!-- Payment Strategy Selector Tabs -->
+            <div class="glass-card" style="padding: 1rem; margin-bottom: 0;">
+                <div class="card-header" style="margin-bottom: 0.75rem;">
+                    <h3 class="card-title">支付策略选择 (Payment Strategy)</h3>
+                </div>
+                <div style="display: flex; gap: 0.75rem;">
+                    <span class="template-tag active" id="paymentCryptoTab" style="flex: 1; text-align: center; margin-bottom: 0; padding: 0.5rem 0; font-size: 0.85rem;">🔗 链上支付 (Crypto Channel)</span>
+                    <span class="template-tag" id="paymentStripeTab" style="flex: 1; text-align: center; margin-bottom: 0; padding: 0.5rem 0; font-size: 0.85rem;">💳 法币支付 (Stripe)</span>
+                </div>
+            </div>
+
+            <!-- Stripe Notes Card -->
+            <div class="glass-card" id="stripeNoteCard" style="display: none; margin-bottom: 0;">
+                <div class="card-header">
+                    <h3 class="card-title">Stripe 支付配置 (Stripe Payment)</h3>
+                </div>
+                <div style="padding: 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; background: rgba(7, 4, 15, 0.4); text-align: center;">
+                    <span style="font-size: 0.9rem; color: var(--text-secondary);">使用信用卡通过 Stripe 收银台进行按次支付，每次固定 $0.05 USDC 等值法币。</span>
+                </div>
+            </div>
+
             <!-- Wallet Control Card -->
-            <div class="glass-card">
+            <div class="glass-card" id="walletControlCard">
                 <div class="card-header">
                     <h3 class="card-title">模拟钱包配置 (Wallet Simulation)</h3>
                 </div>
@@ -933,11 +954,11 @@
             <!-- Invoice breakdown card -->
             <div class="glass-card invoice-card">
                 <div class="card-header">
-                    <h3 class="card-title" style="color: var(--neon-violet);">USDC 资金锁定账单 (USDC Hold Invoice)</h3>
+                    <h3 class="card-title" id="invoiceTitle" style="color: var(--neon-violet);">USDC 资金锁定账单 (USDC Hold Invoice)</h3>
                 </div>
                 <table class="invoice-table">
                     <tr class="highlight">
-                        <td>初始冻结金额 (Initial Hold Amount)</td>
+                        <td id="invoiceFirstRowLabel">初始冻结金额 (Initial Hold Amount)</td>
                         <td class="value" id="holdAmountVal">0.050000 USDC</td>
                     </tr>
                     <tr>
@@ -953,7 +974,7 @@
                         <td class="value" id="platformFeeVal">-- USDC</td>
                     </tr>
                     <tr class="total-row">
-                        <td>付款人退款返还 (Payer Refund Amount)</td>
+                        <td id="invoiceLastRowLabel">付款人退款返还 (Payer Refund Amount)</td>
                         <td class="value" id="refundVal">-- USDC</td>
                     </tr>
                 </table>
@@ -1092,6 +1113,12 @@ contract SafeEtherStore is ReentrancyGuard {
         const reportStatusText = document.getElementById('reportStatusText');
         const templateTags = document.querySelectorAll('.template-tag[data-template]');
 
+        // Payment Strategy Selector DOMs
+        const paymentCryptoTab = document.getElementById('paymentCryptoTab');
+        const paymentStripeTab = document.getElementById('paymentStripeTab');
+        const walletControlCard = document.getElementById('walletControlCard');
+        const stripeNoteCard = document.getElementById('stripeNoteCard');
+
         // Mode switch elements
         const modePrivateBtn = document.getElementById('modePrivateBtn');
         const modeBrowserBtn = document.getElementById('modeBrowserBtn');
@@ -1102,11 +1129,15 @@ contract SafeEtherStore is ReentrancyGuard {
         const derivedBalanceText = document.getElementById('derivedBalanceText');
 
         // Invoice Element IDs
+        const invoiceTitle = document.getElementById('invoiceTitle');
+        const invoiceFirstRowLabel = document.getElementById('invoiceFirstRowLabel');
+        const invoiceLastRowLabel = document.getElementById('invoiceLastRowLabel');
         const modelCostVal = document.getElementById('modelCostVal');
         const serviceFeeVal = document.getElementById('serviceFeeVal');
         const platformFeeVal = document.getElementById('platformFeeVal');
         const refundVal = document.getElementById('refundVal');
 
+        let activePaymentStrategy = 'crypto'; // 'crypto' | 'stripe'
         let isWalletConnected = false;
         let selectedTemplate = 'reentrancy';
         let walletMode = 'private_key'; // 'private_key' | 'browser'
@@ -1318,11 +1349,116 @@ contract SafeEtherStore is ReentrancyGuard {
             });
         });
 
+        function updateTimelineUI() {
+            const timelineContainer = document.querySelector('.timeline-steps');
+            if (activePaymentStrategy === 'crypto') {
+                timelineContainer.innerHTML = `
+                    <div class="timeline-step" id="step-request">
+                        <div class="step-indicator">1</div>
+                        <div class="step-label">Request</div>
+                    </div>
+                    <div class="timeline-step" id="step-challenge">
+                        <div class="step-indicator">2</div>
+                        <div class="step-label">Challenge</div>
+                    </div>
+                    <div class="timeline-step" id="step-sign">
+                        <div class="step-indicator">3</div>
+                        <div class="step-label">Sign</div>
+                    </div>
+                    <div class="timeline-step" id="step-audit">
+                        <div class="step-indicator">4</div>
+                        <div class="step-label">Audit</div>
+                    </div>
+                    <div class="timeline-step" id="step-settle">
+                        <div class="step-indicator">5</div>
+                        <div class="step-label">Settle</div>
+                    </div>
+                `;
+            } else {
+                timelineContainer.innerHTML = `
+                    <div class="timeline-step" id="step-request">
+                        <div class="step-indicator">1</div>
+                        <div class="step-label">Request</div>
+                    </div>
+                    <div class="timeline-step" id="step-challenge">
+                        <div class="step-indicator">2</div>
+                        <div class="step-label">Challenge</div>
+                    </div>
+                    <div class="timeline-step" id="step-stripe-pay">
+                        <div class="step-indicator">3</div>
+                        <div class="step-label">Stripe Pay</div>
+                    </div>
+                    <div class="timeline-step" id="step-audit">
+                        <div class="step-indicator">4</div>
+                        <div class="step-label">Audit</div>
+                    </div>
+                `;
+            }
+        }
+
+        // Payment Strategy Tab Switching
+        paymentCryptoTab.addEventListener('click', () => {
+            if (activePaymentStrategy === 'crypto') return;
+            activePaymentStrategy = 'crypto';
+            paymentCryptoTab.classList.add('active');
+            paymentStripeTab.classList.remove('active');
+            
+            walletControlCard.style.display = 'block';
+            stripeNoteCard.style.display = 'none';
+            
+            if (isWalletConnected) {
+                executeAuditBtn.disabled = false;
+                executeAuditBtn.style.boxShadow = '0 0 15px var(--neon-violet-glow)';
+            } else {
+                executeAuditBtn.disabled = true;
+                executeAuditBtn.style.boxShadow = 'none';
+            }
+            
+            updateTimelineUI();
+            resetAuditSteps();
+        });
+
+        paymentStripeTab.addEventListener('click', () => {
+            if (activePaymentStrategy === 'stripe') return;
+            activePaymentStrategy = 'stripe';
+            paymentStripeTab.classList.add('active');
+            paymentCryptoTab.classList.remove('active');
+            
+            walletControlCard.style.display = 'none';
+            stripeNoteCard.style.display = 'block';
+            
+            executeAuditBtn.disabled = false;
+            executeAuditBtn.style.boxShadow = '0 0 15px var(--neon-violet-glow)';
+            
+            updateTimelineUI();
+            resetAuditSteps();
+        });
+
         function resetAuditSteps() {
-            const steps = ['request', 'challenge', 'sign', 'audit', 'settle'];
+            let steps = [];
+            if (activePaymentStrategy === 'crypto') {
+                steps = ['request', 'challenge', 'sign', 'audit', 'settle'];
+                
+                // Reset Invoice Breakdown Labels & Values
+                invoiceTitle.textContent = 'USDC 资金锁定账单 (USDC Hold Invoice)';
+                invoiceFirstRowLabel.textContent = '初始冻结金额 (Initial Hold Amount)';
+                invoiceLastRowLabel.textContent = '付款人退款返还 (Payer Refund Amount)';
+                
+                holdAmountVal.textContent = '0.050000 USDC';
+            } else {
+                steps = ['request', 'challenge', 'stripe-pay', 'audit'];
+                
+                // Reset Invoice Breakdown Labels & Values for Stripe
+                invoiceTitle.textContent = 'Stripe 支付结算账单 (Stripe Payment Invoice)';
+                invoiceFirstRowLabel.textContent = '支付策略 (Payment Strategy)';
+                invoiceLastRowLabel.textContent = '退款金额 (Refunded Amount)';
+                
+                holdAmountVal.innerHTML = '<span style="color: var(--neon-cyan);">信用卡支付 (Stripe)</span>';
+            }
+            
             steps.forEach(step => {
                 const el = document.getElementById(`step-${step}`);
-                el.classList.remove('active', 'completed', 'failed');
+                if (el) el.classList.remove('active', 'completed', 'failed');
             });
             reportContent.innerHTML = `
                 <div class="report-placeholder" id="reportPlaceholder">
@@ -1333,7 +1469,7 @@ contract SafeEtherStore is ReentrancyGuard {
             reportStatusText.textContent = '等待生成...';
             reportStatusText.style.color = 'var(--text-muted)';
             
-            // Reset Invoice Breakdown
+            // Reset Invoice Breakdown Values
             modelCostVal.textContent = '-- USDC';
             serviceFeeVal.textContent = '-- USDC';
             platformFeeVal.textContent = '-- USDC';
@@ -1406,6 +1542,271 @@ contract SafeEtherStore is ReentrancyGuard {
         }
 
         async function executeAudit() {
+            if (activePaymentStrategy === 'stripe') {
+                executeAuditBtn.disabled = true;
+                executeAuditBtn.textContent = '安全审计运行中...';
+                resetAuditSteps();
+
+                const gatewayUrl = document.getElementById('gatewayUrl').value.trim();
+                const agentId = parseInt(document.getElementById('agentId').value.trim()) || 888;
+                const codeInput = editorTextarea.value;
+
+                // Step 1: Request
+                setStepState('request', 'active');
+                reportStatusText.textContent = '正在发起审计请求 (Request)...';
+                reportStatusText.className = 'pulse-text';
+                reportStatusText.style.color = 'var(--neon-cyan)';
+                
+                await new Promise(r => setTimeout(r, 600));
+                
+                let res;
+                try {
+                    res = await fetch(gatewayUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            input: codeInput,
+                            agentId: agentId
+                        })
+                    });
+                } catch (err) {
+                    showError("网络请求失败，请确保 Gateway 服务已正常启动且未被跨域拦截: " + err.message);
+                    setStepState('request', 'failed');
+                    return;
+                }
+
+                if (res.status === 402) {
+                    setStepState('request', 'completed');
+                    
+                    // Step 2: Challenge
+                    setStepState('challenge', 'active');
+                    reportStatusText.textContent = '捕获 X-402 预授权挑战 (Challenge)...';
+                    
+                    await new Promise(r => setTimeout(r, 600));
+                    
+                    const paymentMethodsHeader = res.headers.get('X-402-Payment-Methods') || '';
+                    const paymentMethods = paymentMethodsHeader.split(',').map(m => m.trim().toLowerCase());
+                    
+                    if (!paymentMethods.includes('fiat-stripe')) {
+                        showError("网关不支持 Stripe 法币支付方式。支持的方式为: " + paymentMethodsHeader);
+                        setStepState('challenge', 'failed');
+                        return;
+                    }
+                    
+                    const platformBpsStr = res.headers.get('X-402-Platform-Bps') || '10';
+                    
+                    setStepState('challenge', 'completed');
+                    
+                    // Step 3: Stripe Pay
+                    setStepState('stripe-pay', 'active');
+                    reportStatusText.textContent = '正在创建 Stripe 支付会话...';
+                    
+                    await new Promise(r => setTimeout(r, 600));
+                    
+                    let gatewayOrigin = 'http://localhost:8080';
+                    try {
+                        gatewayOrigin = new URL(gatewayUrl).origin;
+                    } catch(e) {}
+                    
+                    let sessionRes;
+                    try {
+                        sessionRes = await fetch(`${gatewayOrigin}/stripe/create-session`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                amount: 50000,
+                                agentId: agentId
+                            })
+                        });
+                    } catch (err) {
+                        showError("创建 Stripe 支付会话失败: " + err.message);
+                        setStepState('stripe-pay', 'failed');
+                        return;
+                    }
+                    
+                    if (sessionRes.status !== 200) {
+                        showError("创建 Stripe 支付会话失败，状态码: " + sessionRes.status);
+                        setStepState('stripe-pay', 'failed');
+                        return;
+                    }
+                    
+                    let sessionJson;
+                    try {
+                        sessionJson = await sessionRes.json();
+                    } catch (e) {
+                        showError("无法解析 Stripe 会话响应数据");
+                        setStepState('stripe-pay', 'failed');
+                        return;
+                    }
+                    
+                    const sessionId = sessionJson.sessionId;
+                    const checkoutUrl = sessionJson.url;
+                    
+                    if (!sessionId || !checkoutUrl) {
+                        showError("Stripe 会话创建返回无效数据");
+                        setStepState('stripe-pay', 'failed');
+                        return;
+                    }
+                    
+                    reportStatusText.textContent = '正在等待信用卡支付完成 (Stripe Pay)...';
+                    const popup = window.open(checkoutUrl, "StripeCheckout", "width=600,height=700");
+                    
+                    // 监控弹窗关闭或在 2 秒后强制关闭
+                    await new Promise(async (resolve) => {
+                        let timer;
+                        let count = 0;
+                        const maxCount = 10; // 2 seconds (10 * 200ms)
+                        timer = setInterval(() => {
+                            count++;
+                            if (!popup || popup.closed || count >= maxCount) {
+                                clearInterval(timer);
+                                if (popup && !popup.closed) {
+                                    popup.close();
+                                }
+                                resolve();
+                            }
+                        }, 200);
+                    });
+                    
+                    setStepState('stripe-pay', 'completed');
+                    
+                    // Step 4: Audit
+                    setStepState('audit', 'active');
+                    reportStatusText.textContent = '正在使用 Stripe 凭证获取审计报告 (Audit)...';
+                    
+                    await new Promise(r => setTimeout(r, 600));
+                    
+                    let resSecond;
+                    try {
+                        resSecond = await fetch(gatewayUrl, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer stripe:${sessionId}`
+                            },
+                            body: JSON.stringify({
+                                input: codeInput,
+                                agentId: agentId
+                            })
+                        });
+                    } catch (err) {
+                        showError("获取审计报告请求失败: " + err.message);
+                        setStepState('audit', 'failed');
+                        return;
+                    }
+                    
+                    if (resSecond.status !== 200) {
+                        let errMsg = "审计获取失败";
+                        try {
+                            const errJson = await resSecond.json();
+                            errMsg = errJson.message || errJson.error || errMsg;
+                        } catch (e) {}
+                        showError("审计获取失败 (HTTP " + resSecond.status + "): " + errMsg);
+                        setStepState('audit', 'failed');
+                        return;
+                    }
+                    
+                    let resJson;
+                    try {
+                        resJson = await resSecond.json();
+                    } catch (e) {
+                        showError("无法解析审计报告的 JSON 数据");
+                        setStepState('audit', 'failed');
+                        return;
+                    }
+                    
+                    // 验证 Receipt details 头部
+                    const paymentMethodHeaderVal = resSecond.headers.get('X-402-Payment-Method');
+                    const stripeSessionHeaderVal = resSecond.headers.get('X-402-Stripe-Session');
+                    if (!paymentMethodHeaderVal || !stripeSessionHeaderVal) {
+                        console.warn("未能在响应头中找到 Stripe 支付凭证 (X-402-Payment-Method / X-402-Stripe-Session)");
+                    }
+                    
+                    const output = resJson.output || "";
+                    reportContent.innerHTML = marked.parse(output);
+                    
+                    // 计算账单
+                    const actualCost = 50000; // 每次固定 $0.05 USDC
+                    const platformBps = parseInt(platformBpsStr) || 10;
+                    const platformFee = Math.floor(actualCost * platformBps / 10000);
+                    
+                    const agentCostHeader = resSecond.headers.get('X-Agent-Cost');
+                    let modelCost = agentCostHeader ? parseInt(agentCostHeader) : 1000;
+                    if (modelCost + platformFee > actualCost) {
+                        modelCost = actualCost - platformFee;
+                    }
+                    const serviceFee = actualCost - platformFee - modelCost;
+                    const refund = 0; // 法币支付，不设退款
+                    
+                    // 更新账单 UI
+                    invoiceTitle.textContent = 'Stripe 支付结算账单 (Stripe Payment Invoice)';
+                    invoiceFirstRowLabel.textContent = '支付策略 (Payment Strategy)';
+                    holdAmountVal.innerHTML = '<span style="color: var(--neon-cyan);">信用卡支付 (Stripe)</span>';
+                    
+                    modelCostVal.textContent = `${(modelCost / 1e6).toFixed(6)} USDC`;
+                    serviceFeeVal.textContent = `${(serviceFee / 1e6).toFixed(6)} USDC`;
+                    platformFeeVal.textContent = `${(platformFee / 1e6).toFixed(6)} USDC`;
+                    
+                    invoiceLastRowLabel.textContent = '退款金额 (Refunded Amount)';
+                    refundVal.textContent = `${(refund / 1e6).toFixed(6)} USDC`;
+                    refundVal.style.textShadow = 'none';
+                    
+                    setStepState('audit', 'completed');
+                    
+                    executeAuditBtn.disabled = false;
+                    executeAuditBtn.innerHTML = `
+                        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                        开始安全审计 (Execute Audit)
+                    `;
+                    reportStatusText.textContent = '审计成功完成，Stripe 支付成功！';
+                    reportStatusText.style.color = 'var(--neon-green)';
+                    reportStatusText.className = '';
+                } else if (res.status === 200) {
+                    setStepState('request', 'completed');
+                    setStepState('challenge', 'completed');
+                    setStepState('stripe-pay', 'completed');
+                    setStepState('audit', 'completed');
+                    
+                    let resJson;
+                    try {
+                        resJson = await res.json();
+                    } catch (e) {
+                        showError("无法解析服务器响应的 JSON 数据");
+                        return;
+                    }
+                    
+                    const output = resJson.output || "";
+                    reportContent.innerHTML = marked.parse(output);
+                    
+                    modelCostVal.textContent = "0.000000 USDC";
+                    serviceFeeVal.textContent = "0.000000 USDC";
+                    platformFeeVal.textContent = "0.000000 USDC";
+                    refundVal.textContent = "0.000000 USDC";
+                    
+                    executeAuditBtn.disabled = false;
+                    executeAuditBtn.innerHTML = `
+                        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                        开始安全审计 (Execute Audit)
+                    `;
+                    reportStatusText.textContent = '审计直接成功';
+                    reportStatusText.style.color = 'var(--neon-green)';
+                    reportStatusText.className = '';
+                } else {
+                    let errMsg = "请求错误";
+                    try {
+                        const errJson = await res.json();
+                        errMsg = errJson.message || errJson.error || errMsg;
+                    } catch (e) {}
+                    showError("网关错误 (HTTP " + res.status + "): " + errMsg);
+                    setStepState('request', 'failed');
+                }
+                return;
+            }
+
             if (!isWalletConnected) {
                 alert('请先连接钱包！');
                 return;
