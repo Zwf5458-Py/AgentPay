@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gateway/internal/stripe"
+	"gateway/internal/queue"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -21,6 +22,7 @@ import (
 )
 
 var (
+	DBQueueManager           *queue.QueueManager
 	consumedStripeSessions   = make(map[string]bool)
 	consumedStripeSessionsMu sync.Mutex
 )
@@ -73,28 +75,49 @@ func X402Middleware(next http.Handler) http.Handler {
 				return
 			}
 
-			// 防重放/双花：验证 sessionID 是否已被消费
-			consumedStripeSessionsMu.Lock()
-			isConsumed := consumedStripeSessions[sessionID]
-			consumedStripeSessionsMu.Unlock()
-			if isConsumed {
-				trigger402(w)
-				return
+			// 1. 防重放/双花：优先通过 SQLite 数据库的 INSERT 独占锁进行判定（防并发 race condition 与重启重放）
+			if DBQueueManager != nil {
+				locked, err := DBQueueManager.TryLockStripeSession(sessionID)
+				if err != nil || !locked {
+					trigger402(w)
+					return
+				}
+			} else {
+				// 测试环境 / 无 DB 时回退到内存锁
+				consumedStripeSessionsMu.Lock()
+				isConsumed := consumedStripeSessions[sessionID]
+				consumedStripeSessionsMu.Unlock()
+				if isConsumed {
+					trigger402(w)
+					return
+				}
 			}
 
 			stripeKey := os.Getenv("STRIPE_SECRET_KEY")
 			stripeClient := stripe.NewStripeClient(stripeKey)
 
+			// 2. 外部网络/Mock支付状态核销
 			valid, err := stripeClient.VerifyCheckoutSession(sessionID)
 			if err != nil || !valid {
+				if DBQueueManager != nil {
+					_ = DBQueueManager.ReleaseStripeSession(sessionID) // 验证失败，释放待定状态
+				}
 				trigger402(w)
 				return
 			}
 
-			// 验证成功后标记为已消费
-			consumedStripeSessionsMu.Lock()
-			consumedStripeSessions[sessionID] = true
-			consumedStripeSessionsMu.Unlock()
+			// 3. 验证成功后真正消费
+			if DBQueueManager != nil {
+				if err := DBQueueManager.CommitStripeSession(sessionID); err != nil {
+					_ = DBQueueManager.ReleaseStripeSession(sessionID)
+					trigger402(w)
+					return
+				}
+			} else {
+				consumedStripeSessionsMu.Lock()
+				consumedStripeSessions[sessionID] = true
+				consumedStripeSessionsMu.Unlock()
+			}
 
 			ctx := r.Context()
 			ctx = context.WithValue(ctx, TokenContextKey, token)

@@ -119,6 +119,18 @@ func (qm *QueueManager) initDB() error {
 		return fmt.Errorf("failed to initialize table: %w", err)
 	}
 
+	queryStripe := `
+	CREATE TABLE IF NOT EXISTS consumed_stripe_sessions (
+		session_id TEXT PRIMARY KEY,
+		status TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+	if _, err := qm.db.Exec(queryStripe); err != nil {
+		return fmt.Errorf("failed to initialize stripe session table: %w", err)
+	}
+
 	// 动态检查缺失的列并添加
 	rows, err := qm.db.Query("PRAGMA table_info(settle_tasks);")
 	if err != nil {
@@ -535,4 +547,45 @@ func (qm *QueueManager) ClearTasks() error {
 		return fmt.Errorf("failed to clear tasks: %w", err)
 	}
 	return nil
+}
+
+// TryLockStripeSession 尝试向数据库插入待定记录，若由于主键冲突失败说明已锁/消费，返回 false
+func (qm *QueueManager) TryLockStripeSession(sessionID string) (bool, error) {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	_, err := qm.db.Exec(`
+		INSERT INTO consumed_stripe_sessions (session_id, status)
+		VALUES (?, 'pending')
+	`, sessionID)
+	if err != nil {
+		// 主键冲突或其他错误，直接返回已锁定
+		return false, nil
+	}
+	return true, nil
+}
+
+// CommitStripeSession 将 Stripe 会话标记为真正已消费状态
+func (qm *QueueManager) CommitStripeSession(sessionID string) error {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	_, err := qm.db.Exec(`
+		UPDATE consumed_stripe_sessions
+		SET status = 'consumed', updated_at = CURRENT_TIMESTAMP
+		WHERE session_id = ?
+	`, sessionID)
+	return err
+}
+
+// ReleaseStripeSession 如果支付失败，将待定状态记录删除以允许重新尝试
+func (qm *QueueManager) ReleaseStripeSession(sessionID string) error {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	_, err := qm.db.Exec(`
+		DELETE FROM consumed_stripe_sessions
+		WHERE session_id = ? AND status = 'pending'
+	`, sessionID)
+	return err
 }

@@ -60,12 +60,14 @@ func main() {
 
 	internalSecret := os.Getenv("INTERNAL_SECRET")
 
-	// 初始化 SQLite 本地队列管理器
 	queueMgr, err := queue.NewQueueManager("gateway.db", aaBridgeURL, internalSecret)
 	if err != nil {
 		log.Fatalf("Failed to initialize queue manager: %v", err)
 	}
 	defer queueMgr.Close()
+
+	// 注入到 X402 中间件供其进行已消费 Session 的持久化校验
+	middleware.DBQueueManager = queueMgr
 
 	// 启动后台重试 Worker
 	queueMgr.StartWorker(ctx)
