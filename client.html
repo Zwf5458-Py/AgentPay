@@ -1656,16 +1656,60 @@ contract SafeEtherStore is ReentrancyGuard {
         }
 
         async function executeAudit() {
+            executeAuditBtn.disabled = true;
+            executeAuditBtn.textContent = '安全审计运行中...';
+            resetAuditSteps();
+
+            const gatewayUrl = document.getElementById('gatewayUrl').value.trim();
+            const agentId = parseInt(document.getElementById('agentId').value.trim()) || 888;
+            const codeInput = editorTextarea.value;
+
             if (activePaymentStrategy === 'stripe') {
-                executeAuditBtn.disabled = true;
-                executeAuditBtn.textContent = '安全审计运行中...';
-                resetAuditSteps();
+                // Stripe 法币结算模式逻辑
+                setStepState('request', 'active');
+                setStepState('challenge', 'active');
+                reportStatusText.textContent = '正在发起 Stripe 会话收银台...';
+                
+                try {
+                    const res = await fetch(`${gatewayUrl}/api/stripe/create-session`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            amount_usdc_cents: 50000,
+                            agent_id: agentId
+                        })
+                    });
+                    
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.message || 'HTTP ' + res.status);
+                    }
+                    
+                    const session = await res.json();
+                    setStepState('request', 'completed');
+                    setStepState('challenge', 'completed');
+                    setStepState('stripe-pay', 'active');
+                    reportStatusText.textContent = '请在新窗口中完成 Stripe 支付。支付完成后页面将自动执行审计报告生成...';
+                    
+                    if (session.checkout_url) {
+                        window.open(session.checkout_url, '_blank');
+                    } else {
+                        throw new Error('未返回 Stripe 收银台 URL');
+                    }
+                } catch (err) {
+                    showError("Stripe 会话创建失败: " + err.message);
+                    setStepState('request', 'failed');
+                    executeAuditBtn.disabled = false;
+                    executeAuditBtn.textContent = '开始安全审计 (Execute Audit)';
+                }
+                return;
+            }
 
-                const gatewayUrl = document.getElementById('gatewayUrl').value.trim();
-                const agentId = parseInt(document.getElementById('agentId').value.trim()) || 888;
-                const codeInput = editorTextarea.value;
-
-                // [Refactored to use SDK]
+            // ============================================
+            // Crypto (链上支付通道) 模式：完全由 SDK 接管！
+            // ============================================
             setStepState('request', 'active');
             reportStatusText.textContent = '正在初始化 SDK 与链上环境...';
             reportStatusText.className = 'pulse-text';
@@ -1681,46 +1725,45 @@ contract SafeEtherStore is ReentrancyGuard {
                     });
                 }
                 
-                if (activePaymentStrategy === 'crypto') {
-                    const channel = window.agentPayClient.getChannel(agentId);
-                    if (!channel || (Number(channel.maxAmount || 0n) - Number(channel.accumulatedSpend || 0n)) < 50000) {
-                       reportStatusText.textContent = '余额不足，正通过 SDK 发起链上交易 (Approve & LockChannel)...';
-                       await window.agentPayClient.openChannel(agentId, 1000000n, 3600n);
-                    }
+                const channel = window.agentPayClient.getChannel(agentId);
+                if (!channel || (Number(channel.maxAmount || 0n) - Number(channel.accumulatedSpend || 0n)) < 50000) {
+                   reportStatusText.textContent = '余额不足，正通过 SDK 发起链上交易 (Approve & LockChannel)...';
+                   await window.agentPayClient.openChannel(agentId, 1000000n, 3600n);
                 }
                 
                 reportStatusText.textContent = '通道就绪，正在执行安全审计与结算...';
                 resJson = await window.agentPayClient.execute(agentId, codeInput);
                 
-                if (activePaymentStrategy === 'crypto') {
-                    setStepState('request', 'completed');
-                    setStepState('challenge', 'completed');
-                    setStepState('sign', 'completed');
-                    setStepState('audit', 'completed');
-                    setStepState('settle', 'completed');
-                    updateSimulatedBalance();
-                } else {
-                    setStepState('request', 'completed');
-                    setStepState('challenge', 'completed');
-                    setStepState('stripe-pay', 'completed');
-                    setStepState('audit', 'completed');
-                }
+                setStepState('request', 'completed');
+                setStepState('challenge', 'completed');
+                setStepState('sign', 'completed');
+                setStepState('audit', 'completed');
+                setStepState('settle', 'completed');
+                updateSimulatedBalance();
                 
                 const currentChan = window.agentPayClient.getChannel(agentId);
                 if (currentChan) {
                    const cost = Number(currentChan.lastPrice || 0n);
                    if (document.getElementById('modelCostVal')) document.getElementById('modelCostVal').textContent = (cost / 1e6).toFixed(6) + " USDC";
                 }
-                
             } catch (err) {
                 showError("SDK 执行失败: " + err.message);
                 setStepState('request', 'failed');
+                executeAuditBtn.disabled = false;
+                executeAuditBtn.textContent = '开始安全审计 (Execute Audit)';
                 return;
             }
             
             const output = resJson.output || "";
             reportContent.innerHTML = DOMPurify.sanitize(marked.parse(output));
+            reportStatusText.textContent = '审计成功完成，通道自愈对账成功！';
+            reportStatusText.style.color = 'var(--neon-green)';
+            reportStatusText.className = '';
+            
+            executeAuditBtn.disabled = false;
+            executeAuditBtn.textContent = '开始安全审计 (Execute Audit)';
         }
+
 
         executeAuditBtn.addEventListener('click', executeAudit);
 
