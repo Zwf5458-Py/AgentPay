@@ -1,33 +1,50 @@
-### Task 2: Go 反向代理中签署并分发清算凭证 (Settle Receipt)
+# Task 2 Brief: Implement `splitSettle` in PaymentEscrow.sol
 
-**Files:**
-- Modify: `gateway/internal/proxy/proxy.go`
-- Test: 创建 `gateway/internal/proxy/proxy_hold_test.go`
+**Goal**: Implement the `splitSettle` function to distribute funds to model provider, platform treasury, and the agent's TBA, and refund the remainder to the user.
 
-**Interfaces:**
-- Consumes: `gateway/internal/middleware.GetLockID`, `gateway/internal/middleware.GetToken`
-- Produces: 响应头中的 `X-402-Settle-Receipt` 以及由网关私钥签署的凭证
+**Files**:
+- Modify: `contracts/src/payment/PaymentEscrow.sol`
+- Test: `contracts/test/PaymentEscrowTest.t.sol`
 
-- [ ] **Step 1: 编写反向代理的清算凭证测试**
-  创建 `gateway/internal/proxy/proxy_hold_test.go`，Mock 下游 Eliza 返回 200，并断言代理在向客户端写回数据时：
-  1. 包含了 `X-402-Settle-Receipt` 头。
-  2. 该 Receipt 包含合法格式：`<channelId>:<holdAmount>:<actualCost>:<nonce>:<sig>`。
-- [ ] **Step 2: 运行测试确保失败**
-  运行：`cd gateway && go test -v ./internal/proxy -run TestProxy_SettleReceipt`
-  预期：FAIL
-- [ ] **Step 3: 修改代理层实现凭证签名与响应拦截**
-  在 `gateway/internal/proxy/proxy.go` 中，拦截下游响应后，获取 Context 中的 Hold 额度。计算实际费用 `actualCost`。读取环境变量 `GATEWAY_PRIVATE_KEY` 对应的私钥，生成 ECDSA 签名：
-  ```go
-  // 生成 SettleReceipt 签名，并将其追加到 w.Header().Set("X-402-Settle-Receipt", receiptStr)
-  ```
-- [ ] **Step 4: 运行测试确认通过**
-  运行：`cd gateway && go test -v ./internal/proxy -run TestProxy_SettleReceipt`
-  预期：PASS
-- [ ] **Step 5: 提交**
-  ```bash
-  git add gateway/internal/proxy/proxy.go gateway/internal/proxy/proxy_hold_test.go
-  git commit -m "feat: generate and append settle receipt signature in proxy"
-  ```
-
----
-
+**Instructions**:
+1. Add `ChannelSplitSettled` event to `PaymentEscrow.sol`:
+   ```solidity
+   event ChannelSplitSettled(
+       bytes32 indexed channelId,
+       uint256 agentPayout,
+       uint256 modelPayout,
+       uint256 platformFee,
+       address modelProvider,
+       address treasury
+   );
+   ```
+2. Implement the `splitSettle` function:
+   ```solidity
+   function splitSettle(
+       bytes32 channelId,
+       uint256 accumulatedAmount,
+       uint256 modelCost,
+       uint256 serviceFee,
+       address modelProvider,
+       address treasury,
+       uint16  platformBps,
+       uint256 holdAmount,
+       uint256 nonce,
+       uint256 expiration,
+       bytes   calldata signature
+   ) external onlySettler
+   ```
+   Detailed logic:
+   - Validate addresses, status is Locked, channel is not expired, accumulatedAmount > 0 and <= maxAmount, holdAmount == maxAmount.
+   - Verify EIP-712 signature against ChannelHold hash struct. Signer must be the payer.
+   - Calculate platform fee: `platformFee = accumulatedAmount * platformBps / 10000`.
+   - Verify that `modelCost + serviceFee + platformFee <= accumulatedAmount`.
+   - Update lock status to `Released`, and set `settledAmount = accumulatedAmount`.
+   - Safely transfer `modelCost` to `modelProvider` (if > 0), `platformFee` to `treasury` (if > 0).
+   - Resolve agent's TBA address dynamically using `erc6551Registry.account(...)`.
+   - Transfer the remaining `agentPayout = accumulatedAmount - modelCost - platformFee` to the TBA (if > 0).
+   - Refund the remainder `lock.maxAmount - accumulatedAmount` back to the payer.
+   - Emit `ChannelSplitSettled`.
+3. Add a Foundry unit test `testSplitSettle()` in `contracts/test/PaymentEscrowTest.t.sol` to verify the splits, signature validation, transfers, and remainder refunds.
+4. Verify all tests pass: `forge test`
+5. Commit changes.

@@ -1,35 +1,20 @@
-### Task 3: 升级 TS 客户端 SDK 状态通道预授权签名与清算自愈 (TS SDK Credit Hold & Self-heal)
+# Task 3 Brief: Update Gateway X-402 Middleware Headers & Configs
 
-**Files:**
-- Modify: `sdk/src/client.ts`
-- Test: 创建 `sdk/test/client_hold.test.ts`
+**Goal**: Update the gateway middleware to include split-settlement information in the 402 challenge response headers and expose them in CORS.
 
-**Interfaces:**
-- Consumes: 网关返回的 `X-402-Hold-Amount` 挑战与 `X-402-Settle-Receipt` 响应头
-- Produces: `AgentPayClient.execute` 具备真正的 EIP-712 签名与余额清算修正
+**Files**:
+- Modify: `gateway/internal/middleware/x402.go`
+- Modify: `gateway/cmd/gateway/main.go` (CORS headers list)
+- Test: `gateway/internal/middleware/x402_test.go`
 
-- [ ] **Step 1: 编写 SDK 预授权与清算自愈的单元测试**
-  在 `sdk/test/client_hold.test.ts` 中编写测试：
-  ```typescript
-  test('should generate EIP-712 signatures for hold and update confirmedSpend on settle receipt', async () => { ... })
-  ```
-- [ ] **Step 2: 运行测试确保失败**
-  运行：`cd sdk && npm run test` (只测试新增的 `client_hold.test.ts`)
-  预期：FAIL
-- [ ] **Step 3: 在 SDK 中实现 EIP-712 signTypedData 与 Receipt 校验**
-  修改 `sdk/src/client.ts`：
-  1. 使用 `viem` 中的 `signTypedData`，使用 `privateKey` 签署 `ChannelHold` 数据结构。
-  2. 在响应成功后，解析 `X-402-Settle-Receipt` 响应头。
-  3. 校验网关清算凭证的 ECDSA 签名。
-  4. 修正本地的 `confirmedSpend` 为 `lastConfirmedSpend + actualCost`。
-- [ ] **Step 4: 运行测试验证通过**
-  运行：`cd sdk && npm run test`
-  预期：All tests PASS
-- [ ] **Step 5: 提交**
-  ```bash
-  git add sdk/src/client.ts sdk/test/client_hold.test.ts
-  git commit -m "feat: support EIP-712 client hold signing and receipt settlement"
-  ```
-
----
-
+**Instructions**:
+1. Locate `trigger402` function in `gateway/internal/middleware/x402.go`.
+2. Update it to set the following headers in 402 responses:
+   - `X-402-Platform-Bps`: value of environment variable `PLATFORM_BPS` (default is `"10"`, i.e., 0.1%).
+   - `X-402-Model-Provider`: value of environment variable `MODEL_PROVIDER_ADDRESS` (default is `"0x90F79bf6EB2c4f870365E785982E1f101E93b906"`).
+   - `X-402-Payment-Methods`: `"crypto-channel,fiat-stripe"`.
+3. Locate CORS middleware in `gateway/cmd/gateway/main.go`. Update `Access-Control-Expose-Headers` list to include:
+   `X-402-Platform-Bps, X-402-Model-Provider, X-402-Payment-Methods, X-402-Hold-Amount, X-402-Settle-Receipt, X-402-Currency, X-402-Chain, X-402-Version`.
+4. Update `gateway/internal/middleware/x402_test.go` where it mocks CORS headers to also include the new headers in the expose list.
+5. Verify all tests in `gateway/internal/middleware` pass.
+6. Commit changes.

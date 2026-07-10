@@ -1,60 +1,79 @@
-# Task 3: 升级 TS 客户端 SDK 状态通道预授权签名与清算自愈 (TS SDK Credit Hold & Self-heal) - 完成报告
+# Task 3: Update Gateway X-402 Middleware Headers & Configs - 完成报告
 
 ## 1. 任务概述与要求
-在本次任务中，我们完成了 TS 客户端 SDK 状态通道预授权签名及清算自愈的升级工作：
-- **EIP-712 签名挑战自愈**：在面临 HTTP 402 时，如果网关返回 `X-402-Payment-Type: channel`，SDK 解析 `X-402-Hold-Amount` 预授权冻结额。并在本地使用私钥签署 `ChannelHold` 类型的 EIP-712 Typed Data。其包含 `channelId`, `holdAmount`, `nonce`, `expiration` 四个字段。
-- **发送二次授权请求**：将生成的签名与其余字段格式化为 `Authorization: Bearer <channelId>:<holdAmount>:<nonce>:<expiration>:<sig>` 后重试发送请求。
-- **清算凭证校验**：当请求成功返回 200 时，从响应头中解析 `X-402-Settle-Receipt` 获得 `<channelId>:<holdAmount>:<actualCost>:<nonce>:<receipt_sig>`。
-- **ECDSA 验证与自愈**：使用 `viem` 的 `recoverMessageAddress` 验证网关的以太坊个人签名。如果有效，将通道的 `confirmedSpend` 回落更新为 `lastConfirmedSpend + actualCost`（释放了 `holdAmount - actualCost` 的冻结额度，将 `accumulatedSpend` 恢复为 `confirmedSpend`）。
+在本次任务中，我们完成了网关 X-402 中间件头部及配置的升级工作：
+- **更新 402 挑战头部**：修改了 `gateway/internal/middleware/x402.go` 中的 `trigger402` 函数，使其在触发 402 挑战响应时：
+  - 读取环境变量 `PLATFORM_BPS`（默认值为 `"10"`），设置头部 `X-402-Platform-Bps`。
+  - 读取环境变量 `MODEL_PROVIDER_ADDRESS`（默认值为 `"0x90F79bf6EB2c4f870365E785982E1f101E93b906"`），设置头部 `X-402-Model-Provider`。
+  - 静态设置 `X-402-Payment-Methods` 头部为 `"crypto-channel,fiat-stripe"`。
+- **更新 CORS 跨域头部暴露列表**：
+  - 更新 `gateway/cmd/gateway/main.go` 中的 CORS 中间件，将 `Access-Control-Expose-Headers` 更新为包含全部 X-402 相关头部：`X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof, X-402-Platform-Bps, X-402-Model-Provider, X-402-Payment-Methods, X-402-Hold-Amount, X-402-Settle-Receipt, X-402-Currency, X-402-Chain, X-402-Version`。
+- **同步更新测试 Mock CORS**：
+  - 修改了 `gateway/internal/middleware/x402_test.go` 中 Mock CORS 设置和期待的头部验证，保证与主逻辑一致。
+- **补充测试覆盖**：
+  - 在 `gateway/internal/middleware/x402_test.go` 中，为 `TestX402Middleware_NoToken` 增加了新加三个响应头值的验证。
+  - 额外添加了 `TestX402Middleware_NoToken_EnvVars` 测试用例，验证在自定义环境变量配置下，`trigger402` 头部是否被正确渲染。
 
 ---
 
 ## 2. 代码实现细节
 
-### 2.1 SDK 核心实现修改 ([client.ts](file:///Users/oraclez/code/AgentPay/sdk/src/client.ts))
-- **配置接口修改**：在 `AgentPayClientConfig` 中增加了可选参数 `chainId`, `verifyingContract`, `gatewayAddress` 属性，并在构造函数中完成了合理的默认值配置。
-- **通道状态增加 Nonce**：在 `channels` map 中为每个通道额外维护了 `nonce` 以便防重放，nonce 随每次 EIP-712 签名生成自增。
-- **EIP-712 签名**：
-  在 402 `channel` 分支以及在通道有 `lastPrice` 预先注入时，如果配置了 `privateKey`，使用 `viem/accounts` 的 `privateKeyToAccount(this.privateKey).signTypedData` 方法动态生成满足规格的结构化 EIP-712 签名。
-- **清算凭证解析校验**：
-  在请求返回 200 时，截获 `X-402-Settle-Receipt` 头，如果配置了 `gatewayAddress`，通过 `recoverMessageAddress` 验证以太坊消息签名者。校验通过后，计算修正 `confirmedSpend` 并校准 `accumulatedSpend` 和 `lastPrice`，释放被多余冻结的资金额度，实现了客户端的清算自愈。
+### 2.1 网关中间件修改 ([x402.go](file:///Users/oraclez/code/AgentPay/gateway/internal/middleware/x402.go))
+- 在 `trigger402` 函数内，增加了对 `PLATFORM_BPS` 和 `MODEL_PROVIDER_ADDRESS` 的环境变量读取，如果未设置则分别回退为 `"10"` 和 `"0x90F79bf6EB2c4f870365E785982E1f101E93b906"`。
+- 设置新增的 `X-402-Platform-Bps`、`X-402-Model-Provider` 及 `X-402-Payment-Methods` 响应头部。
 
-### 2.2 单元测试编写 ([client_hold.test.ts](file:///Users/oraclez/code/AgentPay/sdk/test/client_hold.test.ts))
-我们设计了完整的测试用例 `should generate EIP-712 signatures for hold and update confirmedSpend on settle receipt`：
-1. 启动本地 Mock http.Server。
-2. 客户端第一次发起请求，由于未携带 Authorization 头，Mock Server 拦截并返回 `HTTP 402` 挑战以及 `X-402-Hold-Amount: 50000`。
-3. 客户端捕获 402 后，在内部利用私钥签署 `ChannelHold` 结构的 EIP-712 Typed Data，并携带 5 部分格式的授权头发起二次请求。
-4. Mock Server 接收到二次请求后，解析 5 部分的 Authorization 头，并通过 `viem` 的 `verifyTypedData` 工具方法断言生成的 EIP-712 签名是由客户端私钥签署、符合预期的。
-5. 验证成功后，Mock Server 模拟 Eliza 执行开销，生成由网关私钥签署的 `X-402-Settle-Receipt`（包含实际花费 15000）并返回 200。
-6. 客户端在获取到 200 成功响应后，通过其配置的网关地址，验证清算凭证的 ECDSA 签名。验证成功，自愈修正 `confirmedSpend = 15000n`，解冻其余 35000n。
+### 2.2 跨域中间件修改 ([main.go](file:///Users/oraclez/code/AgentPay/gateway/cmd/gateway/main.go))
+- 修改了 `CORSMiddleware` 里的 `Access-Control-Expose-Headers` 设定，在保留原有头部的基础上追加了包括分账相关头部和基本控制头部（共计 12 个）。
+
+### 2.3 测试套件修改与验证 ([x402_test.go](file:///Users/oraclez/code/AgentPay/gateway/internal/middleware/x402_test.go))
+- 在 `TestCORS_OPTIONS` 中更新了 Mock CORS 及对应的 expectedHeader 断言。
+- 在 `TestX402Middleware_NoToken` 中对返回的新增头部默认值进行断言。
+- 引入 `TestX402Middleware_NoToken_EnvVars` 用以确保环境变量动态变更时头部的正常输出。
 
 ---
 
 ## 3. 测试运行结果
-在 `sdk/` 目录运行 `npm run test` 进行了全部单元测试和 E2E 集成测试的验证：
+在 `gateway/internal/middleware` 目录下运行了 Go 测试套件，结果全部通过：
 ```bash
-> agentpay-sdk@1.0.0 test
-> vitest run
-
- RUN  v1.6.1 /Users/oraclez/code/AgentPay/sdk
-
- ✓ test/client_hold.test.ts  (1 test) 32ms
- ✓ test/e2e.test.ts  (5 tests) 238ms
-
- Test Files  2 passed (2)
-      Tests  6 passed (6)
-   Start at  12:43:37
-   Duration  528ms (transform 55ms, setup 0ms, collect 276ms, tests 270ms, environment 0ms, prepare 79ms)
+=== RUN   TestX402Middleware_NoToken
+--- PASS: TestX402Middleware_NoToken (0.00s)
+=== RUN   TestX402Middleware_NoToken_EnvVars
+--- PASS: TestX402Middleware_NoToken_EnvVars (0.00s)
+=== RUN   TestX402Middleware_WithToken
+--- PASS: TestX402Middleware_WithToken (0.00s)
+=== RUN   TestProxyReverse_AsyncSettle
+--- PASS: TestProxyReverse_AsyncSettle (2.01s)
+=== RUN   TestProxyReverse_BridgeOutageSelfHealing
+--- PASS: TestProxyReverse_BridgeOutageSelfHealing (7.01s)
+=== RUN   TestRateLimitMiddleware_LimitExceeded
+--- PASS: TestRateLimitMiddleware_LimitExceeded (0.00s)
+=== RUN   TestRateLimitLimiter_CleanupTTL
+--- PASS: TestRateLimitLimiter_CleanupTTL (0.00s)
+=== RUN   TestCORS_OPTIONS
+--- PASS: TestCORS_OPTIONS (0.00s)
+=== RUN   TestDebugTasks
+--- PASS: TestDebugTasks (0.00s)
+=== RUN   TestX402Middleware_HoldAmount
+--- PASS: TestX402Middleware_HoldAmount (0.00s)
+=== RUN   TestX402Middleware_InvalidFormat
+--- PASS: TestX402Middleware_InvalidFormat (0.00s)
+=== RUN   TestX402Middleware_Expiration
+--- PASS: TestX402Middleware_Expiration (0.00s)
+=== RUN   TestX402Middleware_EIP712ValidSignature
+--- PASS: TestX402Middleware_EIP712ValidSignature (0.00s)
+=== RUN   TestX402Middleware_EIP712InvalidSignature
+--- PASS: TestX402Middleware_EIP712InvalidSignature (0.00s)
+PASS
+ok  	gateway/internal/middleware	9.559s
 ```
-测试证明：新实现已完美通过，且 100% 兼容已有的旧逻辑。
 
 ---
 
 ## 4. 代码提交信息
 ```bash
-commit 31f38c69fc35ecdf0d9dbfa6e89f81beec184d0b
+commit 03ff46dbf7318ecf529883bfd12f1efdfef9d4e5 (HEAD -> main)
 Author: Oracle.Z <oraclez@macMacBook-Pro-M32.local>
-Date:   Thu Jul 9 12:43:41 2026 +0800
+Date:   Fri Jul 10 09:02:06 2026 +0800
 
-    feat: support EIP-712 client hold signing and receipt settlement
+    feat(gateway): update X-402 challenge response headers and expose them in CORS
 ```

@@ -1,55 +1,55 @@
-# Task 4: 扩展 Playground 前端面板显示预授权状态 - 完成报告
+# Task 4: Extend Gateway SQLite Queue & Task Fields - 完成报告
 
 ## 1. 任务概述与要求
-在本次任务中，我们扩展了 `playground.html` 调试面板，使其完美支持预授权额度冻结和清算生命周期的 UI 可视化与状态管理：
-- **可视化组件扩展**：在通道状态卡片中，除了原有的已确认（confirmed）和累计发生（accumulated）金额，新增了**冻结中额度 (Hold Amount)** 与**本轮实际开销 (Last Actual Cost)** 的展示。
-- **双重维度展示**：各金额字段同时展示高精度微单位（micro-units）和 USDC/美元格式，确保高可读性与专业性。
-- **状态徽章与霓虹动效**：
-  - 收到 402 时：更新通道状态为 `locked`。卡片外框呈现黄色/橙色霓虹呼吸脉冲（`state-locked`），并显示明显的 "Credit Locked (Hold: 0.05 USDC)" 闪烁状态徽章。
-  - 成功返回 200 并携带 `X-402-Settle-Receipt` 时：更新通道状态为 `settled`。卡片外框闪烁绿色霓虹（`state-settled`）以表达成功清算解冻的瞬间，显示 "Settled & Unlocked" 弹跳徽章，并清零 Hold Amount 且将 `Last Actual Cost` 设为实际清算额度。
-  - 闲置状态：3 秒后，定时器自动将卡片状态恢复为正常的 `idle`（闲置）。
-- **余额自愈校准**：提取 `X-402-Settle-Receipt` 字段，解冻剩余的 Hold 资金，并以 `confirmedSpend = lastConfirmedSpend + actualCost` 公式纠正本地通道的已确认和已用额度。
-- **错误处理复位**：如果网络请求发生异常，UI 捕捉并自动重置卡片状态为 `idle` 并清空 Hold Amount。
+在本次任务中，我们对 Go Gateway 的 SQLite 结算任务队列进行了关键扩展，以支持三方拆分结算（Split Settlement）流程。具体修改包括：
+- **数据结构与模式升级**：在 `SettleTask` 结构体中新增了三方分账所需的所有字段，并在 `initDB` 中实现了防御性的 `ALTER TABLE` 检查逻辑，可动态在已有数据库的 `settle_tasks` 表中添加缺失的列。
+- **队列接口扩展**：更新了 `Enqueue` 接口，支持传入 `taskDetails`（通道结算时携带完整分账参数，旧版锁任务时传入 `nil`）。
+- **待处理任务查询**：更新 `getPendingTasks`，安全采用 `sql.NullString` 和 `sql.NullInt64` 扫描以兼容旧的待处理任务，实现数据结构向后兼容。
+- **拆分路由转发**：在队列 worker 执行任务时（`processSingleTask`），如果判定是通道任务（`ChannelID != ""`），自动将 API 请求 URL 的 `/aa/settle` 替换为 `/aa/split-settle`，并将完整的 EIP-712 签名及拆分账单数据以 JSON 格式 POST 发送给 AA Bridge；否则，回退到原有的旧版 `/aa/settle` 格式。
+- **反向代理对齐**：更新了 `reverse.go` 的 `ModifyResponse` 拦截响应逻辑。在检测到 `X-Agent-Proof` 后，如果是通道请求，读取 Context 中的通道签名参数，解析下游 Agent 上报的模型费 `modelCost` 并计算总花费 `actualCost = modelCost + 2000`（受限于 `holdAmount`），将所有数据封装并 Enqueue。同时，Settle Receipt 的签名金额计算也同样调整为此 `actualCost`。
+- **单元测试通过**：创建了 `sqlite_queue_test.go` 以提供完整的入出队与转发行为测试；更新并修复了 `proxy_hold_test.go` 和 `x402_test.go` 的编译与断言对齐，所有测试全绿通过。
 
 ---
 
-## 2. 代码实现细节
+## 2. 修改的文件及实现细节
 
-### 2.1 UI 样式升级 (CSS)
-在 `playground.html` 中新增了适配暗黑霓虹与毛玻璃美学的 CSS variables 及 Keyframe 动画：
-- `.badge-status-glow` 提供了 `idle`（灰色）、`locked`（黄色呼吸）、`settled`（绿色弹跳）三态发光徽章。
-- `@keyframes card-locked-pulse` 提供锁定状态下的黄色外框发光渐变呼吸效果。
-- `@keyframes card-settled-flash` 在结算完成的瞬间提供绿色外框爆闪 scale 放大与扩散效果。
-- 增加了 Hold Amount 与 Actual Cost 数据盒的虚线高亮显示 `.highlight-hold` 与 `.highlight-settle`。
+### 2.1 `gateway/internal/queue/sqlite_queue.go`
+- **SettleTask 结构体**：增加了 `ChannelID`, `HoldAmount`, `Nonce`, `Expiration`, `Signature`, `AccumulatedAmount`, `ModelCost`, `ServiceFee`, `ModelProvider`, `Treasury`, `PlatformBps`, `AgentID` 字段。
+- **initDB**：添加了防重复加列逻辑：使用 `PRAGMA table_info` 读取现有表列，若缺失任何一个分账列，则自动执行 `ALTER TABLE ADD COLUMN`。
+- **Enqueue**：修改了签名，支持可选 `taskDetails`。对 `INSERT` 语句进行扩展，完美处理 NULL 值。
+- **getPendingTasks**：使用 `sql.Null*` 类型逐行 Scan 还原 `SettleTask` 对象。
+- **processSingleTask**：针对 `task.ChannelID != ""` 场景计算新的转发目标 URL（`/aa/split-settle`），并发送更全面的 JSON 属性；对于旧任务则维持原流程。
 
-### 2.2 数据卡片升级 (HTML & JS)
-- 扩展了 `renderChannels`：遍历通道缓存，动态输出卡片类名 `.state-locked` / `.state-settled` ；在中间数据网格的下方增加了 Hold Amount 和 Actual Cost 的数据展示。
-- 扩展了 `mockFetch`：
-  - 返回 402 时，注入 `'X-402-Hold-Amount': '50000'` 和 `'X-402-Price': '12000'`，以模拟真实的预授权 Hold 挑战。
-  - 成功返回 200 时，带上 mock 的 `X-402-Settle-Receipt` 头（形式为 `<channelId>:50000:12000:1:sig`），返回实际开销 `12000` micro-units。
-- 升级了 `executeRequestInternal`：
-  - 发起请求时记录 `lastConfirmedSpend = chan.confirmedSpend`。
-  - 捕获 402：设置 `chan.holdAmount = 50000`，`chan.status = 'locked'`，触发 UI 渲染并输出锁款日志。
-  - 捕获 200 并检验：解析 `X-402-Settle-Receipt` 中实际花费 `actualCost`。清空 Hold Amount 并在原 confirmedSpend 上累加 `actualCost`。设置 `chan.status = 'settled'`。触发 3秒后切换为 `idle` 的 setTimeout 定时器。
-  - 异常 catch 块：重置 `chan.status = 'idle'`，`chan.holdAmount = 0`，确保不出现锁死状态。
+### 2.2 `gateway/internal/proxy/reverse.go`
+- 在 `ModifyResponse` 中，首先统一计算当前通道请求的 `modelCost`（来自下游 `X-Agent-Cost` 头，默认 `1000`）与 `actualCost`（`modelCost + 2000`，最大不超过 `holdAmount`）。
+- 提取 Preauth EIP-712 签名，从环境变量或 fallback 中读取 `platformBps`、`modelProvider`、`treasury`，并解析 `agentID`（若缺失，取 `AGENT_ID` 环境变量或默认回退 `888`）。
+- 将该 `actualCost` 和 `modelCost` 统一应用于：
+  1. `QueueManager.Enqueue` 的拆分结算任务入队。
+  2. 用于网关签名的 Settle Receipt（`X-402-Settle-Receipt`）返回头中。
 
----
-
-## 3. 测试与验证
-1. **环境限制处理**：
-   在 macOS 本地环境中，自动化浏览器工具由于平台依赖限制（`local chrome mode is only supported on Linux`）无法运行。
-2. **人工/代码静态校对**：
-   对 `playground.html` 中的 DOM 元素结构 and Vanilla JS 的流程逻辑（含 `mockFetch` 与 `executeRequestInternal`）进行了极其严密的代码 Review，无语法错误，没有使用 TODO / TBD 占位符，变量与 client SDK 对接格式 100% 保持一致（包含 micro-units 的 10^6 折算和 Settle Receipt 冒号分隔的 5 部分解析）。
-3. **直连与 Mock 对接兼容**：
-   在 Mock 模式下，流利且流畅地展现了 "402 Hold ➡️ 生成签名 ➡️ 执行成功 ➡️ 凭证清算回落（confirmedSpend 累加本轮 actualCost 12000） ➡️ 延时复位闲置" 状态。在直连模式下，直接抓取 Go 网关在 Task 1/2 升级后返回的真实 `X-402-Hold-Amount` 挑战与 `X-402-Settle-Receipt` 头，UI 面板同样能渲染真实的预授权与清算数据。
+### 2.3 单元测试及对齐
+- **新测试文件**：`gateway/internal/queue/sqlite_queue_test.go`
+  - `TestQueue_EnqueueAndGetPendingTasks`：测试分账字段的数据表初始与读写，并测试 `nil` 参数的向后兼容。
+  - `TestQueue_ProcessSingleTask`：模拟 Bridge Server，测试当是通道任务时，分发 POST 请求至 `/aa/split-settle` 且 payload 完整正确；当是锁任务时，分发至 `/aa/settle`。
+- **修改测试文件**：`gateway/internal/proxy/proxy_hold_test.go`
+  - 调整断言：通道清算时用户的实际总花费（`actualCost`）现在由于加入了固定服务费 2000，断言从原有的 modelCost（如 `12000`）变更为 `14000`，同时修改了期待签名比对的 raw message 数据串。
+- **修改测试文件**：`gateway/internal/middleware/x402_test.go`
+  - 修正了 `TestDebugTasks` 测试中对 `queueMgr.Enqueue` 的调用签名（传入 `nil`）。
 
 ---
 
-## 4. 代码提交信息
-```bash
-commit c056f0e04c255ad29809d8b6d51f04cdc89fc60b
-Author: Oracle.Z <oraclez@macMacBook-Pro-M32.local>
-Date:   Thu Jul 9 12:48:01 2026 +0800
+## 3. 测试验证结果
+我们在 `/Users/oraclez/code/AgentPay/gateway` 目录下执行 `go test -v ./...`：
+- **`gateway/internal/middleware`**：PASS
+- **`gateway/internal/proxy`**：PASS
+- **`gateway/internal/queue`**：PASS
+所有 Go 网关测试均成功通过。
 
-    fe: visualize credit hold and settle receipt on playground
-```
+---
+
+## 4. Git 提交信息
+- **Commit ID**: `d0a7cfeb`
+- **提交日志**:
+  ```
+  feat: extend SQLite queue schema and update proxy for splitSettle parameter passing
+  ```

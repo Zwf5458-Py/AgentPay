@@ -132,9 +132,16 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 		platformBpsVal, _ := strconv.ParseUint(platformBpsStr, 10, 16)
 		platformBps := uint16(platformBpsVal)
 
+		serviceFeeVal := int64(2000)
+		if feeEnv := os.Getenv("AGENT_SERVICE_FEE"); feeEnv != "" {
+			if val, err := strconv.ParseInt(feeEnv, 10, 64); err == nil {
+				serviceFeeVal = val
+			}
+		}
+
 		var actualCost int64
 		if channelID != "" {
-			actualCost = (modelCost + 2000) * 10000 / (10000 - int64(platformBps))
+			actualCost = (modelCost + serviceFeeVal) * 10000 / (10000 - int64(platformBps))
 		} else {
 			actualCost = modelCost
 		}
@@ -191,7 +198,7 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 						}
 					}
 
-					var serviceFee uint64 = 2000
+					var serviceFee uint64 = uint64(serviceFeeVal)
 
 					taskDetails := &queue.SettleTask{
 						ChannelID:         channelID,
