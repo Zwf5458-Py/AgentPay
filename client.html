@@ -1448,7 +1448,6 @@ contract SafeEtherStore is ReentrancyGuard {
         // Select templates
         templateTags.forEach(tag => {
             tag.addEventListener('click', () => {
-                if (tag.classList.contains('active')) return;
                 
                 templateTags.forEach(t => t.classList.remove('active'));
                 tag.classList.add('active');
