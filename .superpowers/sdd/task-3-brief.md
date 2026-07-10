@@ -1,29 +1,35 @@
-# Task 3 Brief: Modify ModifyResponse to Exclude On-chain Settlement under Stripe mode
+# Task 3 Brief: Connect API calls and Implement Manual Retry in admin.html
 
-**Goal**: Exclude EIP-712 settlement receipt generation and SQLite enqueuing in `gateway/internal/proxy/reverse.go` if the request is paid via Stripe.
+**Goal**: Bind client-side JavaScript in `admin.html` to real API endpoints of Go Gateway, implementing authorization, real-time fetching, formatting stats, manual retry triggers, and database flush actions.
 
 **Files**:
-- Modify: `gateway/internal/proxy/reverse.go`
-- Modify: `gateway/internal/proxy/proxy_hold_test.go`
+- Modify: `admin.html`
 
 **Instructions**:
-1. Open `gateway/internal/proxy/reverse.go`.
-2. Inside `ModifyResponse` function:
-   - Retrieve `paymentMethod` from request context:
-     `paymentMethod := middleware.GetPaymentMethod(ctx)`
-   - If `paymentMethod == "stripe"`:
-     - Get the `stripeSessionID` from context:
-       `stripeSessionID := middleware.GetStripeSessionID(ctx)`
-     - Skip the database enqueuing (`wrapper.QueueManager.Enqueue`) and Settle Receipt generation logic.
-     - Set the header `X-402-Payment-Method: stripe` and `X-402-Stripe-Session: <stripeSessionID>` on the response `res.Header`.
-     - Log: `[Proxy] Request paid via Stripe session <stripeSessionID>. Skipping chain settlement receipt signing.`.
-     - Proceed normally (allowing downstream response output to pass through).
-3. If `paymentMethod` is not `"stripe"` (either empty, legacy, or `"channel"`):
-   - Keep the existing logic (calculate `actualCost`, enqueue task, append `X-402-Settle-Receipt`).
-4. Align Go tests in `gateway/internal/proxy/proxy_hold_test.go`:
-   - Add unit test to verify that if request carries `stripe:` prefix Bearer token (meaning `paymentMethod` is `"stripe"`):
-     - No `X-402-Settle-Receipt` header is present.
-     - `X-402-Payment-Method: stripe` and `X-402-Stripe-Session` are set.
-     - SQLite queue task is NOT created.
-5. Ensure all proxy tests build and pass successfully.
+1. Open `admin.html`.
+2. Extract interactive UI elements:
+   - Config inputs: Gateway Origin (id `gatewayUrlInput`), Admin Secret Key (id `adminSecretInput`).
+   - Refresh button: id `refreshBtn`.
+   - Clear Queue button: id `clearQueueBtn`.
+   - Clear Stripe Sessions button: id `clearStripeBtn`.
+   - KPI metrics text elements:
+     - `total_settled_usdc` (id `totalSettledText`)
+     - `total_platform_fees_usdc` (id `platformFeesText`)
+     - `total_stripe_sessions` (id `stripeSessionsText`)
+     - `success_rate` (calculated as `success_tasks / (success_tasks + failed_tasks) * 100` or from gateway, id `successRateText`).
+   - Table bodies: Tasks Queue table body (id `tasksTableBody`), Stripe Sessions list container (id `stripeSessionsList`).
+3. Implement `fetchStats()`, `fetchTasks()`, and `fetchStripeSessions()`:
+   - Make HTTP requests to Gateway endpoint URL (e.g. `${gatewayOrigin}/admin/stats`).
+   - Attach `X-Internal-Secret` header containing the value of `adminSecretInput`.
+   - Display a visual loading indicator or toast notification when fetching.
+   - Format micro-units to USDC string (dividing by `1e6` to output 6 decimal places).
+   - Render tasks in list. Match statuses with correct CSS tags:
+     - `success`: green glow
+     - `pending`/`retrying`: orange glow
+     - `failed`: red glow
+   - For non-success tasks, add a `[重试 (Retry)]` button calling `POST /admin/tasks/retry` passing `{ "lock_id": lockId }`. Refresh dashboard after completion.
+4. Bind `clearQueueBtn` and `clearStripeBtn` to call Gateway debug clears (e.g. `/debug/tasks/clear` and `/admin/stripe-sessions/clear` respectively). Confirm before executing.
+5. In addition to instructions:
+   - Adjust `--neon-violet` style to `#ff00ff` to precisely conform with Spec guidelines.
+   - Adjust stripe clear button text from "Clear Sessions" to "Clear stripe sessions" to conform with Spec guidelines.
 6. Commit changes.

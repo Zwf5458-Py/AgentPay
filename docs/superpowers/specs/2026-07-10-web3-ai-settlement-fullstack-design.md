@@ -340,8 +340,80 @@ const systemPrompt = `你是一个顶级的 Web3 智能合约安全专家。请�
 
 ---
 
+## P4 详细设计：管理后台与数据仪表盘
+
+### 1. 门面网关管理 API 与安全鉴权
+
+为支持管理后台的数据读取与写操作，需要在 Go 网关中提供专用的接口，并加入对请求头 `X-Internal-Secret` 的校验。
+
+#### 1.1 鉴权规则
+- 网关中通过 `X-Internal-Secret` 头部传递密钥。
+- 在 `main.go` 中对 `/admin/*` 路径的请求进行比对拦截：
+  ```go
+  func AdminAuthMiddleware(next http.Handler) http.Handler {
+      return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+          secret := os.Getenv("INTERNAL_SECRET")
+          if secret != "" && r.Header.Get("X-Internal-Secret") != secret {
+              http.Error(w, "Unauthorized", http.StatusUnauthorized)
+              return
+          }
+          next.ServeHTTP(w, r)
+      })
+  }
+  ```
+
+#### 1.2 新增接口路由
+- `GET /admin/stats` — 获取聚合汇总指标：
+  - 返回数据：
+    ```json
+    {
+      "total_settled_usdc": 1250000,
+      "total_platform_fees_usdc": 1250,
+      "total_stripe_sessions": 24,
+      "success_rate": 95.8,
+      "pending_tasks_count": 2,
+      "failed_tasks_count": 1
+    }
+    ```
+- `GET /admin/tasks` — 获取完整的结算队列任务（支持分页或最近 N 条记录）。
+- `POST /admin/tasks/retry` — 手动触发特定任务的重试：
+  - 参数：`{ "lock_id": "0xChannel123:1" }`
+  - 动作：将该任务在 SQLite 中更新为 `pending` 状态，并将 `retry_count` 重置为 `0`，使得后台 Worker 能够立即出队处理。
+- `POST /admin/stripe-sessions/clear` — 清空已消费的 Stripe 缓存会话，辅助测试调试。
+
+---
+
+### 2. 独立管理面板 `admin.html` 设计
+
+`admin.html` 放置在项目根目录下，使用高逼格的暗黑霓虹毛玻璃风格，提供以下模块：
+
+1. **配置鉴权卡片**：
+   - 输入 `X-Internal-Secret` 密钥和网关 API URL。
+2. **核心指标仪表盘卡片 (KPI Blocks)**：
+   - 包含：已结算总额 (USDC)、已收取平台费 (USDC)、信用卡 Stripe 收款会话数、清算成功率。
+3. **结算队列管理面板 (Table & Actions)**：
+   - 实时展示任务队列的执行状况。
+   - 对 `failed` 状态的任务，在操作列提供 `[立即重试 (Retry)]` 按钮。
+   - 提供 `[清空任务队列 (Clear Queue)]` 按钮。
+4. **Stripe 消费记录看板**：
+   - 展示已核销的 Stripe 会话 ID 及状态，防止白嫖监控。
+
+---
+
+### 3. P4 验证计划
+
+1. **接口安全校验**：
+   - 尝试在无请求头或错误请求头的情况下调用 `/admin/stats`，验证网关正确返回 `401 Unauthorized`。
+   - 携带正确的 `X-Internal-Secret` 请求，验证正确返回数据。
+2. **手动重试验证**：
+   - 模拟一个失败的结算任务插入数据库。
+   - 在 `admin.html` 列表页点击该任务的 `Retry` 按钮，验证其状态重置，且后台 Worker 在 2 秒内重新尝试消费该结算。
+3. **大屏渲染与刷新**：
+   - 执行一次审计支付，确认 `admin.html` 数据大屏的 settles 额度和 Stripe 会话统计自动递增。
+
+---
+
 ### 4. 后续待开发阶段
 
-- 法币支付通道 (Stripe) → P3
-- 管理后台 (`admin.html`) → P4
-- 生产环境部署 → 所有阶段完成后
+- 法币支付通道 (Stripe) → P3 (已合并至系统核心流程)
+- 生产环境部署与一键部署脚本 → P5

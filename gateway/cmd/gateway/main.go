@@ -138,26 +138,27 @@ func main() {
 		w.Write([]byte(`{"status":"success"}`))
 	})
 
-	// 调试接口：获取最近的 10 个结算任务
-	r.Get("/debug/tasks", func(w http.ResponseWriter, r *http.Request) {
-		tasks, err := queueMgr.GetLatestTasks(10)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(tasks)
-	})
-
-	// 调试接口：清空所有结算任务
-	r.Post("/debug/tasks/clear", func(w http.ResponseWriter, r *http.Request) {
-		if err := queueMgr.ClearTasks(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Tasks cleared"))
+	// 调试及清理接口组（挂载 AdminAuthMiddleware 鉴权以防数据泄露/恶意清空）
+	r.Route("/debug", func(r chi.Router) {
+		r.Use(AdminAuthMiddleware)
+		r.Get("/tasks", func(w http.ResponseWriter, r *http.Request) {
+			tasks, err := queueMgr.GetLatestTasks(10)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(tasks)
+		})
+		r.Post("/tasks/clear", func(w http.ResponseWriter, r *http.Request) {
+			if err := queueMgr.ClearTasks(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Tasks cleared"))
+		})
 	})
 
 	// 注册 /admin 路由组（受 CORSMiddleware 和 AdminAuthMiddleware 保护）
@@ -209,6 +210,16 @@ func main() {
 			}
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("Stripe sessions cleared"))
+		})
+		r.Get("/stripe-sessions", func(w http.ResponseWriter, r *http.Request) {
+			sessions, err := queueMgr.GetConsumedStripeSessions()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(sessions)
 		})
 	})
 

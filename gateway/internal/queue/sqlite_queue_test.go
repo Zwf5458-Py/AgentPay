@@ -323,7 +323,16 @@ func TestQueue_AdminOperations(t *testing.T) {
 		t.Errorf("Expected nextRetryAt to be close to now, got %d", nextRetryAt)
 	}
 
-	// 5. 测试 ClearStripeSessions
+	// 5. 测试 GetConsumedStripeSessions
+	sessions, err := qm.GetConsumedStripeSessions()
+	if err != nil {
+		t.Fatalf("GetConsumedStripeSessions failed: %v", err)
+	}
+	if len(sessions) != 3 {
+		t.Errorf("Expected 3 consumed stripe sessions, got %d", len(sessions))
+	}
+
+	// 6. 测试 ClearStripeSessions
 	err = qm.ClearStripeSessions()
 	if err != nil {
 		t.Fatalf("ClearStripeSessions failed: %v", err)

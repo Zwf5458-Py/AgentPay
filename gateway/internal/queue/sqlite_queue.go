@@ -706,3 +706,29 @@ func (qm *QueueManager) ClearStripeSessions() error {
 	}
 	return nil
 }
+
+// GetConsumedStripeSessions 获取已核销的 Stripe 会话 ID 列表
+func (qm *QueueManager) GetConsumedStripeSessions() ([]string, error) {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	query := `SELECT session_id FROM consumed_stripe_sessions ORDER BY created_at DESC`
+	rows, err := qm.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query stripe sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []string
+	for rows.Next() {
+		var sid string
+		if err := rows.Scan(&sid); err != nil {
+			return nil, fmt.Errorf("failed to scan stripe session: %w", err)
+		}
+		sessions = append(sessions, sid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
+	}
+	return sessions, nil
+}

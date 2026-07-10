@@ -1,32 +1,27 @@
-# Task 2 Brief: Upgrade X402Middleware to support Bearer stripe:<session_id> Credentials
+# Task 2 Brief: Create admin.html UI Layout & Design System
 
-**Goal**: Support Stripe-paid requests by parsing and verifying `Bearer stripe:<session_id>` authorization header in the X-402 middleware.
+**Goal**: Create a static web interface `admin.html` with a premium dark neon glassmorphism style consistent with `client.html`.
 
 **Files**:
-- Modify: `gateway/internal/middleware/x402.go`
-- Modify: `gateway/internal/middleware/x402_test.go`
+- Create: `admin.html`
 
 **Instructions**:
-1. Open `gateway/internal/middleware/x402.go`.
-2. Introduce context keys or values to denote payment method (e.g. `PaymentMethodContextKey` value `"x402_payment_method"`).
-3. In `X402Middleware`:
-   - Inspect the incoming token (the parsed string after `Bearer ` prefix).
-   - Check if token starts with `"stripe:"` (e.g. `strings.HasPrefix(token, "stripe:")`).
-   - If it matches:
-     - Extract `sessionID` by removing the `"stripe:"` prefix (e.g. `strings.TrimPrefix(token, "stripe:")`).
-     - Retrieve the Stripe client instance initialized in main (or dynamically initialize a `stripe.NewStripeClient` reading environment variables).
-     - Call `VerifyCheckoutSession(sessionID)` to confirm if it has been fully paid.
-     - If the session is NOT valid or unpaid, call `trigger402(w)` and return.
-     - If valid/paid, inject the following details into the request context:
-       - `TokenContextKey` = token (`stripe:<session_id>`)
-       - `LockIDContextKey` = `sessionID`
-       - PaymentMethodContextKey = `"stripe"`
-       - StripeSessionIDContextKey = `sessionID`
-     - Call `next.ServeHTTP(w, r.WithContext(ctx))` and return.
-4. Export context accessors:
-   - `GetPaymentMethod(ctx context.Context) string`
-   - `GetStripeSessionID(ctx context.Context) string`
-5. Align unit tests in `gateway/internal/middleware/x402_test.go` to test this route:
-   - Add a test `TestX402Middleware_StripeValid` and `TestX402Middleware_StripeInvalid`.
-   - Mock Stripe verification (since Stripe client in test environment defaults to Mock Mode if environment variables are not set, it will easily return verified for `cs_mock_` sessions).
-6. Commit changes.
+1. Scaffold `admin.html` in the repository root directory.
+2. In the style system:
+   - Fonts: Import Inter and Outfit google fonts.
+   - Core Styling Variables: Define colors for deep dark purple/black backgrounds (`#07040f`), border glows, neon cyan (`#00f0ff`), neon violet (`#ff00ff`), neon green/emerald (`#00ff66`), neon rose (`#ff0055`), and warnings/yellow (`#ffaa00`).
+   - Use glassmorphic card design (`backdrop-filter: blur(15px); background: rgba(20, 10, 35, 0.45)`).
+3. DOM Structure:
+   - Header: Displaying "AgentPay - Admin Portal" and a Connection Status Badge with an indicator light.
+   - Credentials Card: Input box for API Gateway URL (default `http://localhost:8080`) and Admin Secret Key (type `password`).
+   - KPI Dashboard block:
+     - 4 Glowing Cards:
+       - Total Settled (USDC)
+       - Total Platform Fees (USDC)
+       - Active Stripe Sessions
+       - Success Rate (%)
+   - Split view Layout:
+     - Left panel (Tasks Queue): A Table exhibiting Lock ID, Status, Retry count, Date, and Actions column. Provide a "Clear Queue" button at table header.
+     - Right panel (Stripe Sessions): A list displaying nuclear-styled consumed Stripe Session IDs and a "Clear stripe sessions" button at list header.
+4. Render static mocked values in both KPI blocks and tables as placeholders to evaluate visual correctness.
+5. Commit changes.
