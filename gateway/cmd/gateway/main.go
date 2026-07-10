@@ -22,6 +22,9 @@ import (
 	"ledger/rail"
 	"ledger/service"
 	"ledger/store"
+
+	pricingservice "pricing/service"
+	pricingstore "pricing/store"
 )
 
 func main() {
@@ -81,14 +84,22 @@ func main() {
 	}
 	ledgerService := service.NewLedgerService(ledgerStore, rails)
 
+	// 初始化通用计费引擎 (Pricing Service)
+	pricingStore, perr := pricingstore.NewSQLiteStore("pricing.db")
+	if perr != nil {
+		log.Fatalf("Failed to initialize pricing store: %v", perr)
+	}
+	pricingService := pricingservice.NewPricingService(pricingStore)
+
 	queueMgr, err := queue.NewQueueManager("gateway.db", aaBridgeURL, internalSecret)
 	if err != nil {
 		log.Fatalf("Failed to initialize queue manager: %v", err)
 	}
 	defer queueMgr.Close()
 
-	// 挂载记账服务到异步队列中
+	// 挂载记账服务与计费服务到异步队列中
 	queueMgr.SetLedgerService(ledgerService)
+	queueMgr.SetPricingService(pricingService)
 
 	// 注入到 X402 中间件供其进行已消费 Session 的持久化校验
 	middleware.DBQueueManager = queueMgr
@@ -104,12 +115,13 @@ func main() {
 
 	// 挂载记账服务到反向代理拦截器中
 	proxyHandler.SetLedgerService(ledgerService)
+	proxyHandler.SetPricingService(pricingService)
 
 	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
 	stripeClient := stripe.NewStripeClient(stripeKey)
 
 	// 路由注册
-	mcpHandler := plugin.NewMcpHandler(ledgerService, queueMgr)
+	mcpHandler := plugin.NewMcpHandler(ledgerService, pricingService, queueMgr)
 	r.Handle("/v1/plugin/mcp", mcpHandler)
 
 	r.Route("/agent", func(r chi.Router) {

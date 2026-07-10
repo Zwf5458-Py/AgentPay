@@ -10,16 +10,21 @@ import (
 	"gateway/internal/queue"
 	"ledger/rail"
 	"ledger/service"
+
+	pricingmodel "pricing/model"
+	pricingservice "pricing/service"
 )
 
 type McpHandler struct {
 	ledgerSvc *service.LedgerService
+	pricingSvc *pricingservice.PricingService
 	queueMgr  *queue.QueueManager
 }
 
-func NewMcpHandler(ledgerSvc *service.LedgerService, queueMgr *queue.QueueManager) *McpHandler {
+func NewMcpHandler(ledgerSvc *service.LedgerService, pricingSvc *pricingservice.PricingService, queueMgr *queue.QueueManager) *McpHandler {
 	return &McpHandler{
 		ledgerSvc: ledgerSvc,
+		pricingSvc: pricingSvc,
 		queueMgr:  queueMgr,
 	}
 }
@@ -84,7 +89,7 @@ func (h *McpHandler) handleListTools() interface{} {
 		"tools": []map[string]interface{}{
 			{
 				"name":        "pay",
-				"description": "Lock funds in AgentPay channel for an AI invocation",
+				"description": "Lock funds in AgentPay channel for an AI invocation, based on expected token usage",
 				"inputSchema": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -92,12 +97,12 @@ func (h *McpHandler) handleListTools() interface{} {
 							"type":        "integer",
 							"description": "The unique ID of the agent",
 						},
-						"amountUsdc": map[string]interface{}{
-							"type":        "number",
-							"description": "The amount to lock in USDC (e.g. 0.50)",
+						"tokens": map[string]interface{}{
+							"type":        "integer",
+							"description": "The expected tokens to lock for (e.g., 2000)",
 						},
 					},
-					"required": []string{"agentId", "amountUsdc"},
+					"required": []string{"agentId", "tokens"},
 				},
 			},
 			{
@@ -113,6 +118,10 @@ func (h *McpHandler) handleListTools() interface{} {
 						"actualCostUsdc": map[string]interface{}{
 							"type":        "number",
 							"description": "The actual cost to clear in USDC (e.g. 0.35)",
+						},
+						"tokens": map[string]interface{}{
+							"type":        "integer",
+							"description": "The actual tokens consumed (optional, e.g. 1500)",
 						},
 						"nonce": map[string]interface{}{
 							"type":        "string",
@@ -142,14 +151,29 @@ func (h *McpHandler) handleCallTool(ctx context.Context, params json.RawMessage)
 	switch callReq.Name {
 	case "pay":
 		var args struct {
-			AgentID    int64   `json:"agentId"`
-			AmountUsdc float64 `json:"amountUsdc"`
+			AgentID int64  `json:"agentId"`
+			Tokens  uint64 `json:"tokens"`
 		}
 		if err := json.Unmarshal(callReq.Arguments, &args); err != nil {
 			return nil, err
 		}
 
-		microAmount := uint64(args.AmountUsdc * 1e6)
+		var microAmount uint64
+		if h.pricingSvc != nil {
+			quote, qerr := h.pricingSvc.Quote(ctx, strconv.FormatInt(args.AgentID, 10), args.Tokens, "")
+			if qerr != nil {
+				return nil, fmt.Errorf("pricing quote failed: %w", qerr)
+			}
+			microAmount = quote.MicroAmount
+		} else {
+			// 退回默认的线性计费费率: $0.0015 / 1k + $0.002
+			modelCost := (args.Tokens / 1000) * 1500
+			if args.Tokens%1000 != 0 {
+				modelCost += 1500
+			}
+			microAmount = (modelCost + 2000) * 10000 / 9000 // 10% Platform Bps
+		}
+
 		payer := "mcp_client_default"
 		inv, err := h.ledgerSvc.CreateInvoice(ctx, payer, strconv.FormatInt(args.AgentID, 10), microAmount, "crypto")
 		if err != nil {
@@ -160,16 +184,17 @@ func (h *McpHandler) handleCallTool(ctx context.Context, params json.RawMessage)
 			"content": []map[string]interface{}{
 				{
 					"type": "text",
-					"text": fmt.Sprintf("Successfully locked funds. InvoiceID: %s, Locked: %.6f USDC", inv.ID, args.AmountUsdc),
+					"text": fmt.Sprintf("Successfully locked funds. InvoiceID: %s, Locked: %.6f USDC (expected tokens: %d)", inv.ID, float64(microAmount)/1e6, args.Tokens),
 				},
 			},
 		}, nil
 
 	case "checkout":
 		var args struct {
-			InvoiceID      string   `json:"invoiceId"`
-			ActualCostUsdc float64  `json:"actualCostUsdc"`
-			Nonce          string   `json:"nonce"`
+			InvoiceID      string  `json:"invoiceId"`
+			ActualCostUsdc float64 `json:"actualCostUsdc"`
+			Tokens         uint64  `json:"tokens,omitempty"`
+			Nonce          string  `json:"nonce"`
 		}
 		if err := json.Unmarshal(callReq.Arguments, &args); err != nil {
 			return nil, err
@@ -196,6 +221,28 @@ func (h *McpHandler) handleCallTool(ctx context.Context, params json.RawMessage)
 		err := h.ledgerSvc.SettleInvoice(ctx, args.InvoiceID, microCost, payouts, nonceStr, "")
 		if err != nil {
 			return nil, err
+		}
+
+		// 结算成功后，记录实际用量到计费引擎中
+		if h.pricingSvc != nil {
+			// 如果没有传入 tokens，根据 1.5 USDC/1k tokens 的默认配置反推实际用量
+			tokensVal := args.Tokens
+			if tokensVal == 0 {
+				tokensVal = (microCost / 1500) * 1000
+			}
+
+			// 获取 Invoice 获取 AgentID 并在记录时传入
+			inv, getErr := h.ledgerSvc.GetInvoice(ctx, args.InvoiceID)
+			agentIDStr := "888"
+			if getErr == nil && inv != nil {
+				agentIDStr = inv.Agent
+			}
+
+			q := &pricingmodel.Quote{
+				AgentID:     agentIDStr,
+				MicroAmount: microCost,
+			}
+			_ = h.pricingSvc.RecordUsage(ctx, agentIDStr, args.InvoiceID, tokensVal, q)
 		}
 
 		return map[string]interface{}{

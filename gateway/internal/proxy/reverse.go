@@ -16,6 +16,8 @@ import (
 
 	"ledger/rail"
 	"ledger/service"
+	pricingmodel "pricing/model"
+	pricingservice "pricing/service"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -31,10 +33,15 @@ type ReverseProxyWrapper struct {
 	QueueManager   *queue.QueueManager
 	privateKey     *ecdsa.PrivateKey
 	LedgerService  *service.LedgerService
+	PricingService *pricingservice.PricingService
 }
 
 func (w *ReverseProxyWrapper) SetLedgerService(svc *service.LedgerService) {
 	w.LedgerService = svc
+}
+
+func (w *ReverseProxyWrapper) SetPricingService(svc *pricingservice.PricingService) {
+	w.PricingService = svc
 }
 
 // NewReverseProxy 构造反向代理实例
@@ -102,58 +109,82 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 		expirationStr := middleware.GetExpiration(ctx)
 		signature := middleware.GetSignature(ctx)
 
-		// 1. 统一提取与计算 modelCost 和 actualCost
-		var holdVal int64 = 0
-		if holdAmountStr != "" {
-			if val, err := strconv.ParseInt(holdAmountStr, 10, 64); err == nil {
-				holdVal = val
+	// 1. 调用通用计费引擎 pricing.Quote 计算 modelCost / serviceFee / platformBps / actualCost
+	var holdVal int64 = 0
+	if holdAmountStr != "" {
+		if val, err := strconv.ParseInt(holdAmountStr, 10, 64); err == nil {
+			holdVal = val
+		}
+	}
+	
+	// 读取下游返回的 token 用量（X-Agent-Tokens），缺失时由 X-Agent-Cost 反推
+	tokens := uint64(0)
+	if tStr := res.Header.Get("X-Agent-Tokens"); tStr != "" {
+		if tv, err := strconv.ParseUint(tStr, 10, 64); err == nil {
+			tokens = tv
+		}
+	}
+	if tokens == 0 && wrapper.PricingService != nil {
+		if cv, err := strconv.ParseUint(res.Header.Get("X-Agent-Cost"), 10, 64); err == nil && cv > 0 {
+			tokens = (cv / 1500) * 1000
+			if cv%1500 != 0 {
+				tokens += 1000
 			}
 		}
-
-		// 计算模型费 modelCost (来自 X-Agent-Cost)
-		modelCost := int64(1000) // 默认 1000
-		costStr := res.Header.Get("X-Agent-Cost")
-		if costStr == "" {
-			log.Println("[Proxy] No X-Agent-Cost header found in downstream response, defaulting to model cost 1000")
+	}
+	
+	// 提前提取 agentID 供 pricing.Quote 使用
+	agentIDStrTmp := res.Request.Header.Get("X-Agent-Id")
+	if agentIDStrTmp == "" {
+		agentIDStrTmp = os.Getenv("AGENT_ID")
+	}
+	agentIDTmp := int64(888)
+	if agentIDStrTmp != "" {
+		if val, err := strconv.ParseInt(agentIDStrTmp, 10, 64); err == nil {
+			agentIDTmp = val
+		}
+	}
+	var modelCost int64
+	var serviceFeeVal int64
+	var platformBps uint16
+	var actualCost int64
+	if wrapper.PricingService != nil && agentIDTmp != 0 {
+		quote, qerr := wrapper.PricingService.Quote(ctx, strconv.FormatInt(agentIDTmp, 10), tokens, "")
+		if qerr != nil {
+			log.Printf("[Proxy] pricing.Quote failed: %v, falling back to env defaults", qerr)
 		} else {
-			if costVal, err := strconv.ParseInt(costStr, 10, 64); err == nil {
-				if costVal < 0 {
-					log.Println("[Proxy] Invalid negative X-Agent-Cost value found in downstream response, defaulting to model cost 1000")
-					modelCost = 1000
-				} else {
-					modelCost = costVal
-				}
-			} else {
-				log.Printf("[Proxy] Failed to parse X-Agent-Cost header: '%s', defaulting to model cost 1000", costStr)
-				modelCost = 1000
-			}
+			modelCost = int64(quote.ModelCost)
+			serviceFeeVal = int64(quote.ServiceFee)
+			platformBps = quote.PlatformBps
+			actualCost = int64(quote.MicroAmount)
 		}
-
-		// 限制 modelCost 不超过 holdAmount
+	}
+	if actualCost == 0 {
+		// 回退：保持 legacy env 行为
+		modelCost = int64(1000)
+		if cv, err := strconv.ParseInt(res.Header.Get("X-Agent-Cost"), 10, 64); err == nil && cv > 0 {
+			modelCost = cv
+		}
 		if holdVal > 0 && modelCost > holdVal {
 			modelCost = holdVal
 		}
-
-		platformBpsStr := os.Getenv("PLATFORM_BPS")
-		if platformBpsStr == "" {
-			platformBpsStr = "10"
+		platformBpsVal, _ := strconv.ParseUint(os.Getenv("PLATFORM_BPS"), 10, 16)
+		if platformBpsVal == 0 {
+			platformBpsVal = 10
 		}
-		platformBpsVal, _ := strconv.ParseUint(platformBpsStr, 10, 16)
-		platformBps := uint16(platformBpsVal)
-
-		serviceFeeVal := int64(2000)
+		platformBps = uint16(platformBpsVal)
+		serviceFeeVal = int64(2000)
 		if feeEnv := os.Getenv("AGENT_SERVICE_FEE"); feeEnv != "" {
 			if val, err := strconv.ParseInt(feeEnv, 10, 64); err == nil {
 				serviceFeeVal = val
 			}
 		}
-
-		var actualCost int64
 		if channelID != "" {
 			actualCost = (modelCost + serviceFeeVal) * 10000 / (10000 - int64(platformBps))
 		} else {
 			actualCost = modelCost
 		}
+	}
 
 		// 安全防线：实际总扣款不超过预授权冻结额
 		if holdVal > 0 && actualCost > holdVal {
@@ -192,6 +223,22 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 						log.Printf("[Proxy] Ledger settle failed for Stripe session %s: %v", stripeSessionID, errSettle)
 					} else {
 						log.Printf("[Proxy] Ledger double-entry record success for Stripe session %s", stripeSessionID)
+
+						if wrapper.PricingService != nil {
+							q := &pricingmodel.Quote{
+								AgentID:     strconv.FormatInt(agentID, 10),
+								ModelCost:   uint64(modelCost),
+								ServiceFee:  uint64(serviceFeeVal),
+								PlatformBps: platformBps,
+								MicroAmount: uint64(actualCost),
+							}
+							errRecord := wrapper.PricingService.RecordUsage(ctx, q.AgentID, inv.ID, tokens, q)
+							if errRecord != nil {
+								log.Printf("[Proxy] Pricing record usage failed for Stripe session %s: %v", stripeSessionID, errRecord)
+							} else {
+								log.Printf("[Proxy] Pricing successfully recorded usage for Stripe session %s, tokens %d", stripeSessionID, tokens)
+							}
+						}
 					}
 				} else {
 					log.Printf("[Proxy] Ledger CreateInvoice failed for Stripe session %s: %v", stripeSessionID, err)
@@ -266,6 +313,7 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 						PlatformBps:       platformBps,
 						AgentID:           agentID,
 						InvoiceID:         invoiceID,
+						Tokens:            tokens,
 					}
 
 					if err := wrapper.QueueManager.Enqueue(enqueueLockID, proof, wrapper.agentOwner, wrapper.escrowAddress, taskDetails); err != nil {

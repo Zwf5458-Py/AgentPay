@@ -13,6 +13,9 @@ import (
 	"ledger/rail"
 	"ledger/service"
 	"ledger/store"
+
+	pricingstore "pricing/store"
+	pricingservice "pricing/service"
 )
 
 func TestMcpHandler(t *testing.T) {
@@ -26,6 +29,16 @@ func TestMcpHandler(t *testing.T) {
 	}
 	defer sqliteStore.Close()
 
+	// 初始化 pricing db 与 service
+	pricingDbFile := "./test_mcp_pricing.db"
+	defer os.Remove(pricingDbFile)
+	pstore, perr := pricingstore.NewSQLiteStore(pricingDbFile)
+	if perr != nil {
+		t.Fatalf("failed to create pricing store: %v", perr)
+	}
+	defer pstore.Close()
+	pricingSvc := pricingservice.NewPricingService(pstore)
+
 	stripeRail := rail.NewStripeRail(true)
 	rails := map[string]rail.PaymentRail{
 		"stripe": stripeRail,
@@ -33,7 +46,7 @@ func TestMcpHandler(t *testing.T) {
 	}
 
 	ledgerSvc := service.NewLedgerService(sqliteStore, rails)
-	mcpHandler := NewMcpHandler(ledgerSvc, nil)
+	mcpHandler := NewMcpHandler(ledgerSvc, pricingSvc, nil)
 
 	// 2. 测试 tools/list
 	listReq := JsonRpcRequest{
@@ -66,8 +79,8 @@ func TestMcpHandler(t *testing.T) {
 
 	// 3. 测试 tools/call (pay)
 	payArgs := map[string]interface{}{
-		"agentId":    888,
-		"amountUsdc": 0.50,
+		"agentId": 888,
+		"tokens":  2000,
 	}
 	callPayParams := map[string]interface{}{
 		"name":      "pay",
@@ -119,6 +132,7 @@ func TestMcpHandler(t *testing.T) {
 	checkoutArgs := map[string]interface{}{
 		"invoiceId":      invoiceID,
 		"actualCostUsdc": 0.35,
+		"tokens":         1500,
 	}
 	callCheckoutParams := map[string]interface{}{
 		"name":      "checkout",

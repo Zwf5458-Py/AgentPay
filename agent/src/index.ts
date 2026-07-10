@@ -128,6 +128,7 @@ server.post('/agent/execute', async (request, reply) => {
     
     // 注入动态计算出的推理成本到 Header 中，供 Gateway 提取并最终完成签名账本扣除
     reply.header('X-Agent-Cost', actualCost.toString());
+    reply.header('X-Agent-Tokens', (promptTokens + completionTokens).toString());
 
     // 5. 返回 Body 格式：{ output: string, proof: InferenceProof, usage: { prompt_tokens, completion_tokens } }
     // 使用自定义序列化以支持 bigint 字段的 JSON 传输

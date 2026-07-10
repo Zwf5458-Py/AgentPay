@@ -167,3 +167,7 @@ func (s *LedgerService) ensureAccount(ctx context.Context, id string, accType mo
 	}
 	return nil
 }
+
+func (s *LedgerService) GetInvoice(ctx context.Context, id string) (*model.Invoice, error) {
+	return s.store.GetInvoice(ctx, id)
+}

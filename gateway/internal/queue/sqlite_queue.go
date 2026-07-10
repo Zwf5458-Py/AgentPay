@@ -17,6 +17,9 @@ import (
 	"ledger/rail"
 	"ledger/service"
 
+	pricingmodel "pricing/model"
+	pricingservice "pricing/service"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -42,6 +45,7 @@ type SettleTask struct {
 	Status            string `json:"status"`
 	CreatedAt         int64  `json:"created_at"`
 	InvoiceID         string `json:"invoice_id"`
+	Tokens            uint64 `json:"tokens"`
 }
 
 type QueueManager struct {
@@ -52,10 +56,15 @@ type QueueManager struct {
 	client         *http.Client
 	wg             sync.WaitGroup // 追踪协程以实现优雅退出
 	LedgerService  *service.LedgerService
+	PricingService *pricingservice.PricingService
 }
 
 func (qm *QueueManager) SetLedgerService(svc *service.LedgerService) {
 	qm.LedgerService = svc
+}
+
+func (qm *QueueManager) SetPricingService(svc *pricingservice.PricingService) {
+	qm.PricingService = svc
 }
 
 // NewQueueManager 构造函数
@@ -122,7 +131,8 @@ func (qm *QueueManager) initDB() error {
 		treasury TEXT,
 		platform_bps INTEGER,
 		agent_id INTEGER,
-		invoice_id TEXT
+		invoice_id TEXT,
+		tokens INTEGER
 	);
 	CREATE INDEX IF NOT EXISTS idx_settle_tasks_status_next_retry ON settle_tasks (status, next_retry_at);
 	`
@@ -185,6 +195,7 @@ func (qm *QueueManager) initDB() error {
 		{"platform_bps", "INTEGER"},
 		{"agent_id", "INTEGER"},
 		{"invoice_id", "TEXT"},
+		{"tokens", "INTEGER"},
 	}
 
 	for _, col := range columns {
@@ -259,18 +270,23 @@ func (qm *QueueManager) Enqueue(lockID, proof, agentOwner, escrowAddress string,
 		invoiceID = taskDetails.InvoiceID
 	}
 
+	var tokens uint64 = 0
+	if taskDetails != nil {
+		tokens = taskDetails.Tokens
+	}
+
 	query := `
 	INSERT OR IGNORE INTO settle_tasks (
 		lock_id, proof, agent_owner, escrow_address, status, retry_count, next_retry_at, created_at,
 		channel_id, hold_amount, nonce, expiration, signature, accumulated_amount, model_cost, service_fee,
-		model_provider, treasury, platform_bps, agent_id, invoice_id
+		model_provider, treasury, platform_bps, agent_id, invoice_id, tokens
 	)
-	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := qm.db.Exec(query,
 		lockID, proof, agentOwner, escrowAddress, now, now,
 		channelID, holdAmount, nonce, expiration, signature, accumulatedAmount, modelCost, serviceFee,
-		modelProvider, treasury, platformBps, agentID, invoiceID,
+		modelProvider, treasury, platformBps, agentID, invoiceID, tokens,
 	)
 	if err != nil {
 		log.Printf("[Queue] Failed to enqueue lockId %s: %v", lockID, err)
@@ -324,7 +340,7 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 	query := `
 	SELECT id, lock_id, proof, agent_owner, escrow_address, retry_count,
 	       channel_id, hold_amount, nonce, expiration, signature, accumulated_amount,
-	       model_cost, service_fee, model_provider, treasury, platform_bps, agent_id, invoice_id
+	       model_cost, service_fee, model_provider, treasury, platform_bps, agent_id, invoice_id, tokens
 	FROM settle_tasks
 	WHERE status = 'pending' AND next_retry_at <= ?
 	`
@@ -338,12 +354,12 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 	for rows.Next() {
 		var t SettleTask
 		var channelID, signature, modelProvider, treasury, invoiceID sql.NullString
-		var holdAmount, nonce, expiration, accumulatedAmount, modelCost, serviceFee, platformBps, agentID sql.NullInt64
+		var holdAmount, nonce, expiration, accumulatedAmount, modelCost, serviceFee, platformBps, agentID, tokensVal sql.NullInt64
 
 		err := rows.Scan(
 			&t.ID, &t.LockID, &t.Proof, &t.AgentOwner, &t.EscrowAddress, &t.RetryCount,
 			&channelID, &holdAmount, &nonce, &expiration, &signature, &accumulatedAmount,
-			&modelCost, &serviceFee, &modelProvider, &treasury, &platformBps, &agentID, &invoiceID,
+			&modelCost, &serviceFee, &modelProvider, &treasury, &platformBps, &agentID, &invoiceID, &tokensVal,
 		)
 		if err != nil {
 			return nil, err
@@ -387,6 +403,9 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 		}
 		if invoiceID.Valid {
 			t.InvoiceID = invoiceID.String
+		}
+		if tokensVal.Valid {
+			t.Tokens = uint64(tokensVal.Int64)
 		}
 
 		tasks = append(tasks, t)
@@ -439,6 +458,23 @@ func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) 
 			return
 		}
 		log.Printf("[Queue Worker] Ledger successfully recorded and settled invoice %s", task.InvoiceID)
+
+		if qm.PricingService != nil {
+			q := &pricingmodel.Quote{
+				AgentID:     strconv.FormatInt(task.AgentID, 10),
+				ModelCost:   task.ModelCost,
+				ServiceFee:  task.ServiceFee,
+				PlatformBps: task.PlatformBps,
+				MicroAmount: task.AccumulatedAmount,
+			}
+			errRecord := qm.PricingService.RecordUsage(ctx, q.AgentID, task.InvoiceID, task.Tokens, q)
+			if errRecord != nil {
+				log.Printf("[Queue Worker] Pricing record usage failed for invoice %s: %v", task.InvoiceID, errRecord)
+			} else {
+				log.Printf("[Queue Worker] Pricing successfully recorded usage for invoice %s, tokens %d", task.InvoiceID, task.Tokens)
+			}
+		}
+
 		qm.handleSuccess(ctx, task)
 		return
 	}
