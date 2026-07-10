@@ -15,6 +15,7 @@ import (
 	"gateway/internal/middleware"
 	"gateway/internal/proxy"
 	"gateway/internal/queue"
+	"gateway/internal/stripe"
 )
 
 func main() {
@@ -75,10 +76,48 @@ func main() {
 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
 	}
 
+	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
+	stripeClient := stripe.NewStripeClient(stripeKey)
+
 	// 路由注册
 	r.Route("/agent", func(r chi.Router) {
 		r.Use(middleware.X402Middleware)
 		r.Handle("/execute", proxyHandler)
+	})
+
+	r.Post("/stripe/create-session", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Amount     uint64 `json:"amount"`
+			SuccessURL string `json:"successUrl"`
+			CancelURL  string `json:"cancelUrl"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Amount == 0 {
+			req.Amount = 50000 // 默认 50000 微单位 (0.05 USD)
+		}
+		if req.SuccessURL == "" {
+			req.SuccessURL = "http://localhost:3000/success"
+		}
+		if req.CancelURL == "" {
+			req.CancelURL = "http://localhost:3000/cancel"
+		}
+
+		sessionID, url, err := stripeClient.CreateCheckoutSession(req.Amount, req.SuccessURL, req.CancelURL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"sessionId": sessionID,
+			"url":       url,
+		})
 	})
 
 	// 调试接口：获取最近的 10 个结算任务
@@ -118,7 +157,7 @@ func CORSMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-Secret")
 		// 必须允许前端读取自定义头部
-		w.Header().Set("Access-Control-Expose-Headers", "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof, X-402-Platform-Bps, X-402-Model-Provider, X-402-Payment-Methods, X-402-Hold-Amount, X-402-Settle-Receipt, X-402-Currency, X-402-Chain, X-402-Version")
+		w.Header().Set("Access-Control-Expose-Headers", "X-402-Payment-Address, X-402-Price, X-402-Payment-Type, X-Agent-Proof, X-402-Platform-Bps, X-402-Model-Provider, X-402-Payment-Methods, X-402-Hold-Amount, X-402-Settle-Receipt, X-402-Currency, X-402-Chain, X-402-Version, X-402-Payment-Method, X-402-Stripe-Session")
 		
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
