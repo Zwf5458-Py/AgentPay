@@ -14,6 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"ledger/rail"
+	"ledger/service"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -38,6 +41,7 @@ type SettleTask struct {
 	AgentID           int64  `json:"agent_id"`
 	Status            string `json:"status"`
 	CreatedAt         int64  `json:"created_at"`
+	InvoiceID         string `json:"invoice_id"`
 }
 
 type QueueManager struct {
@@ -47,6 +51,11 @@ type QueueManager struct {
 	mu             sync.Mutex // SQLite 互斥锁，确保并发写安全
 	client         *http.Client
 	wg             sync.WaitGroup // 追踪协程以实现优雅退出
+	LedgerService  *service.LedgerService
+}
+
+func (qm *QueueManager) SetLedgerService(svc *service.LedgerService) {
+	qm.LedgerService = svc
 }
 
 // NewQueueManager 构造函数
@@ -112,7 +121,8 @@ func (qm *QueueManager) initDB() error {
 		model_provider TEXT,
 		treasury TEXT,
 		platform_bps INTEGER,
-		agent_id INTEGER
+		agent_id INTEGER,
+		invoice_id TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_settle_tasks_status_next_retry ON settle_tasks (status, next_retry_at);
 	`
@@ -174,6 +184,7 @@ func (qm *QueueManager) initDB() error {
 		{"treasury", "TEXT"},
 		{"platform_bps", "INTEGER"},
 		{"agent_id", "INTEGER"},
+		{"invoice_id", "TEXT"},
 	}
 
 	for _, col := range columns {
@@ -243,18 +254,23 @@ func (qm *QueueManager) Enqueue(lockID, proof, agentOwner, escrowAddress string,
 		}
 	}
 
+	var invoiceID interface{}
+	if taskDetails != nil && taskDetails.InvoiceID != "" {
+		invoiceID = taskDetails.InvoiceID
+	}
+
 	query := `
 	INSERT OR IGNORE INTO settle_tasks (
 		lock_id, proof, agent_owner, escrow_address, status, retry_count, next_retry_at, created_at,
 		channel_id, hold_amount, nonce, expiration, signature, accumulated_amount, model_cost, service_fee,
-		model_provider, treasury, platform_bps, agent_id
+		model_provider, treasury, platform_bps, agent_id, invoice_id
 	)
-	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := qm.db.Exec(query,
 		lockID, proof, agentOwner, escrowAddress, now, now,
 		channelID, holdAmount, nonce, expiration, signature, accumulatedAmount, modelCost, serviceFee,
-		modelProvider, treasury, platformBps, agentID,
+		modelProvider, treasury, platformBps, agentID, invoiceID,
 	)
 	if err != nil {
 		log.Printf("[Queue] Failed to enqueue lockId %s: %v", lockID, err)
@@ -308,7 +324,7 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 	query := `
 	SELECT id, lock_id, proof, agent_owner, escrow_address, retry_count,
 	       channel_id, hold_amount, nonce, expiration, signature, accumulated_amount,
-	       model_cost, service_fee, model_provider, treasury, platform_bps, agent_id
+	       model_cost, service_fee, model_provider, treasury, platform_bps, agent_id, invoice_id
 	FROM settle_tasks
 	WHERE status = 'pending' AND next_retry_at <= ?
 	`
@@ -321,13 +337,13 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 	var tasks []SettleTask
 	for rows.Next() {
 		var t SettleTask
-		var channelID, signature, modelProvider, treasury sql.NullString
+		var channelID, signature, modelProvider, treasury, invoiceID sql.NullString
 		var holdAmount, nonce, expiration, accumulatedAmount, modelCost, serviceFee, platformBps, agentID sql.NullInt64
 
 		err := rows.Scan(
 			&t.ID, &t.LockID, &t.Proof, &t.AgentOwner, &t.EscrowAddress, &t.RetryCount,
 			&channelID, &holdAmount, &nonce, &expiration, &signature, &accumulatedAmount,
-			&modelCost, &serviceFee, &modelProvider, &treasury, &platformBps, &agentID,
+			&modelCost, &serviceFee, &modelProvider, &treasury, &platformBps, &agentID, &invoiceID,
 		)
 		if err != nil {
 			return nil, err
@@ -368,6 +384,9 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 		}
 		if agentID.Valid {
 			t.AgentID = agentID.Int64
+		}
+		if invoiceID.Valid {
+			t.InvoiceID = invoiceID.String
 		}
 
 		tasks = append(tasks, t)
@@ -445,6 +464,28 @@ func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) 
 		log.Printf("[Queue Worker] Bridge returned non-200 for lockId %s: %v", task.LockID, err)
 		qm.handleFailure(ctx, task, err)
 		return
+	}
+
+	if qm.LedgerService != nil && task.InvoiceID != "" {
+		platformFee := task.AccumulatedAmount - task.ModelCost - task.ServiceFee
+		payouts := []rail.Payout{
+			{Target: task.ModelProvider, Amount: task.ModelCost},
+			{Target: task.AgentOwner, Amount: task.ServiceFee},
+			{Target: task.Treasury, Amount: platformFee},
+		}
+
+		nonceStr := strconv.FormatUint(task.Nonce, 10)
+		if task.ChannelID == "" {
+			nonceStr = task.LockID
+		}
+
+		err = qm.LedgerService.SettleInvoice(ctx, task.InvoiceID, task.AccumulatedAmount, payouts, nonceStr)
+		if err != nil {
+			log.Printf("[Queue Worker] Ledger bookkeeping failed for invoice %s: %v", task.InvoiceID, err)
+			qm.handleFailure(ctx, task, err)
+			return
+		}
+		log.Printf("[Queue Worker] Ledger successfully recorded bookkeeping entry for invoice %s", task.InvoiceID)
 	}
 
 	qm.handleSuccess(ctx, task)

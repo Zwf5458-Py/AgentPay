@@ -2,7 +2,7 @@ package store
 
 import (
 	"context"
-	"ledger/internal/model"
+	"ledger/model"
 )
 
 type LedgerStore interface {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"ledger/internal/model"
+	"ledger/model"
 
 	_ "modernc.org/sqlite"
 )

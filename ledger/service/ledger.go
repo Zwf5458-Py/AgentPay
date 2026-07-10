@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"ledger/internal/model"
-	"ledger/internal/rail"
-	"ledger/internal/store"
+	"ledger/model"
+	"ledger/rail"
+	"ledger/store"
 	"time"
 
 	"github.com/google/uuid"

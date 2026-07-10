@@ -14,6 +14,9 @@ import (
 	"gateway/internal/middleware"
 	"gateway/internal/queue"
 
+	"ledger/rail"
+	"ledger/service"
+
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -27,6 +30,11 @@ type ReverseProxyWrapper struct {
 	internalSecret string
 	QueueManager   *queue.QueueManager
 	privateKey     *ecdsa.PrivateKey
+	LedgerService  *service.LedgerService
+}
+
+func (w *ReverseProxyWrapper) SetLedgerService(svc *service.LedgerService) {
+	w.LedgerService = svc
 }
 
 // NewReverseProxy 构造反向代理实例
@@ -88,14 +96,6 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 	proxy.ModifyResponse = func(res *http.Response) error {
 		ctx := res.Request.Context()
 		paymentMethod := middleware.GetPaymentMethod(ctx)
-		if paymentMethod == "stripe" {
-			stripeSessionID := middleware.GetStripeSessionID(ctx)
-			res.Header.Set("X-402-Payment-Method", "stripe")
-			res.Header.Set("X-402-Stripe-Session", stripeSessionID)
-			log.Printf("[Proxy] Request paid via Stripe session %s. Skipping chain settlement receipt signing.", stripeSessionID)
-			return nil
-		}
-
 		channelID := middleware.GetChannelID(ctx)
 		holdAmountStr := middleware.GetHoldAmount(ctx)
 		nonceStr := middleware.GetNonce(ctx)
@@ -160,7 +160,49 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 			actualCost = holdVal
 		}
 
-		// 2. 异步入队结算
+		// 提取 agentID
+		agentIDStr := res.Request.Header.Get("X-Agent-Id")
+		if agentIDStr == "" {
+			agentIDStr = os.Getenv("AGENT_ID")
+		}
+		var agentID int64 = 888
+		if agentIDStr != "" {
+			if val, err := strconv.ParseInt(agentIDStr, 10, 64); err == nil {
+				agentID = val
+			}
+		}
+
+		// ----------------------------------------------------
+		// A. Stripe (法币) 流程记账：直接在代理层同步记账
+		// ----------------------------------------------------
+		if paymentMethod == "stripe" {
+			stripeSessionID := middleware.GetStripeSessionID(ctx)
+			res.Header.Set("X-402-Payment-Method", "stripe")
+			res.Header.Set("X-402-Stripe-Session", stripeSessionID)
+			log.Printf("[Proxy] Request paid via Stripe session %s.", stripeSessionID)
+
+			if wrapper.LedgerService != nil && stripeSessionID != "" {
+				inv, err := wrapper.LedgerService.CreateInvoice(ctx, stripeSessionID, strconv.FormatInt(agentID, 10), uint64(actualCost), "stripe")
+				if err == nil {
+					payouts := []rail.Payout{
+						{Target: wrapper.agentOwner, Amount: uint64(actualCost)},
+					}
+					errSettle := wrapper.LedgerService.SettleInvoice(ctx, inv.ID, uint64(actualCost), payouts, stripeSessionID)
+					if errSettle != nil {
+						log.Printf("[Proxy] Ledger settle failed for Stripe session %s: %v", stripeSessionID, errSettle)
+					} else {
+						log.Printf("[Proxy] Ledger double-entry record success for Stripe session %s", stripeSessionID)
+					}
+				} else {
+					log.Printf("[Proxy] Ledger CreateInvoice failed for Stripe session %s: %v", stripeSessionID, err)
+				}
+			}
+			return nil
+		}
+
+		// ----------------------------------------------------
+		// B. Crypto (通道) 流程：创建 Invoice，入队异步清算
+		// ----------------------------------------------------
 		proof := res.Header.Get("X-Agent-Proof")
 		if proof != "" {
 			lockID := middleware.GetLockID(ctx)
@@ -196,18 +238,19 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 						treasury = "0x15d34AAf54a67C68101F309492526a9000025B7b"
 					}
 
-					agentIDStr := res.Request.Header.Get("X-Agent-Id")
-					if agentIDStr == "" {
-						agentIDStr = os.Getenv("AGENT_ID")
-					}
-					var agentID int64 = 888
-					if agentIDStr != "" {
-						if val, err := strconv.ParseInt(agentIDStr, 10, 64); err == nil {
-							agentID = val
+					var serviceFee uint64 = uint64(serviceFeeVal)
+
+					// 创建账本 Invoice
+					var invoiceID string
+					if wrapper.LedgerService != nil {
+						inv, err := wrapper.LedgerService.CreateInvoice(ctx, channelID, strconv.FormatInt(agentID, 10), uint64(actualCost), "crypto")
+						if err == nil {
+							invoiceID = inv.ID
+							log.Printf("[Proxy] Ledger created pending invoice %s for channel %s", invoiceID, channelID)
+						} else {
+							log.Printf("[Proxy] Ledger CreateInvoice failed for channel %s: %v", channelID, err)
 						}
 					}
-
-					var serviceFee uint64 = uint64(serviceFeeVal)
 
 					taskDetails := &queue.SettleTask{
 						ChannelID:         channelID,
@@ -222,6 +265,7 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 						Treasury:          treasury,
 						PlatformBps:       platformBps,
 						AgentID:           agentID,
+						InvoiceID:         invoiceID,
 					}
 
 					if err := wrapper.QueueManager.Enqueue(enqueueLockID, proof, wrapper.agentOwner, wrapper.escrowAddress, taskDetails); err != nil {

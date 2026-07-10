@@ -2,9 +2,9 @@ package service
 
 import (
 	"context"
-	"ledger/internal/model"
-	"ledger/internal/rail"
-	"ledger/internal/store"
+	"ledger/model"
+	"ledger/rail"
+	"ledger/store"
 	"os"
 	"testing"
 )

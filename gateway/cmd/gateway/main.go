@@ -17,6 +17,10 @@ import (
 	"gateway/internal/queue"
 	"gateway/internal/stripe"
 	"sync"
+
+	"ledger/rail"
+	"ledger/service"
+	"ledger/store"
 )
 
 func main() {
@@ -61,11 +65,29 @@ func main() {
 
 	internalSecret := os.Getenv("INTERNAL_SECRET")
 
+	// 初始化可编程记账引擎 (Ledger Service)
+	ledgerStore, err := store.NewSQLiteStore("ledger.db")
+	if err != nil {
+		log.Fatalf("Failed to initialize ledger store: %v", err)
+	}
+
+	stripeRail := rail.NewStripeRail(true)
+	cryptoRail := rail.NewCryptoRail(aaBridgeURL)
+
+	rails := map[string]rail.PaymentRail{
+		"stripe": stripeRail,
+		"crypto": cryptoRail,
+	}
+	ledgerService := service.NewLedgerService(ledgerStore, rails)
+
 	queueMgr, err := queue.NewQueueManager("gateway.db", aaBridgeURL, internalSecret)
 	if err != nil {
 		log.Fatalf("Failed to initialize queue manager: %v", err)
 	}
 	defer queueMgr.Close()
+
+	// 挂载记账服务到异步队列中
+	queueMgr.SetLedgerService(ledgerService)
 
 	// 注入到 X402 中间件供其进行已消费 Session 的持久化校验
 	middleware.DBQueueManager = queueMgr
@@ -78,6 +100,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
 	}
+
+	// 挂载记账服务到反向代理拦截器中
+	proxyHandler.SetLedgerService(ledgerService)
 
 	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
 	stripeClient := stripe.NewStripeClient(stripeKey)
