@@ -86,65 +86,151 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 
 	// 劫持响应
 	proxy.ModifyResponse = func(res *http.Response) error {
-		// 1. 异步入队结算原逻辑
+		ctx := res.Request.Context()
+		channelID := middleware.GetChannelID(ctx)
+		holdAmountStr := middleware.GetHoldAmount(ctx)
+		nonceStr := middleware.GetNonce(ctx)
+		expirationStr := middleware.GetExpiration(ctx)
+		signature := middleware.GetSignature(ctx)
+
+		// 1. 统一提取与计算 modelCost 和 actualCost
+		var holdVal int64 = 0
+		if holdAmountStr != "" {
+			if val, err := strconv.ParseInt(holdAmountStr, 10, 64); err == nil {
+				holdVal = val
+			}
+		}
+
+		// 计算模型费 modelCost (来自 X-Agent-Cost)
+		modelCost := int64(1000) // 默认 1000
+		costStr := res.Header.Get("X-Agent-Cost")
+		if costStr == "" {
+			log.Println("[Proxy] No X-Agent-Cost header found in downstream response, defaulting to model cost 1000")
+		} else {
+			if costVal, err := strconv.ParseInt(costStr, 10, 64); err == nil {
+				if costVal < 0 {
+					log.Println("[Proxy] Invalid negative X-Agent-Cost value found in downstream response, defaulting to model cost 1000")
+					modelCost = 1000
+				} else {
+					modelCost = costVal
+				}
+			} else {
+				log.Printf("[Proxy] Failed to parse X-Agent-Cost header: '%s', defaulting to model cost 1000", costStr)
+				modelCost = 1000
+			}
+		}
+
+		// 限制 modelCost 不超过 holdAmount
+		if holdVal > 0 && modelCost > holdVal {
+			modelCost = holdVal
+		}
+
+		var actualCost int64
+		if channelID != "" {
+			// 通道结算下：总付款 = modelCost + 2000 (固定服务费)
+			actualCost = modelCost + 2000
+		} else {
+			actualCost = modelCost
+		}
+
+		// 安全防线：实际总扣款不超过预授权冻结额
+		if holdVal > 0 && actualCost > holdVal {
+			actualCost = holdVal
+		}
+
+		// 2. 异步入队结算
 		proof := res.Header.Get("X-Agent-Proof")
 		if proof != "" {
-			// 提取 lockId
-			ctx := res.Request.Context()
 			lockID := middleware.GetLockID(ctx)
-			channelID := middleware.GetChannelID(ctx)
-			nonce := middleware.GetNonce(ctx)
-
 			if lockID != "" {
 				enqueueLockID := lockID
-				if channelID != "" && nonce != "" {
-					enqueueLockID = fmt.Sprintf("%s:%s", channelID, nonce)
+				if channelID != "" && nonceStr != "" {
+					enqueueLockID = fmt.Sprintf("%s:%s", channelID, nonceStr)
 				}
 				log.Printf("[Proxy] Intercepted X-Agent-Proof. Enqueueing settle task for lockId: %s", enqueueLockID)
-				if err := wrapper.QueueManager.Enqueue(enqueueLockID, proof, wrapper.agentOwner, wrapper.escrowAddress); err != nil {
-					log.Printf("[Proxy] Enqueue failed for lockId %s: %v", enqueueLockID, err)
+
+				if channelID != "" {
+					// 三方分账参数准备
+					var holdAmount uint64
+					if holdVal > 0 {
+						holdAmount = uint64(holdVal)
+					}
+					var nonce uint64
+					if val, err := strconv.ParseUint(nonceStr, 10, 64); err == nil {
+						nonce = val
+					}
+					var expiration uint64
+					if val, err := strconv.ParseUint(expirationStr, 10, 64); err == nil {
+						expiration = val
+					}
+
+					platformBpsStr := os.Getenv("PLATFORM_BPS")
+					if platformBpsStr == "" {
+						platformBpsStr = "10"
+					}
+					platformBpsVal, _ := strconv.ParseUint(platformBpsStr, 10, 16)
+					platformBps := uint16(platformBpsVal)
+
+					modelProvider := os.Getenv("MODEL_PROVIDER_ADDRESS")
+					if modelProvider == "" {
+						modelProvider = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+					}
+
+					treasury := os.Getenv("TREASURY_ADDRESS")
+					if treasury == "" {
+						treasury = "0x15d34AAf54a67C68101F309492526a9000025B7b"
+					}
+
+					agentIDStr := res.Request.Header.Get("X-Agent-Id")
+					if agentIDStr == "" {
+						agentIDStr = os.Getenv("AGENT_ID")
+					}
+					var agentID int64 = 888
+					if agentIDStr != "" {
+						if val, err := strconv.ParseInt(agentIDStr, 10, 64); err == nil {
+							agentID = val
+						}
+					}
+
+					platformFee := uint64(actualCost) * uint64(platformBps) / 10000
+					var serviceFee uint64
+					if uint64(actualCost) >= platformFee+uint64(modelCost) {
+						serviceFee = uint64(actualCost) - platformFee - uint64(modelCost)
+					} else {
+						serviceFee = 0
+					}
+
+					taskDetails := &queue.SettleTask{
+						ChannelID:         channelID,
+						HoldAmount:        holdAmount,
+						Nonce:             nonce,
+						Expiration:        expiration,
+						Signature:         signature,
+						AccumulatedAmount: uint64(actualCost),
+						ModelCost:         uint64(modelCost),
+						ServiceFee:        serviceFee,
+						ModelProvider:     modelProvider,
+						Treasury:          treasury,
+						PlatformBps:       platformBps,
+						AgentID:           agentID,
+					}
+
+					if err := wrapper.QueueManager.Enqueue(enqueueLockID, proof, wrapper.agentOwner, wrapper.escrowAddress, taskDetails); err != nil {
+						log.Printf("[Proxy] Enqueue split-settle failed for lockId %s: %v", enqueueLockID, err)
+					}
+				} else {
+					// 遗留锁模式
+					if err := wrapper.QueueManager.Enqueue(enqueueLockID, proof, wrapper.agentOwner, wrapper.escrowAddress, nil); err != nil {
+						log.Printf("[Proxy] Enqueue legacy failed for lockId %s: %v", enqueueLockID, err)
+					}
 				}
 			} else {
 				log.Printf("[Proxy] Intercepted X-Agent-Proof but lockId is missing in request context.")
 			}
 		}
 
-		// 2. 生成并追加状态通道清算凭证 Settle Receipt
-		ctx := res.Request.Context()
-		channelID := middleware.GetChannelID(ctx)
+		// 3. 生成并追加状态通道清算凭证 Settle Receipt
 		if channelID != "" {
-			holdAmountStr := middleware.GetHoldAmount(ctx)
-			nonceStr := middleware.GetNonce(ctx)
-
-			// 计算实际开销 actualCost
-			actualCost := int64(1000) // 默认微支付单次价格
-			costStr := res.Header.Get("X-Agent-Cost")
-			if costStr == "" {
-				log.Println("[Proxy] No X-Agent-Cost header found in downstream response, defaulting to cost 1000")
-			} else {
-				if costVal, err := strconv.ParseInt(costStr, 10, 64); err == nil {
-					if costVal < 0 {
-						log.Println("[Proxy] Invalid negative X-Agent-Cost value found in downstream response, defaulting to cost 1000")
-						log.Printf("[Proxy] Failed to parse X-Agent-Cost header: '%s' (or it is negative), defaulting to cost 1000", costStr)
-						actualCost = 1000
-					} else {
-						actualCost = costVal
-					}
-				} else {
-					log.Printf("[Proxy] Failed to parse X-Agent-Cost header: '%s' (or it is negative), defaulting to cost 1000", costStr)
-					actualCost = 1000
-				}
-			}
-
-			// 安全防线：实际扣款不超过预授权冻结额
-			if holdAmountStr != "" {
-				if holdVal, err := strconv.ParseInt(holdAmountStr, 10, 64); err == nil {
-					if actualCost > holdVal {
-						actualCost = holdVal
-					}
-				}
-			}
-
 			// 生成签名
 			expectedMsg := fmt.Sprintf("%s:%s:%d:%s", channelID, holdAmountStr, actualCost, nonceStr)
 			expectedMsgHash := crypto.Keccak256Hash([]byte(fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(expectedMsg), expectedMsg)))

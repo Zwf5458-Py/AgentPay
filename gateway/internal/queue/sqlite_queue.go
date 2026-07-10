@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,12 +18,24 @@ import (
 )
 
 type SettleTask struct {
-	ID            int64
-	LockID        string
-	Proof         string
-	AgentOwner    string
-	EscrowAddress string
-	RetryCount    int
+	ID                int64
+	LockID            string
+	Proof             string
+	AgentOwner        string
+	EscrowAddress     string
+	RetryCount        int
+	ChannelID         string
+	HoldAmount        uint64
+	Nonce             uint64
+	Expiration        uint64
+	Signature         string
+	AccumulatedAmount uint64
+	ModelCost         uint64
+	ServiceFee        uint64
+	ModelProvider     string
+	Treasury          string
+	PlatformBps       uint16
+	AgentID           int64
 }
 
 type QueueManager struct {
@@ -84,7 +98,19 @@ func (qm *QueueManager) initDB() error {
 		status TEXT DEFAULT 'pending',
 		retry_count INTEGER DEFAULT 0,
 		next_retry_at INTEGER,
-		created_at INTEGER
+		created_at INTEGER,
+		channel_id TEXT,
+		hold_amount INTEGER,
+		nonce INTEGER,
+		expiration INTEGER,
+		signature TEXT,
+		accumulated_amount INTEGER,
+		model_cost INTEGER,
+		service_fee INTEGER,
+		model_provider TEXT,
+		treasury TEXT,
+		platform_bps INTEGER,
+		agent_id INTEGER
 	);
 	CREATE INDEX IF NOT EXISTS idx_settle_tasks_status_next_retry ON settle_tasks (status, next_retry_at);
 	`
@@ -92,6 +118,53 @@ func (qm *QueueManager) initDB() error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize table: %w", err)
 	}
+
+	// 动态检查缺失的列并添加
+	rows, err := qm.db.Query("PRAGMA table_info(settle_tasks);")
+	if err != nil {
+		return fmt.Errorf("failed to get table info: %w", err)
+	}
+	existingCols := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dfltVal interface{}
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltVal, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan table info: %w", err)
+		}
+		existingCols[name] = true
+	}
+	rows.Close()
+
+	columns := []struct {
+		name    string
+		typeStr string
+	}{
+		{"channel_id", "TEXT"},
+		{"hold_amount", "INTEGER"},
+		{"nonce", "INTEGER"},
+		{"expiration", "INTEGER"},
+		{"signature", "TEXT"},
+		{"accumulated_amount", "INTEGER"},
+		{"model_cost", "INTEGER"},
+		{"service_fee", "INTEGER"},
+		{"model_provider", "TEXT"},
+		{"treasury", "TEXT"},
+		{"platform_bps", "INTEGER"},
+		{"agent_id", "INTEGER"},
+	}
+
+	for _, col := range columns {
+		if !existingCols[col.name] {
+			alterQuery := fmt.Sprintf("ALTER TABLE settle_tasks ADD COLUMN %s %s", col.name, col.typeStr)
+			if _, err := qm.db.Exec(alterQuery); err != nil {
+				return fmt.Errorf("failed to add column %s: %w", col.name, err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -102,16 +175,67 @@ func (qm *QueueManager) Close() error {
 }
 
 // Enqueue 入队
-func (qm *QueueManager) Enqueue(lockID, proof, agentOwner, escrowAddress string) error {
+func (qm *QueueManager) Enqueue(lockID, proof, agentOwner, escrowAddress string, taskDetails *SettleTask) error {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
 	now := time.Now().Unix()
+
+	var channelID, signature, modelProvider, treasury interface{}
+	var holdAmount, nonce, expiration, accumulatedAmount, modelCost, serviceFee, platformBps, agentID interface{}
+
+	if taskDetails != nil {
+		if taskDetails.ChannelID != "" {
+			channelID = taskDetails.ChannelID
+		}
+		if taskDetails.HoldAmount != 0 {
+			holdAmount = taskDetails.HoldAmount
+		}
+		if taskDetails.Nonce != 0 {
+			nonce = taskDetails.Nonce
+		}
+		if taskDetails.Expiration != 0 {
+			expiration = taskDetails.Expiration
+		}
+		if taskDetails.Signature != "" {
+			signature = taskDetails.Signature
+		}
+		if taskDetails.AccumulatedAmount != 0 {
+			accumulatedAmount = taskDetails.AccumulatedAmount
+		}
+		if taskDetails.ModelCost != 0 {
+			modelCost = taskDetails.ModelCost
+		}
+		if taskDetails.ServiceFee != 0 {
+			serviceFee = taskDetails.ServiceFee
+		}
+		if taskDetails.ModelProvider != "" {
+			modelProvider = taskDetails.ModelProvider
+		}
+		if taskDetails.Treasury != "" {
+			treasury = taskDetails.Treasury
+		}
+		if taskDetails.PlatformBps != 0 {
+			platformBps = taskDetails.PlatformBps
+		}
+		if taskDetails.AgentID != 0 {
+			agentID = taskDetails.AgentID
+		}
+	}
+
 	query := `
-	INSERT OR IGNORE INTO settle_tasks (lock_id, proof, agent_owner, escrow_address, status, retry_count, next_retry_at, created_at)
-	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+	INSERT OR IGNORE INTO settle_tasks (
+		lock_id, proof, agent_owner, escrow_address, status, retry_count, next_retry_at, created_at,
+		channel_id, hold_amount, nonce, expiration, signature, accumulated_amount, model_cost, service_fee,
+		model_provider, treasury, platform_bps, agent_id
+	)
+	VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := qm.db.Exec(query, lockID, proof, agentOwner, escrowAddress, now, now)
+	_, err := qm.db.Exec(query,
+		lockID, proof, agentOwner, escrowAddress, now, now,
+		channelID, holdAmount, nonce, expiration, signature, accumulatedAmount, modelCost, serviceFee,
+		modelProvider, treasury, platformBps, agentID,
+	)
 	if err != nil {
 		log.Printf("[Queue] Failed to enqueue lockId %s: %v", lockID, err)
 		return err
@@ -162,7 +286,9 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 
 	now := time.Now().Unix()
 	query := `
-	SELECT id, lock_id, proof, agent_owner, escrow_address, retry_count
+	SELECT id, lock_id, proof, agent_owner, escrow_address, retry_count,
+	       channel_id, hold_amount, nonce, expiration, signature, accumulated_amount,
+	       model_cost, service_fee, model_provider, treasury, platform_bps, agent_id
 	FROM settle_tasks
 	WHERE status = 'pending' AND next_retry_at <= ?
 	`
@@ -175,28 +301,102 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 	var tasks []SettleTask
 	for rows.Next() {
 		var t SettleTask
-		if err := rows.Scan(&t.ID, &t.LockID, &t.Proof, &t.AgentOwner, &t.EscrowAddress, &t.RetryCount); err != nil {
+		var channelID, signature, modelProvider, treasury sql.NullString
+		var holdAmount, nonce, expiration, accumulatedAmount, modelCost, serviceFee, platformBps, agentID sql.NullInt64
+
+		err := rows.Scan(
+			&t.ID, &t.LockID, &t.Proof, &t.AgentOwner, &t.EscrowAddress, &t.RetryCount,
+			&channelID, &holdAmount, &nonce, &expiration, &signature, &accumulatedAmount,
+			&modelCost, &serviceFee, &modelProvider, &treasury, &platformBps, &agentID,
+		)
+		if err != nil {
 			return nil, err
 		}
+
+		if channelID.Valid {
+			t.ChannelID = channelID.String
+		}
+		if holdAmount.Valid {
+			t.HoldAmount = uint64(holdAmount.Int64)
+		}
+		if nonce.Valid {
+			t.Nonce = uint64(nonce.Int64)
+		}
+		if expiration.Valid {
+			t.Expiration = uint64(expiration.Int64)
+		}
+		if signature.Valid {
+			t.Signature = signature.String
+		}
+		if accumulatedAmount.Valid {
+			t.AccumulatedAmount = uint64(accumulatedAmount.Int64)
+		}
+		if modelCost.Valid {
+			t.ModelCost = uint64(modelCost.Int64)
+		}
+		if serviceFee.Valid {
+			t.ServiceFee = uint64(serviceFee.Int64)
+		}
+		if modelProvider.Valid {
+			t.ModelProvider = modelProvider.String
+		}
+		if treasury.Valid {
+			t.Treasury = treasury.String
+		}
+		if platformBps.Valid {
+			t.PlatformBps = uint16(platformBps.Int64)
+		}
+		if agentID.Valid {
+			t.AgentID = agentID.Int64
+		}
+
 		tasks = append(tasks, t)
 	}
 	return tasks, nil
 }
 
 func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) {
-	bodyMap := map[string]string{
-		"lockId":        task.LockID,
-		"proof":         task.Proof,
-		"agentOwner":    task.AgentOwner,
-		"escrowAddress": task.EscrowAddress,
+	var targetURL string
+	var bodyBytes []byte
+	var err error
+
+	if task.ChannelID != "" {
+		targetURL = strings.ReplaceAll(qm.bridgeURL, "/aa/settle", "/aa/split-settle")
+		bodyMap := map[string]interface{}{
+			"channelId":         task.ChannelID,
+			"accumulatedAmount": strconv.FormatUint(task.AccumulatedAmount, 10),
+			"modelCost":         strconv.FormatUint(task.ModelCost, 10),
+			"serviceFee":        strconv.FormatUint(task.ServiceFee, 10),
+			"modelProvider":     task.ModelProvider,
+			"treasury":          task.Treasury,
+			"platformBps":       task.PlatformBps,
+			"holdAmount":        strconv.FormatUint(task.HoldAmount, 10),
+			"nonce":             strconv.FormatUint(task.Nonce, 10),
+			"expiration":        strconv.FormatUint(task.Expiration, 10),
+			"signature":         task.Signature,
+			"agentId":           task.AgentID,
+			"proof":             task.Proof,
+			"agentOwner":        task.AgentOwner,
+			"escrowAddress":     task.EscrowAddress,
+		}
+		bodyBytes, err = json.Marshal(bodyMap)
+	} else {
+		targetURL = qm.bridgeURL
+		bodyMap := map[string]string{
+			"lockId":        task.LockID,
+			"proof":         task.Proof,
+			"agentOwner":    task.AgentOwner,
+			"escrowAddress": task.EscrowAddress,
+		}
+		bodyBytes, err = json.Marshal(bodyMap)
 	}
-	bodyBytes, err := json.Marshal(bodyMap)
+
 	if err != nil {
 		log.Printf("[Queue Worker] JSON marshal failed for lockId %s: %v", task.LockID, err)
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", qm.bridgeURL, bytes.NewBuffer(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		log.Printf("[Queue Worker] Create request failed for lockId %s: %v", task.LockID, err)
 		return
@@ -210,7 +410,6 @@ func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) 
 	if err != nil {
 		select {
 		case <-ctx.Done():
-			// 避免在 context 取消时报错或继续写入已关闭的 DB
 			return
 		default:
 		}
@@ -228,7 +427,6 @@ func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) 
 		return
 	}
 
-	// 成功
 	qm.handleSuccess(ctx, task)
 }
 

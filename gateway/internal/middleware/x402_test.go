@@ -567,7 +567,7 @@ func TestDebugTasks(t *testing.T) {
 	}
 	defer queueMgr.Close()
 
-	err = queueMgr.Enqueue("lock-123", "proof-abc", "owner-xyz", "escrow-123")
+	err = queueMgr.Enqueue("lock-123", "proof-abc", "owner-xyz", "escrow-123", nil)
 	if err != nil {
 		t.Fatalf("Failed to enqueue task: %v", err)
 	}

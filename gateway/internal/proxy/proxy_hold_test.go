@@ -101,15 +101,15 @@ func TestProxy_SettleReceipt(t *testing.T) {
 	if holdAmount != "50000" {
 		t.Errorf("Expected holdAmount '50000', got %q", holdAmount)
 	}
-	if actualCost != "12000" {
-		t.Errorf("Expected actualCost '12000' (from X-Agent-Cost), got %q", actualCost)
+	if actualCost != "14000" {
+		t.Errorf("Expected actualCost '14000' (from modelCost + 2000), got %q", actualCost)
 	}
 	if nonce != "789" {
 		t.Errorf("Expected nonce '789', got %q", nonce)
 	}
 
 	// 10. 验证签名有效性
-	expectedMsg := "0xChannel999:50000:12000:789"
+	expectedMsg := "0xChannel999:50000:14000:789"
 	expectedMsgHash := crypto.Keccak256Hash([]byte(fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(expectedMsg), expectedMsg)))
 
 	sigBytes, err := hexutil.Decode(sig)
@@ -214,15 +214,15 @@ func TestProxy_SettleReceipt_MockKey(t *testing.T) {
 	if holdAmount != "20000" {
 		t.Errorf("Expected holdAmount '20000', got %q", holdAmount)
 	}
-	if actualCost != "3500" {
-		t.Errorf("Expected actualCost '3500', got %q", actualCost)
+	if actualCost != "5500" {
+		t.Errorf("Expected actualCost '5500', got %q", actualCost)
 	}
 	if nonce != "999" {
 		t.Errorf("Expected nonce '999', got %q", nonce)
 	}
 
 	// 10. 验证签名是否可由以太坊校验算法正确 recover 出任何地址，从而断言格式合法
-	expectedMsg := "0xChannelMock:20000:3500:999"
+	expectedMsg := "0xChannelMock:20000:5500:999"
 	expectedMsgHash := crypto.Keccak256Hash([]byte(fmt.Sprintf("\x19Ethereum Signed Message:\n%d%s", len(expectedMsg), expectedMsg)))
 
 	sigBytes, err := hexutil.Decode(sig)
@@ -315,8 +315,8 @@ func TestProxy_MissingAgentCost(t *testing.T) {
 	}
 
 	actualCost := parts[2]
-	if actualCost != "1000" {
-		t.Errorf("Expected default actualCost to be '1000' when X-Agent-Cost is missing, got %q", actualCost)
+	if actualCost != "3000" {
+		t.Errorf("Expected default actualCost to be '3000' when X-Agent-Cost is missing, got %q", actualCost)
 	}
 }
 
@@ -374,8 +374,8 @@ func TestProxy_SettleReceipt_NegativeCost(t *testing.T) {
 	}
 
 	actualCost := parts[2]
-	if actualCost != "1000" {
-		t.Errorf("Expected default actualCost to be '1000' when X-Agent-Cost is negative, got %q", actualCost)
+	if actualCost != "3000" {
+		t.Errorf("Expected default actualCost to be '3000' when X-Agent-Cost is negative, got %q", actualCost)
 	}
 }
 
@@ -433,8 +433,8 @@ func TestProxy_SettleReceipt_MalformedCost(t *testing.T) {
 	}
 
 	actualCost := parts[2]
-	if actualCost != "1000" {
-		t.Errorf("Expected default actualCost to be '1000' when X-Agent-Cost is malformed, got %q", actualCost)
+	if actualCost != "3000" {
+		t.Errorf("Expected default actualCost to be '3000' when X-Agent-Cost is malformed, got %q", actualCost)
 	}
 }
 
