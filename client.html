@@ -1717,13 +1717,18 @@ contract SafeEtherStore is ReentrancyGuard {
             
             let resJson;
             try {
-                if (!window.agentPayClient) {
-                    window.agentPayClient = new window.AgentPaySDK.AgentPayClient({
-                        gatewayUrl: gatewayUrl,
-                        provider: window.ethereum,
-                        chainId: 31337
-                    });
+                const clientConfig = {
+                    gatewayUrl: gatewayUrl,
+                    chainId: 31337
+                };
+                if (walletMode === 'private_key') {
+                    const rawKey = privateKeyInput.value.trim();
+                    const key = rawKey.startsWith('0x') ? rawKey : '0x' + rawKey;
+                    clientConfig.privateKey = key;
+                } else {
+                    clientConfig.provider = window.ethereum;
                 }
+                window.agentPayClient = new window.AgentPaySDK.AgentPayClient(clientConfig);
                 
                 const channel = window.agentPayClient.getChannel(agentId);
                 if (!channel || (Number(channel.maxAmount || 0n) - Number(channel.accumulatedSpend || 0n)) < 50000) {
