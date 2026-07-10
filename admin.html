@@ -16,8 +16,8 @@
             --card-bg: rgba(20, 10, 35, 0.45);
             
             /* Neon Palette & Glows */
-            --neon-violet: #a78bfa;
-            --neon-violet-glow: rgba(167, 139, 250, 0.35);
+            --neon-violet: #ff00ff;
+            --neon-violet-glow: rgba(255, 0, 255, 0.35);
             --neon-cyan: #00f0ff;
             --neon-cyan-glow: rgba(0, 240, 255, 0.4);
             --neon-rose: #ff0055;
@@ -656,18 +656,19 @@
             <h2>API Gateway Connection</h2>
             <div class="form-row">
                 <div class="form-group">
-                    <label for="gateway-url">Gateway URL</label>
+                    <label for="gatewayUrlInput">Gateway URL</label>
                     <div class="input-wrapper">
-                        <input type="text" id="gateway-url" value="http://localhost:8080" class="neon-input">
+                        <input type="text" id="gatewayUrlInput" value="http://localhost:8080" class="neon-input">
                     </div>
                 </div>
                 <div class="form-group">
-                    <label for="admin-secret">Admin Secret Key</label>
+                    <label for="adminSecretInput">Admin Secret Key</label>
                     <div class="input-wrapper">
-                        <input type="password" id="admin-secret" value="password12345" class="neon-input">
+                        <input type="password" id="adminSecretInput" value="password12345" class="neon-input">
                     </div>
                 </div>
-                <button class="action-btn">Save Config</button>
+                <button id="saveConfigBtn" class="action-btn">Save Config</button>
+                <button id="refreshBtn" class="action-btn" style="background: transparent; border: 1px solid var(--neon-cyan); color: var(--neon-cyan); box-shadow: 0 0 10px rgba(0, 240, 255, 0.15); margin-left: 10px;">Refresh</button>
             </div>
         </section>
 
@@ -675,19 +676,19 @@
         <section class="kpi-section">
             <div class="kpi-card" style="--accent-color: var(--neon-cyan); --accent-glow: var(--neon-cyan-glow);">
                 <div class="kpi-label">Total Settled</div>
-                <div class="kpi-value">245,620.00 USDC</div>
+                <div class="kpi-value" id="totalSettledText">0.000000 USDC</div>
             </div>
             <div class="kpi-card" style="--accent-color: var(--neon-violet); --accent-glow: var(--neon-violet-glow);">
                 <div class="kpi-label">Platform Fees</div>
-                <div class="kpi-value">1,228.10 USDC</div>
+                <div class="kpi-value" id="platformFeesText">0.000000 USDC</div>
             </div>
             <div class="kpi-card" style="--accent-color: var(--neon-green); --accent-glow: var(--neon-green-glow);">
                 <div class="kpi-label">Active Stripe Sessions</div>
-                <div class="kpi-value">14</div>
+                <div class="kpi-value" id="stripeSessionsText">0</div>
             </div>
             <div class="kpi-card" style="--accent-color: var(--neon-yellow); --accent-glow: var(--neon-yellow-glow);">
                 <div class="kpi-label">Success Rate</div>
-                <div class="kpi-value">98.6%</div>
+                <div class="kpi-value" id="successRateText">100.0%</div>
             </div>
         </section>
 
@@ -697,7 +698,7 @@
             <section class="panel" style="--panel-accent: var(--neon-cyan); --panel-accent-glow: var(--neon-cyan-glow);">
                 <div class="panel-header">
                     <h3>Active Lock Queue</h3>
-                    <button class="clear-btn" style="--btn-border: var(--neon-rose); --btn-glow: var(--neon-rose-glow);">Clear Queue</button>
+                    <button id="clearQueueBtn" class="clear-btn" style="--btn-border: var(--neon-rose); --btn-glow: var(--neon-rose-glow);">Clear Queue</button>
                 </div>
                 <div class="table-wrapper">
                     <table>
@@ -710,27 +711,9 @@
                                 <th>Actions</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody id="tasksTableBody">
                             <tr>
-                                <td class="mono">lock:0xfa3923ef10b</td>
-                                <td><span class="badge badge-processing">Processing</span></td>
-                                <td>0</td>
-                                <td>2026-07-10 09:42:15</td>
-                                <td><button class="action-link">Unlock</button></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">lock:0x1b4022a1c82</td>
-                                <td><span class="badge badge-failed">Failed</span></td>
-                                <td>3</td>
-                                <td>2026-07-10 09:30:00</td>
-                                <td><button class="action-link">Unlock</button></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">lock:0x68ef83bb9a2</td>
-                                <td><span class="badge badge-pending">Pending</span></td>
-                                <td>1</td>
-                                <td>2026-07-10 09:51:22</td>
-                                <td><button class="action-link">Unlock</button></td>
+                                <td colspan="5" style="text-align: center; color: var(--text-muted);">Loading tasks queue...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -741,33 +724,388 @@
             <section class="panel stripe-panel" style="--panel-accent: var(--neon-green); --panel-accent-glow: var(--neon-green-glow);">
                 <div class="panel-header">
                     <h3>Recent Stripe Sessions</h3>
-                    <button class="clear-btn" style="--btn-border: var(--neon-violet); --btn-glow: var(--neon-violet-glow);">Clear Sessions</button>
+                    <button id="clearStripeBtn" class="clear-btn" style="--btn-border: var(--neon-violet); --btn-glow: var(--neon-violet-glow);">Clear stripe sessions</button>
                 </div>
-                <ul class="session-list">
-                    <li>
-                        <span class="mono">cs_test_a1B2c3d4e5f6g7h8i90</span>
-                        <div class="badge-group">
-                            <span class="badge badge-success">Success</span>
-                            <button class="delete-btn" title="Delete session">✕</button>
-                        </div>
-                    </li>
-                    <li>
-                        <span class="mono">cs_test_x9Y8z7w6v5u4t3s2r12</span>
-                        <div class="badge-group">
-                            <span class="badge badge-success">Success</span>
-                            <button class="delete-btn" title="Delete session">✕</button>
-                        </div>
-                    </li>
-                    <li>
-                        <span class="mono">cs_test_m5N6o7p8q9r0s1t2u86</span>
-                        <div class="badge-group">
-                            <span class="badge badge-success">Success</span>
-                            <button class="delete-btn" title="Delete session">✕</button>
-                        </div>
-                    </li>
+                <ul class="session-list" id="stripeSessionsList">
+                    <li style="color: var(--text-muted); font-size: 0.85rem; justify-content: center;">Loading stripe sessions...</li>
                 </ul>
             </section>
         </div>
     </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" style="position: fixed; bottom: 20px; right: 20px; background: rgba(18, 12, 36, 0.95); border: 1px solid var(--neon-cyan); padding: 0.75rem 1.5rem; border-radius: 8px; box-shadow: 0 0 15px var(--neon-cyan-glow); color: var(--text-primary); z-index: 9999; display: none; font-size: 0.85rem; font-family: var(--font-mono); transition: all 0.3s ease;"></div>
+
+    <script>
+        // 配置持久化
+        const GATEWAY_URL_KEY = 'agentpay_gateway_url';
+        const ADMIN_SECRET_KEY = 'agentpay_admin_secret';
+
+        // 初始化输入框的值
+        document.addEventListener('DOMContentLoaded', () => {
+            const savedUrl = localStorage.getItem(GATEWAY_URL_KEY);
+            const savedSecret = localStorage.getItem(ADMIN_SECRET_KEY);
+
+            if (savedUrl) {
+                document.getElementById('gatewayUrlInput').value = savedUrl;
+            }
+            if (savedSecret) {
+                document.getElementById('adminSecretInput').value = savedSecret;
+            }
+
+            // 首次加载数据
+            refreshAll();
+        });
+
+        // 保存配置
+        document.getElementById('saveConfigBtn').addEventListener('click', () => {
+            const url = document.getElementById('gatewayUrlInput').value.trim();
+            const secret = document.getElementById('adminSecretInput').value.trim();
+
+            localStorage.setItem(GATEWAY_URL_KEY, url);
+            localStorage.setItem(ADMIN_SECRET_KEY, secret);
+
+            showToast('Configuration saved successfully');
+            refreshAll();
+        });
+
+        // 绑定刷新按钮
+        document.getElementById('refreshBtn').addEventListener('click', () => {
+            refreshAll();
+        });
+
+        // 统一显示 Toast
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.style.borderColor = isError ? 'var(--neon-rose)' : 'var(--neon-cyan)';
+            toast.style.boxShadow = isError ? '0 0 15px var(--neon-rose-glow)' : '0 0 15px var(--neon-cyan-glow)';
+            toast.style.display = 'block';
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
+
+        // 更新连接状态徽章
+        function updateConnectionStatus(isConnected) {
+            const statusDot = document.querySelector('.status-dot');
+            const statusText = document.querySelector('.status-text');
+            const badge = document.querySelector('.glowing-badge');
+
+            if (isConnected) {
+                statusText.textContent = 'Gateway: Connected';
+                statusDot.style.backgroundColor = 'var(--neon-green)';
+                statusDot.style.boxShadow = '0 0 8px var(--neon-green)';
+                badge.style.borderColor = 'var(--neon-green)';
+                badge.style.background = 'rgba(0, 255, 102, 0.1)';
+                badge.style.boxShadow = '0 0 10px rgba(0, 255, 102, 0.2)';
+                badge.style.color = 'var(--neon-green)';
+            } else {
+                statusText.textContent = 'Gateway: Disconnected';
+                statusDot.style.backgroundColor = 'var(--neon-rose)';
+                statusDot.style.boxShadow = '0 0 8px var(--neon-rose)';
+                badge.style.borderColor = 'var(--neon-rose)';
+                badge.style.background = 'rgba(255, 0, 85, 0.1)';
+                badge.style.boxShadow = '0 0 10px rgba(255, 0, 85, 0.2)';
+                badge.style.color = 'var(--neon-rose)';
+            }
+        }
+
+        // 全局 stats 缓存，供 session 列表渲染退化时使用
+        let currentStats = {};
+
+        async function refreshAll() {
+            const gatewayUrl = document.getElementById('gatewayUrlInput').value.trim();
+            const secret = document.getElementById('adminSecretInput').value.trim();
+
+            if (!gatewayUrl) {
+                showToast('Gateway URL is required', true);
+                return;
+            }
+
+            // 我们发起三个并行的请求
+            Promise.all([
+                fetchStats(gatewayUrl, secret),
+                fetchTasks(gatewayUrl, secret),
+                fetchStripeSessions(gatewayUrl, secret)
+            ]).then(() => {
+                updateConnectionStatus(true);
+            }).catch(err => {
+                console.error(err);
+                updateConnectionStatus(false);
+                showToast('Failed to fetch data from gateway', true);
+            });
+        }
+
+        async function fetchStats(gatewayUrl, secret) {
+            try {
+                const res = await fetch(`${gatewayUrl}/admin/stats`, {
+                    headers: { 'X-Internal-Secret': secret }
+                });
+                if (!res.ok) {
+                    if (res.status === 401) {
+                        showToast('Unauthorized: Check your Admin Secret Key', true);
+                    }
+                    throw new Error(`Stats HTTP error! status: ${res.status}`);
+                }
+                const data = await res.json();
+                currentStats = data;
+
+                // 渲染 stats
+                // USDC 转化：除以 1e6
+                const totalSettled = ( (data.total_settled_usdc || 0) / 1e6 ).toFixed(6);
+                const platformFees = ( (data.total_platform_fees_usdc || 0) / 1e6 ).toFixed(6);
+
+                document.getElementById('totalSettledText').textContent = `${totalSettled} USDC`;
+                document.getElementById('platformFeesText').textContent = `${platformFees} USDC`;
+                document.getElementById('stripeSessionsText').textContent = data.total_stripe_sessions || 0;
+
+                // 计算成功率
+                let successRate = 100.0;
+                const totalTasks = (data.success_tasks || 0) + (data.failed_tasks || 0);
+                if (totalTasks > 0) {
+                    successRate = (data.success_tasks / totalTasks) * 100;
+                }
+                document.getElementById('successRateText').textContent = `${successRate.toFixed(1)}%`;
+            } catch (err) {
+                document.getElementById('totalSettledText').textContent = 'Error';
+                document.getElementById('platformFeesText').textContent = 'Error';
+                document.getElementById('stripeSessionsText').textContent = 'Error';
+                document.getElementById('successRateText').textContent = 'Error';
+                throw err;
+            }
+        }
+
+        async function fetchTasks(gatewayUrl, secret) {
+            try {
+                const res = await fetch(`${gatewayUrl}/admin/tasks`, {
+                    headers: { 'X-Internal-Secret': secret }
+                });
+                if (!res.ok) {
+                    throw new Error(`Tasks HTTP error! status: ${res.status}`);
+                }
+                const tasks = await res.json();
+                renderTasks(tasks);
+            } catch (err) {
+                document.getElementById('tasksTableBody').innerHTML = `
+                    <tr>
+                        <td colspan="5" style="text-align: center; color: var(--neon-rose);">Failed to load tasks queue</td>
+                    </tr>
+                `;
+                throw err;
+            }
+        }
+
+        function renderTasks(tasks) {
+            const tbody = document.getElementById('tasksTableBody');
+            tbody.innerHTML = '';
+
+            if (!tasks || tasks.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="5" style="text-align: center; color: var(--text-muted);">No active tasks in queue</td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tasks.forEach(t => {
+                const tr = document.createElement('tr');
+
+                // Lock ID
+                const tdLock = document.createElement('td');
+                tdLock.className = 'mono';
+                tdLock.textContent = t.lock_id;
+                tr.appendChild(tdLock);
+
+                // Status
+                const tdStatus = document.createElement('td');
+                let statusClass = 'pending';
+                if (t.status === 'success') {
+                    statusClass = 'success';
+                } else if (t.status === 'failed') {
+                    statusClass = 'failed';
+                } else if (t.status === 'pending' || t.status === 'retrying') {
+                    statusClass = 'pending';
+                }
+                
+                tdStatus.innerHTML = `<span class="badge badge-${statusClass}">${t.status}</span>`;
+                tr.appendChild(tdStatus);
+
+                // Retry Count
+                const tdRetry = document.createElement('td');
+                tdRetry.textContent = t.retry_count;
+                tr.appendChild(tdRetry);
+
+                // Date
+                const tdDate = document.createElement('td');
+                // created_at 是 unix timestamp (秒)
+                const dateStr = t.created_at ? new Date(t.created_at * 1000).toLocaleString() : 'N/A';
+                tdDate.textContent = dateStr;
+                tr.appendChild(tdDate);
+
+                // Actions
+                const tdActions = document.createElement('td');
+                if (t.status !== 'success') {
+                    const btnRetry = document.createElement('button');
+                    btnRetry.className = 'action-link';
+                    btnRetry.textContent = 'Retry';
+                    btnRetry.addEventListener('click', () => {
+                        retryTask(t.lock_id);
+                    });
+                    tdActions.appendChild(btnRetry);
+                } else {
+                    tdActions.textContent = 'None';
+                    tdActions.style.color = 'var(--text-muted)';
+                    tdActions.style.fontSize = '0.8rem';
+                }
+                tr.appendChild(tdActions);
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function retryTask(lockId) {
+            const gatewayUrl = document.getElementById('gatewayUrlInput').value.trim();
+            const secret = document.getElementById('adminSecretInput').value.trim();
+
+            showToast(`Triggering retry for ${lockId}...`);
+
+            try {
+                const res = await fetch(`${gatewayUrl}/admin/tasks/retry`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Internal-Secret': secret
+                    },
+                    body: JSON.stringify({ lock_id: lockId })
+                });
+
+                if (!res.ok) {
+                    throw new Error(`Retry request failed: ${res.statusText}`);
+                }
+
+                showToast(`Retry scheduled for ${lockId}`);
+                // 刷新
+                refreshAll();
+            } catch (err) {
+                console.error(err);
+                showToast(`Failed to retry task: ${err.message}`, true);
+            }
+        }
+
+        async function fetchStripeSessions(gatewayUrl, secret) {
+            // 后端目前没有获取所有 Stripe session 列表的 GET 接口。
+            // 为了让页面逻辑完整，我们尝试发送请求；如果接口不存在，我们显示友好提示，并且清空列表，或结合 stats 中的数值更新。
+            try {
+                const res = await fetch(`${gatewayUrl}/admin/stripe-sessions`, {
+                    headers: { 'X-Internal-Secret': secret }
+                });
+                if (!res.ok) {
+                    throw new Error(`Stripe sessions API not implemented (Status ${res.status})`);
+                }
+                const data = await res.json();
+                renderStripeSessions(data);
+            } catch (err) {
+                // 回退逻辑：如果接口不存在，我们清空列表或显示汇总记录
+                const stripeList = document.getElementById('stripeSessionsList');
+                const sessionCount = currentStats.total_stripe_sessions || 0;
+                
+                if (sessionCount === 0) {
+                    stripeList.innerHTML = `<li style="color: var(--text-muted); font-size: 0.85rem; justify-content: center; border: 1px dashed var(--border-color);">No consumed sessions recorded</li>`;
+                } else {
+                    stripeList.innerHTML = `<li style="color: var(--text-secondary); font-size: 0.85rem; justify-content: center; border: 1px dashed var(--border-color);">Total consumed Stripe sessions: ${sessionCount}</li>`;
+                }
+            }
+        }
+
+        function renderStripeSessions(sessions) {
+            const stripeList = document.getElementById('stripeSessionsList');
+            stripeList.innerHTML = '';
+
+            if (!sessions || sessions.length === 0) {
+                stripeList.innerHTML = `<li style="color: var(--text-muted); font-size: 0.85rem; justify-content: center; border: 1px dashed var(--border-color);">No consumed sessions recorded</li>`;
+                return;
+            }
+
+            sessions.forEach(s => {
+                const li = document.createElement('li');
+                
+                const span = document.createElement('span');
+                span.className = 'mono';
+                span.textContent = s.session_id || s;
+                li.appendChild(span);
+
+                const badgeGroup = document.createElement('div');
+                badgeGroup.className = 'badge-group';
+
+                const badge = document.createElement('span');
+                badge.className = 'badge badge-success';
+                badge.textContent = s.status || 'Success';
+                badgeGroup.appendChild(badge);
+
+                li.appendChild(badgeGroup);
+                stripeList.appendChild(li);
+            });
+        }
+
+        // 绑定 Clear Queue 按钮
+        document.getElementById('clearQueueBtn').addEventListener('click', async () => {
+            const gatewayUrl = document.getElementById('gatewayUrlInput').value.trim();
+            const secret = document.getElementById('adminSecretInput').value.trim();
+
+            if (!confirm('Are you sure you want to clear the entire active lock queue? This action cannot be undone.')) {
+                return;
+            }
+
+            showToast('Clearing active lock queue...');
+
+            try {
+                const res = await fetch(`${gatewayUrl}/debug/tasks/clear`, {
+                    method: 'POST',
+                    headers: { 'X-Internal-Secret': secret }
+                });
+
+                if (!res.ok) {
+                    throw new Error(`Clear queue failed: ${res.statusText}`);
+                }
+
+                showToast('Queue cleared successfully');
+                refreshAll();
+            } catch (err) {
+                console.error(err);
+                showToast(`Failed to clear queue: ${err.message}`, true);
+            }
+        });
+
+        // 绑定 Clear Stripe Sessions 按钮
+        document.getElementById('clearStripeBtn').addEventListener('click', async () => {
+            const gatewayUrl = document.getElementById('gatewayUrlInput').value.trim();
+            const secret = document.getElementById('adminSecretInput').value.trim();
+
+            if (!confirm('Are you sure you want to clear all consumed Stripe session cache? This action cannot be undone.')) {
+                return;
+            }
+
+            showToast('Clearing Stripe sessions...');
+
+            try {
+                const res = await fetch(`${gatewayUrl}/admin/stripe-sessions/clear`, {
+                    method: 'POST',
+                    headers: { 'X-Internal-Secret': secret }
+                });
+
+                if (!res.ok) {
+                    throw new Error(`Clear sessions failed: ${res.statusText}`);
+                }
+
+                showToast('Stripe sessions cleared successfully');
+                refreshAll();
+            } catch (err) {
+                console.error(err);
+                showToast(`Failed to clear Stripe sessions: ${err.message}`, true);
+            }
+        });
+    </script>
 </body>
 </html>
