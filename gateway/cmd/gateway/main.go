@@ -16,6 +16,7 @@ import (
 	"gateway/internal/proxy"
 	"gateway/internal/queue"
 	"gateway/internal/stripe"
+	"sync"
 )
 
 func main() {
@@ -233,9 +234,21 @@ func main() {
 
 // AdminAuthMiddleware 管理员鉴权中间件
 func AdminAuthMiddleware(next http.Handler) http.Handler {
+	var loggedWarning sync.Once // 只在开发模式下输出一次安全警告
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		internalSecret := os.Getenv("INTERNAL_SECRET")
-		if internalSecret != "" {
+		isProd := os.Getenv("APP_ENV") == "production"
+
+		if internalSecret == "" {
+			if isProd {
+				log.Println("[CRITICAL SECURITY WARNING] Admin APIs blocked because INTERNAL_SECRET is not configured in production env.")
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			loggedWarning.Do(func() {
+				log.Println("[WARNING] INTERNAL_SECRET is empty. Admin APIs are unprotected in development environment!")
+			})
+		} else {
 			reqSecret := r.Header.Get("X-Internal-Secret")
 			if reqSecret != internalSecret {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
