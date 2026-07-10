@@ -187,7 +187,7 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 					payouts := []rail.Payout{
 						{Target: wrapper.agentOwner, Amount: uint64(actualCost)},
 					}
-					errSettle := wrapper.LedgerService.SettleInvoice(ctx, inv.ID, uint64(actualCost), payouts, stripeSessionID)
+					errSettle := wrapper.LedgerService.SettleInvoice(ctx, inv.ID, uint64(actualCost), payouts, stripeSessionID, "")
 					if errSettle != nil {
 						log.Printf("[Proxy] Ledger settle failed for Stripe session %s: %v", stripeSessionID, errSettle)
 					} else {

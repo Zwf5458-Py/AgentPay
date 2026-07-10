@@ -65,7 +65,7 @@ func TestLedgerService(t *testing.T) {
 	}
 
 	nonce := "unique_test_nonce_12345"
-	err = ledgerSvc.SettleInvoice(ctx, inv.ID, amount, payouts, nonce)
+	err = ledgerSvc.SettleInvoice(ctx, inv.ID, amount, payouts, nonce, "")
 	if err != nil {
 		t.Fatalf("failed to settle invoice: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestLedgerService(t *testing.T) {
 
 	// 5. 验证幂等去重防重
 	// 重新发送相同的 Settle 请求，它应当静默成功且不造成余额二次扣减！
-	err = ledgerSvc.SettleInvoice(ctx, inv.ID, amount, payouts, nonce)
+	err = ledgerSvc.SettleInvoice(ctx, inv.ID, amount, payouts, nonce, "")
 	if err != nil {
 		t.Fatalf("expected silent success for idempotent split re-run, got error: %v", err)
 	}

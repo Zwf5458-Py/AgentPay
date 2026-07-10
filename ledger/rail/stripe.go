@@ -23,8 +23,8 @@ func (r *StripeRail) Lock(ctx context.Context, payer, agent string, amount uint6
 	return lockID, nil
 }
 
-func (r *StripeRail) Split(ctx context.Context, lockID string, payouts []Payout) error {
-	log.Printf("[StripeRail] Splitting payouts for LockID %s:", lockID)
+func (r *StripeRail) Split(ctx context.Context, lockID string, payouts []Payout, extData string) error {
+	log.Printf("[StripeRail] Splitting payouts for LockID %s (extData length: %d):", lockID, len(extData))
 	for _, p := range payouts {
 		log.Printf(" - Payout to %s: %d", p.Target, p.Amount)
 	}

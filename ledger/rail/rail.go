@@ -15,8 +15,8 @@ type PaymentRail interface {
 	// Lock 冻结/锁存一笔资产。对于 CryptoRail 即验证通道并在通道内留存额度，对于 StripeRail 即创建一个锁定状态的会话
 	Lock(ctx context.Context, payer string, agent string, amount uint64) (lockID string, err error)
 
-	// Split 确认结算这笔冻结资产，并按 Payout 列表进行资金分账
-	Split(ctx context.Context, lockID string, payouts []Payout) error
+	// Split 确认结算这笔冻结资产，并按 Payout 列表进行资金分账，extData 用于透传轨道特定的底层清算凭证 (例如以太坊签名与 TEE proof)
+	Split(ctx context.Context, lockID string, payouts []Payout, extData string) error
 
 	// Refund 原路退回已被冻结但未消费的资产
 	Refund(ctx context.Context, lockID string, reason string) error

@@ -64,7 +64,7 @@ func (s *LedgerService) CreateInvoice(ctx context.Context, payer, agent string, 
 }
 
 // SettleInvoice 对应分账结算 (Split)
-func (s *LedgerService) SettleInvoice(ctx context.Context, invoiceID string, actualCost uint64, payouts []rail.Payout, nonce string) error {
+func (s *LedgerService) SettleInvoice(ctx context.Context, invoiceID string, actualCost uint64, payouts []rail.Payout, nonce string, extData string) error {
 	// 1. 幂等校验 (通过查询借记条目判断该分账请求是否已做处理)
 	existing, err := s.store.GetLedgerEntryByNonce(ctx, nonce+"_debit")
 	if err == nil && existing != nil {
@@ -98,7 +98,7 @@ func (s *LedgerService) SettleInvoice(ctx context.Context, invoiceID string, act
 		return errors.New("failed to resolve payment rail for settlement")
 	}
 
-	if err := paymentRail.Split(ctx, inv.LockID, payouts); err != nil {
+	if err := paymentRail.Split(ctx, inv.LockID, payouts, extData); err != nil {
 		return fmt.Errorf("rail split settle failed: %w", err)
 	}
 

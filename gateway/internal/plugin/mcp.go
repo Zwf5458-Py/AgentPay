@@ -193,7 +193,7 @@ func (h *McpHandler) handleCallTool(ctx context.Context, params json.RawMessage)
 			{Target: platformTreasury, Amount: platformPayout},
 		}
 
-		err := h.ledgerSvc.SettleInvoice(ctx, args.InvoiceID, microCost, payouts, nonceStr)
+		err := h.ledgerSvc.SettleInvoice(ctx, args.InvoiceID, microCost, payouts, nonceStr, "")
 		if err != nil {
 			return nil, err
 		}

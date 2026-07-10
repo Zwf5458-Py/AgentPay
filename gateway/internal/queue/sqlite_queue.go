@@ -395,6 +395,57 @@ func (qm *QueueManager) getPendingTasks() ([]SettleTask, error) {
 }
 
 func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) {
+	// 如果挂载了记账引擎且 invoiceID 存在，使用 LedgerService 清结算闭环
+	if qm.LedgerService != nil && task.InvoiceID != "" {
+		platformFee := task.AccumulatedAmount - task.ModelCost - task.ServiceFee
+		payouts := []rail.Payout{
+			{Target: task.ModelProvider, Amount: task.ModelCost},
+			{Target: task.AgentOwner, Amount: task.ServiceFee},
+			{Target: task.Treasury, Amount: platformFee},
+		}
+
+		nonceStr := strconv.FormatUint(task.Nonce, 10)
+		if task.ChannelID == "" {
+			nonceStr = task.LockID
+		}
+
+		// 构建以太坊清算所需的底层凭证，作为 extData 传给清算适配器
+		meta := rail.CryptoSettleMetadata{
+			Proof:         task.Proof,
+			Signature:     task.Signature,
+			Nonce:         task.Nonce,
+			Expiration:    task.Expiration,
+			HoldAmount:    task.HoldAmount,
+			ModelCost:     task.ModelCost,
+			ServiceFee:    task.ServiceFee,
+			ModelProvider: task.ModelProvider,
+			Treasury:      task.Treasury,
+			PlatformBps:   task.PlatformBps,
+			AgentID:       task.AgentID,
+			AgentOwner:    task.AgentOwner,
+			EscrowAddress: task.EscrowAddress,
+		}
+		extBytes, err := json.Marshal(meta)
+		if err != nil {
+			log.Printf("[Queue Worker] Failed to marshal crypto settle metadata: %v", err)
+			qm.handleFailure(ctx, task, err)
+			return
+		}
+
+		err = qm.LedgerService.SettleInvoice(ctx, task.InvoiceID, task.AccumulatedAmount, payouts, nonceStr, string(extBytes))
+		if err != nil {
+			log.Printf("[Queue Worker] Ledger bookkeeping settle failed for invoice %s: %v", task.InvoiceID, err)
+			qm.handleFailure(ctx, task, err)
+			return
+		}
+		log.Printf("[Queue Worker] Ledger successfully recorded and settled invoice %s", task.InvoiceID)
+		qm.handleSuccess(ctx, task)
+		return
+	}
+
+	// ----------------------------------------------------
+	// 降级与向下兼容分支：没有记账服务或 Legacy 遗留锁测试
+	// ----------------------------------------------------
 	var targetURL string
 	var bodyBytes []byte
 	var err error
@@ -464,28 +515,6 @@ func (qm *QueueManager) processSingleTask(ctx context.Context, task SettleTask) 
 		log.Printf("[Queue Worker] Bridge returned non-200 for lockId %s: %v", task.LockID, err)
 		qm.handleFailure(ctx, task, err)
 		return
-	}
-
-	if qm.LedgerService != nil && task.InvoiceID != "" {
-		platformFee := task.AccumulatedAmount - task.ModelCost - task.ServiceFee
-		payouts := []rail.Payout{
-			{Target: task.ModelProvider, Amount: task.ModelCost},
-			{Target: task.AgentOwner, Amount: task.ServiceFee},
-			{Target: task.Treasury, Amount: platformFee},
-		}
-
-		nonceStr := strconv.FormatUint(task.Nonce, 10)
-		if task.ChannelID == "" {
-			nonceStr = task.LockID
-		}
-
-		err = qm.LedgerService.SettleInvoice(ctx, task.InvoiceID, task.AccumulatedAmount, payouts, nonceStr)
-		if err != nil {
-			log.Printf("[Queue Worker] Ledger bookkeeping failed for invoice %s: %v", task.InvoiceID, err)
-			qm.handleFailure(ctx, task, err)
-			return
-		}
-		log.Printf("[Queue Worker] Ledger successfully recorded bookkeeping entry for invoice %s", task.InvoiceID)
 	}
 
 	qm.handleSuccess(ctx, task)
