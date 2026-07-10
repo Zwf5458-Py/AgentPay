@@ -1,6 +1,13 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+
+    <script>
+        window.addEventListener('error', function(e) {
+            alert("Detected Frontend JS Error:\n" + e.message + "\nAt file: " + e.filename + "\nLine: " + e.lineno);
+        });
+    </script>
+    
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AgentPay AI Code Auditor</title>
@@ -1250,10 +1257,13 @@ contract SafeEtherStore is ReentrancyGuard {
         let activeProvider = null; // for MetaMask: ethers.providers.Web3Provider
 
         // Initialize marked options
-        marked.setOptions({
-            gfm: true,
-            breaks: true
-        });
+        if (typeof marked !== 'undefined') {
+            if (typeof marked.use === 'function') {
+                marked.use({ gfm: true, breaks: true });
+            } else if (typeof marked.setOptions === 'function') {
+                marked.setOptions({ gfm: true, breaks: true });
+            }
+        }
 
         // Initialize editor content
         editorTextarea.value = templates.reentrancy;

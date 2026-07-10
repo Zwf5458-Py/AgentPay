@@ -1,6 +1,13 @@
 <!DOCTYPE html>
 <html lang="zh">
 <head>
+
+    <script>
+        window.addEventListener('error', function(e) {
+            alert("Detected Frontend JS Error:\n" + e.message + "\nAt file: " + e.filename + "\nLine: " + e.lineno);
+        });
+    </script>
+    
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AgentPay 协议自愈沙盒调试面板</title>
