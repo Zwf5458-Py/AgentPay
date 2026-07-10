@@ -12,7 +12,8 @@ if [ ! -f "$ENV_FILE" ]; then
   if command -v openssl >/dev/null 2>&1; then
     RAND_SECRET=$(openssl rand -hex 16)
   else
-    RAND_SECRET=$((RANDOM))
+    # Fallback to high-entropy source via dev/urandom cksum, and use RANDOM as final recovery
+    RAND_SECRET=$(head -n 10 /dev/urandom 2>/dev/null | cksum | cut -f1 -d" " || echo $RANDOM)
   fi
   
   cat <<EOF > "$ENV_FILE"
@@ -93,6 +94,8 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     BLOCK_DEC=$(printf "%d" "$BLOCK_HEX" 2>/dev/null || echo "$BLOCK_HEX")
     echo "Anvil RPC is responsive! Current Block: $BLOCK_DEC ($BLOCK_HEX)"
     RPC_READY=true
+    # Give Anvil a brief moment to initialize pre-funded accounts fully
+    sleep 1
     break
   fi
   
