@@ -1,18 +1,14 @@
 # Subagent-Driven Development Progress Ledger
 
-Project: AgentPay Phase 1 Core Settlement
+Project: AgentPay Phase 3 Hybrid Payment (Stripe + On-chain)
 Branch: main
 
 ## Completed Tasks
-- **Task 1**: complete (commits e817f70c..dcdd525f, review clean)
-- **Task 2**: complete (commits dcdd525f..900ab621, review clean)
-- **Task 3**: complete (commits 900ab621..03ff46db, review clean)
-- **Task 4**: complete (commits 03ff46db..d0a7cfeb, review clean)
-- **Task 5**: complete (commits d0a7cfeb..167bbb60, review clean)
+- **Task 1**: complete (commits 2408dd46..cfad1948, review clean)
+- **Task 2**: complete (commits cfad1948..d2a921bd, review clean)
 
 ## Current Status
-- [x] **Task 1**: 修复 EIP-712 域名不一致
-- [x] **Task 2**: 合约实现 splitSettle 三方分账
-- [x] **Task 3**: 网关中间件 X-402 头与分账配置扩展
-- [x] **Task 4**: 扩展网关 SQLite Queue 字段与 proxy.go 入队参数
-- [x] **Task 5**: 升级 AA Bridge split-settle 路由与合约调用
+- [x] **Task 1**: 门面网关集成 Stripe API / Mock 支付服务
+- [x] **Task 2**: 升级 X402Middleware 支持 Bearer stripe:<session_id> 凭证
+- [x] **Task 3**: 改造 ModifyResponse 排除 Stripe 模式下的链上结算逻辑
+- [ ] **Task 4**: 更新 client.html 提供双模式切换与 Stripe 支付弹窗流程

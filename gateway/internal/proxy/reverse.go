@@ -87,6 +87,15 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 	// 劫持响应
 	proxy.ModifyResponse = func(res *http.Response) error {
 		ctx := res.Request.Context()
+		paymentMethod := middleware.GetPaymentMethod(ctx)
+		if paymentMethod == "stripe" {
+			stripeSessionID := middleware.GetStripeSessionID(ctx)
+			res.Header.Set("X-402-Payment-Method", "stripe")
+			res.Header.Set("X-402-Stripe-Session", stripeSessionID)
+			log.Printf("[Proxy] Request paid via Stripe session %s. Skipping chain settlement receipt signing.", stripeSessionID)
+			return nil
+		}
+
 		channelID := middleware.GetChannelID(ctx)
 		holdAmountStr := middleware.GetHoldAmount(ctx)
 		nonceStr := middleware.GetNonce(ctx)

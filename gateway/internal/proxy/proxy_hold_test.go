@@ -452,3 +452,80 @@ func TestProxy_ProductionKeyRequired(t *testing.T) {
 		t.Errorf("Expected error to contain 'GATEWAY_PRIVATE_KEY must be provided', got: %v", err)
 	}
 }
+
+func TestProxy_StripeBypass(t *testing.T) {
+	// 1. 确保环境变量未被意外影响，并确保 STRIPE_SECRET_KEY 未被设置以走 mock
+	os.Unsetenv("GATEWAY_PRIVATE_KEY")
+	os.Unsetenv("STRIPE_SECRET_KEY")
+
+	// 2. 模拟下游 Agent (Eliza) 服务
+	agentServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Agent-Proof", "MockProofForStripeBypass")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"output":"agent replied via stripe"}`))
+	}))
+	defer agentServer.Close()
+
+	// 3. 模拟 AA Bridge 服务
+	bridgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true}`))
+	}))
+	defer bridgeServer.Close()
+
+	// 4. 创建临时的 QueueManager
+	dbPath := t.TempDir() + "/test_proxy_stripe.db"
+	queueMgr, err := queue.NewQueueManager(dbPath, bridgeServer.URL+"/aa/settle", "test-secret")
+	if err != nil {
+		t.Fatalf("Failed to create QueueManager: %v", err)
+	}
+	defer queueMgr.Close()
+
+	// 5. 初始化 Gateway 反向代理
+	gatewayProxy, err := proxy.NewReverseProxy(agentServer.URL, bridgeServer.URL+"/aa/settle", "test-secret", queueMgr)
+	if err != nil {
+		t.Fatalf("Failed to create reverse proxy: %v", err)
+	}
+
+	// 6. 将中间件和代理组合成 Router
+	handler := middleware.X402Middleware(gatewayProxy)
+
+	// 7. 发送 Stripe 授权请求
+	req := httptest.NewRequest("POST", "/agent/execute", nil)
+	req.Header.Set("Authorization", "Bearer stripe:cs_mock_teststripe123")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	// 8. 验证响应状态
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	// 9. 验证 Header 中的 X-402-Settle-Receipt 不存在
+	receipt := rr.Header().Get("X-402-Settle-Receipt")
+	if receipt != "" {
+		t.Errorf("Expected NO X-402-Settle-Receipt header, but got %q", receipt)
+	}
+
+	// 10. 验证 Header X-402-Payment-Method: stripe 且 X-402-Stripe-Session: cs_mock_teststripe123
+	paymentMethod := rr.Header().Get("X-402-Payment-Method")
+	if paymentMethod != "stripe" {
+		t.Errorf("Expected X-402-Payment-Method 'stripe', got %q", paymentMethod)
+	}
+
+	stripeSession := rr.Header().Get("X-402-Stripe-Session")
+	if stripeSession != "cs_mock_teststripe123" {
+		t.Errorf("Expected X-402-Stripe-Session 'cs_mock_teststripe123', got %q", stripeSession)
+	}
+
+	// 11. 验证 SQLite 队列的任务没有被创建
+	tasks, err := queueMgr.GetLatestTasks(10)
+	if err != nil {
+		t.Fatalf("Failed to get latest tasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("Expected 0 tasks in SQLite queue, got %d: %v", len(tasks), tasks)
+	}
+}
+
