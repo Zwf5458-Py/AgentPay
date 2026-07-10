@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentPay - Admin Portal</title>
+    <!-- Google Fonts: Outfit (Heading), Inter (Body) and Fira Code (Monospace) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            /* Backgrounds & Overlay Colors */
+            --bg-color: #07040f;
+            --panel-bg: rgba(18, 12, 36, 0.65);
+            --card-bg: rgba(20, 10, 35, 0.45);
+            
+            /* Neon Palette & Glows */
+            --neon-violet: #a78bfa;
+            --neon-violet-glow: rgba(167, 139, 250, 0.35);
+            --neon-cyan: #00f0ff;
+            --neon-cyan-glow: rgba(0, 240, 255, 0.4);
+            --neon-rose: #ff0055;
+            --neon-rose-glow: rgba(255, 0, 85, 0.45);
+            --neon-green: #00ff66;
+            --neon-green-glow: rgba(0, 255, 102, 0.4);
+            --neon-yellow: #ffaa00;
+            --neon-yellow-glow: rgba(255, 170, 0, 0.4);
+            
+            /* Borders & Hover States */
+            --border-color: rgba(139, 92, 246, 0.2);
+            --border-hover: rgba(139, 92, 246, 0.45);
+            
+            /* Text Palette */
+            --text-primary: #f8fafc;
+            --text-secondary: #cbd5e1;
+            --text-muted: #64748b;
+            
+            /* Fonts */
+            --font-title: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-body: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: 'Fira Code', 'Courier New', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(91, 33, 182, 0.18) 0%, transparent 45%),
+                radial-gradient(circle at 90% 80%, rgba(8, 145, 178, 0.15) 0%, transparent 45%),
+                radial-gradient(circle at 50% 50%, rgba(15, 10, 30, 0.95) 0%, #07040f 100%);
+            color: var(--text-primary);
+            font-family: var(--font-body);
+            min-height: 100vh;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        /* Subtle grid pattern overlay for futuristic cyber feel */
+        body::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: linear-gradient(rgba(255, 255, 255, 0.007) 1px, transparent 1px),
+                              linear-gradient(90deg, rgba(255, 255, 255, 0.007) 1px, transparent 1px);
+            background-size: 32px 32px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Ambient glow spots */
+        .ambient-glow-1 {
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(167, 139, 250, 0.06) 0%, transparent 70%);
+            top: -100px;
+            left: -100px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .ambient-glow-2 {
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(0, 240, 255, 0.05) 0%, transparent 70%);
+            bottom: -100px;
+            right: -100px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 1440px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 2rem;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Header Styling */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.25rem 2rem;
+            background: rgba(18, 12, 36, 0.4);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .header-logo-container {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+        }
+
+        .header-logo {
+            width: 2.25rem;
+            height: 2.25rem;
+            border-radius: 8px;
+            background: linear-gradient(135deg, var(--neon-violet), var(--neon-cyan));
+            box-shadow: 0 0 15px var(--neon-violet-glow);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--font-title);
+            font-weight: 800;
+            color: var(--bg-color);
+            font-size: 1.25rem;
+        }
+
+        header h1 {
+            font-family: var(--font-title);
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .gradient-text {
+            background: linear-gradient(to right, var(--text-primary), var(--neon-cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .glowing-badge {
+            background: rgba(0, 255, 102, 0.1);
+            border: 1px solid var(--neon-green);
+            color: var(--neon-green);
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.35rem 0.85rem;
+            border-radius: 9999px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            box-shadow: 0 0 10px rgba(0, 255, 102, 0.2);
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            background-color: var(--neon-green);
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 8px var(--neon-green);
+            animation: pulse-dot 2s infinite;
+        }
+
+        @keyframes pulse-dot {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 255, 102, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(0, 255, 102, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 255, 102, 0); }
+        }
+
+        /* Credentials Card Component */
+        .credentials-section {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.5rem;
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            transition: border-color 0.3s;
+        }
+
+        .credentials-section:hover {
+            border-color: rgba(139, 92, 246, 0.35);
+        }
+
+        .credentials-section h2 {
+            font-family: var(--font-title);
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--neon-violet);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 1.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .credentials-section h2::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 14px;
+            background: var(--neon-violet);
+            box-shadow: 0 0 8px var(--neon-violet-glow);
+            border-radius: 2px;
+        }
+
+        .form-row {
+            display: flex;
+            align-items: flex-end;
+            gap: 1.25rem;
+            flex-wrap: wrap;
+        }
+
+        .form-group {
+            flex: 1;
+            min-width: 280px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .form-group label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .input-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .neon-input {
+            width: 100%;
+            background: rgba(7, 4, 15, 0.7);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            color: var(--text-primary);
+            padding: 0.75rem 1rem;
+            font-family: var(--font-body);
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .neon-input:focus {
+            border-color: var(--neon-cyan);
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
+            background: rgba(12, 8, 25, 0.8);
+        }
+
+        .action-btn {
+            background: linear-gradient(135deg, var(--neon-violet), var(--neon-cyan));
+            border: none;
+            border-radius: 10px;
+            color: var(--bg-color);
+            font-family: var(--font-title);
+            font-weight: 700;
+            padding: 0.75rem 1.75rem;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.3s;
+            height: 42px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .action-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 20px rgba(167, 139, 250, 0.5);
+        }
+
+        .action-btn:active {
+            transform: translateY(0);
+        }
+
+        /* KPI Grid Block */
+        .kpi-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1.25rem;
+        }
+
+        .kpi-card {
+            background: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 16px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.65rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Left-side color accent border inside the card */
+        .kpi-card::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: var(--accent-color, var(--neon-violet));
+            box-shadow: 0 0 10px var(--accent-glow, var(--neon-violet-glow));
+        }
+
+        .kpi-card:hover {
+            border-color: var(--border-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4), 0 0 15px var(--accent-glow);
+        }
+
+        .kpi-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .kpi-value {
+            font-family: var(--font-title);
+            font-size: 1.65rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        /* Dashboard Split-View Tables */
+        .dashboard-split {
+            display: grid;
+            grid-template-columns: 1.2fr 0.8fr;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 1100px) {
+            .dashboard-split {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.75rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+            transition: border-color 0.3s;
+        }
+
+        .panel:hover {
+            border-color: rgba(139, 92, 246, 0.3);
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding-bottom: 1rem;
+        }
+
+        .panel-header h3 {
+            font-family: var(--font-title);
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .panel-header h3::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 12px;
+            background: var(--panel-accent, var(--neon-cyan));
+            box-shadow: 0 0 8px var(--panel-accent-glow, var(--neon-cyan-glow));
+            border-radius: 2px;
+        }
+
+        .clear-btn {
+            background: transparent;
+            border: 1px solid var(--btn-border, var(--neon-rose));
+            color: var(--btn-border, var(--neon-rose));
+            border-radius: 8px;
+            padding: 0.4rem 0.9rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .clear-btn:hover {
+            background: var(--btn-border, var(--neon-rose));
+            color: var(--bg-color);
+            box-shadow: 0 0 15px var(--btn-glow, var(--neon-rose-glow));
+        }
+
+        /* Tasks Table styling */
+        .table-wrapper {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            text-align: left;
+            font-size: 0.85rem;
+        }
+
+        th {
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 1rem 0.75rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            font-size: 0.75rem;
+        }
+
+        td {
+            padding: 1rem 0.75rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            vertical-align: middle;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tbody tr {
+            transition: background-color 0.2s;
+        }
+
+        tbody tr:hover {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .mono {
+            font-family: var(--font-mono);
+            color: var(--neon-cyan);
+            font-size: 0.85rem;
+            text-shadow: 0 0 5px rgba(0, 240, 255, 0.15);
+        }
+
+        /* Status Badge system */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .badge::before {
+            content: '';
+            width: 4px;
+            height: 4px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .badge-processing {
+            background: rgba(0, 240, 255, 0.1);
+            border: 1px solid var(--neon-cyan);
+            color: var(--neon-cyan);
+            box-shadow: 0 0 8px rgba(0, 240, 255, 0.15);
+        }
+        .badge-processing::before {
+            background-color: var(--neon-cyan);
+            box-shadow: 0 0 6px var(--neon-cyan);
+        }
+
+        .badge-failed {
+            background: rgba(255, 0, 85, 0.1);
+            border: 1px solid var(--neon-rose);
+            color: var(--neon-rose);
+            box-shadow: 0 0 8px rgba(255, 0, 85, 0.15);
+        }
+        .badge-failed::before {
+            background-color: var(--neon-rose);
+            box-shadow: 0 0 6px var(--neon-rose);
+        }
+
+        .badge-pending {
+            background: rgba(255, 170, 0, 0.1);
+            border: 1px solid var(--neon-yellow);
+            color: var(--neon-yellow);
+            box-shadow: 0 0 8px rgba(255, 170, 0, 0.15);
+        }
+        .badge-pending::before {
+            background-color: var(--neon-yellow);
+            box-shadow: 0 0 6px var(--neon-yellow);
+        }
+
+        .badge-success {
+            background: rgba(0, 255, 102, 0.1);
+            border: 1px solid var(--neon-green);
+            color: var(--neon-green);
+            box-shadow: 0 0 8px rgba(0, 255, 102, 0.15);
+        }
+        .badge-success::before {
+            background-color: var(--neon-green);
+            box-shadow: 0 0 6px var(--neon-green);
+        }
+
+        .action-link {
+            background: transparent;
+            border: none;
+            color: var(--neon-rose);
+            cursor: pointer;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.3s;
+            font-family: var(--font-title);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            border: 1px solid transparent;
+        }
+
+        .action-link:hover {
+            border-color: var(--neon-rose);
+            background: rgba(255, 0, 85, 0.05);
+            box-shadow: 0 0 8px var(--neon-rose-glow);
+        }
+
+        /* Stripe Sessions List View */
+        .session-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            list-style: none;
+        }
+
+        .session-list li {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.015);
+            border: 1px solid rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+            padding: 0.85rem 1.25rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .session-list li:hover {
+            border-color: var(--border-hover);
+            background: rgba(255, 255, 255, 0.03);
+            box-shadow: 0 0 15px rgba(139, 92, 246, 0.08);
+            transform: translateX(2px);
+        }
+
+        .badge-group {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+        }
+
+        .delete-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .delete-btn:hover {
+            color: var(--neon-rose);
+            background: rgba(255, 0, 85, 0.1);
+            transform: scale(1.15);
+        }
+    </style>
+</head>
+<body>
+    <div class="ambient-glow-1"></div>
+    <div class="ambient-glow-2"></div>
+    
+    <div class="container">
+        <!-- Header Component -->
+        <header>
+            <div class="header-logo-container">
+                <div class="header-logo">AP</div>
+                <h1>AgentPay <span class="gradient-text">- Admin Portal</span></h1>
+            </div>
+            <div class="glowing-badge">
+                <span class="status-dot"></span>
+                <span class="status-text">Gateway: Connected</span>
+            </div>
+        </header>
+
+        <!-- Credentials Settings Card -->
+        <section class="credentials-section">
+            <h2>API Gateway Connection</h2>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="gateway-url">Gateway URL</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="gateway-url" value="http://localhost:8080" class="neon-input">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="admin-secret">Admin Secret Key</label>
+                    <div class="input-wrapper">
+                        <input type="password" id="admin-secret" value="password12345" class="neon-input">
+                    </div>
+                </div>
+                <button class="action-btn">Save Config</button>
+            </div>
+        </section>
+
+        <!-- KPI Metrics Grid -->
+        <section class="kpi-section">
+            <div class="kpi-card" style="--accent-color: var(--neon-cyan); --accent-glow: var(--neon-cyan-glow);">
+                <div class="kpi-label">Total Settled</div>
+                <div class="kpi-value">245,620.00 USDC</div>
+            </div>
+            <div class="kpi-card" style="--accent-color: var(--neon-violet); --accent-glow: var(--neon-violet-glow);">
+                <div class="kpi-label">Platform Fees</div>
+                <div class="kpi-value">1,228.10 USDC</div>
+            </div>
+            <div class="kpi-card" style="--accent-color: var(--neon-green); --accent-glow: var(--neon-green-glow);">
+                <div class="kpi-label">Active Stripe Sessions</div>
+                <div class="kpi-value">14</div>
+            </div>
+            <div class="kpi-card" style="--accent-color: var(--neon-yellow); --accent-glow: var(--neon-yellow-glow);">
+                <div class="kpi-label">Success Rate</div>
+                <div class="kpi-value">98.6%</div>
+            </div>
+        </section>
+
+        <!-- Dashboard Split View -->
+        <div class="dashboard-split">
+            <!-- Left panel: Lock Tasks Queue -->
+            <section class="panel" style="--panel-accent: var(--neon-cyan); --panel-accent-glow: var(--neon-cyan-glow);">
+                <div class="panel-header">
+                    <h3>Active Lock Queue</h3>
+                    <button class="clear-btn" style="--btn-border: var(--neon-rose); --btn-glow: var(--neon-rose-glow);">Clear Queue</button>
+                </div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Lock ID</th>
+                                <th>Status</th>
+                                <th>Retry</th>
+                                <th>Date</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="mono">lock:0xfa3923ef10b</td>
+                                <td><span class="badge badge-processing">Processing</span></td>
+                                <td>0</td>
+                                <td>2026-07-10 09:42:15</td>
+                                <td><button class="action-link">Unlock</button></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">lock:0x1b4022a1c82</td>
+                                <td><span class="badge badge-failed">Failed</span></td>
+                                <td>3</td>
+                                <td>2026-07-10 09:30:00</td>
+                                <td><button class="action-link">Unlock</button></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">lock:0x68ef83bb9a2</td>
+                                <td><span class="badge badge-pending">Pending</span></td>
+                                <td>1</td>
+                                <td>2026-07-10 09:51:22</td>
+                                <td><button class="action-link">Unlock</button></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Right panel: Recent Stripe Sessions -->
+            <section class="panel stripe-panel" style="--panel-accent: var(--neon-green); --panel-accent-glow: var(--neon-green-glow);">
+                <div class="panel-header">
+                    <h3>Recent Stripe Sessions</h3>
+                    <button class="clear-btn" style="--btn-border: var(--neon-violet); --btn-glow: var(--neon-violet-glow);">Clear Sessions</button>
+                </div>
+                <ul class="session-list">
+                    <li>
+                        <span class="mono">cs_test_a1B2c3d4e5f6g7h8i90</span>
+                        <div class="badge-group">
+                            <span class="badge badge-success">Success</span>
+                            <button class="delete-btn" title="Delete session">✕</button>
+                        </div>
+                    </li>
+                    <li>
+                        <span class="mono">cs_test_x9Y8z7w6v5u4t3s2r12</span>
+                        <div class="badge-group">
+                            <span class="badge badge-success">Success</span>
+                            <button class="delete-btn" title="Delete session">✕</button>
+                        </div>
+                    </li>
+                    <li>
+                        <span class="mono">cs_test_m5N6o7p8q9r0s1t2u86</span>
+                        <div class="badge-group">
+                            <span class="badge badge-success">Success</span>
+                            <button class="delete-btn" title="Delete session">✕</button>
+                        </div>
+                    </li>
+                </ul>
+            </section>
+        </div>
+    </div>
+</body>
+</html>
