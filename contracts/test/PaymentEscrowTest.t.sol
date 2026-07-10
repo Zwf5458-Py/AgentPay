@@ -1021,6 +1021,57 @@ contract PaymentEscrowTest is Test {
         );
     }
 
+    // 测试 splitSettle 平台费率超出 10000 拦截
+    function test_SplitSettleInvalidPlatformBpsReverts() public {
+        uint256 payerPrivateKey = 0xA11CE;
+        address customPayer = vm.addr(payerPrivateKey);
+        address modelProvider = address(0x4);
+        address treasury = address(0x5);
+
+        usdc.mint(customPayer, 1000 * 10**6);
+        vm.prank(customPayer);
+        usdc.approve(address(escrow), type(uint256).max);
+
+        vm.prank(customPayer);
+        bytes32 channelId = escrow.lockChannel(agentId, 1000 * 10**6, 3600);
+
+        uint256 accumulatedAmount = 600 * 10**6;
+        uint256 nonce = 123;
+        uint256 expiration = 3600;
+        bytes32 hashStruct = keccak256(abi.encode(
+            CHANNEL_HOLD_TYPEHASH,
+            channelId,
+            1000 * 10**6,
+            nonce,
+            expiration
+        ));
+        bytes32 digest = keccak256(abi.encodePacked(
+            "\x19\x01",
+            escrow.DOMAIN_SEPARATOR(),
+            hashStruct
+        ));
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(payerPrivateKey, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // platformBps > 10000 时应该 Revert
+        vm.expectRevert(PaymentEscrow.InvalidAmount.selector);
+        vm.prank(settler);
+        escrow.splitSettle(
+            channelId,
+            accumulatedAmount,
+            200 * 10**6,
+            100 * 10**6,
+            modelProvider,
+            treasury,
+            10001,
+            1000 * 10**6,
+            nonce,
+            expiration,
+            signature
+        );
+    }
+
     // 28. 测试 splitSettle 非 settler 拦截
     function test_SplitSettleNonSettlerReverts() public {
         uint256 payerPrivateKey = 0xA11CE;

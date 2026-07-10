@@ -323,6 +323,7 @@ contract PaymentEscrow {
         bytes   calldata signature
     ) external onlySettler {
         if (modelProvider == address(0) || treasury == address(0)) revert InvalidAddress();
+        if (platformBps > 10000) revert InvalidAmount();
 
         ChannelLock storage lock = channels[channelId];
         if (lock.status != PaymentStatus.Locked) revert InvalidStatus();
