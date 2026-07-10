@@ -125,10 +125,16 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 			modelCost = holdVal
 		}
 
+		platformBpsStr := os.Getenv("PLATFORM_BPS")
+		if platformBpsStr == "" {
+			platformBpsStr = "10"
+		}
+		platformBpsVal, _ := strconv.ParseUint(platformBpsStr, 10, 16)
+		platformBps := uint16(platformBpsVal)
+
 		var actualCost int64
 		if channelID != "" {
-			// 通道结算下：总付款 = modelCost + 2000 (固定服务费)
-			actualCost = modelCost + 2000
+			actualCost = (modelCost + 2000) * 10000 / (10000 - int64(platformBps))
 		} else {
 			actualCost = modelCost
 		}
@@ -164,13 +170,6 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 						expiration = val
 					}
 
-					platformBpsStr := os.Getenv("PLATFORM_BPS")
-					if platformBpsStr == "" {
-						platformBpsStr = "10"
-					}
-					platformBpsVal, _ := strconv.ParseUint(platformBpsStr, 10, 16)
-					platformBps := uint16(platformBpsVal)
-
 					modelProvider := os.Getenv("MODEL_PROVIDER_ADDRESS")
 					if modelProvider == "" {
 						modelProvider = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
@@ -192,13 +191,7 @@ func NewReverseProxy(targetURL string, aaBridgeURL string, internalSecret string
 						}
 					}
 
-					platformFee := uint64(actualCost) * uint64(platformBps) / 10000
-					var serviceFee uint64
-					if uint64(actualCost) >= platformFee+uint64(modelCost) {
-						serviceFee = uint64(actualCost) - platformFee - uint64(modelCost)
-					} else {
-						serviceFee = 0
-					}
+					var serviceFee uint64 = 2000
 
 					taskDetails := &queue.SettleTask{
 						ChannelID:         channelID,
