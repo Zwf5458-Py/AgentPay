@@ -100,4 +100,56 @@ if [ "$RPC_READY" = false ]; then
   exit 1
 fi
 
+echo "Deploying PaymentEscrow contracts to local Anvil..."
+(
+  cd contracts
+  export FOUNDRY_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+  export GATEWAY_SETTLER_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+  if ! forge script script/Deploy.s.sol:DeployScript --rpc-url http://localhost:8545 --broadcast; then
+    echo "Error: Contract deployment failed." >&2
+    exit 1
+  fi
+)
+
+# Extract the deployed address from Foundry broadcast
+if [ ! -f "contracts/broadcast/Deploy.s.sol/31337/run-latest.json" ]; then
+  echo "Error: Broadcast run-latest.json not found." >&2
+  exit 1
+fi
+
+ESCROW_ADDR=$(python3 -c "
+import json, sys
+try:
+    with open('contracts/broadcast/Deploy.s.sol/31337/run-latest.json') as f:
+        data = json.load(f)
+        for tx in data.get('transactions', []):
+            if tx.get('contractName') == 'PaymentEscrow':
+                print(tx['contractAddress'])
+                sys.exit(0)
+except Exception as e:
+    print('', end='')
+    sys.exit(1)
+")
+
+if [ -z "$ESCROW_ADDR" ] || [ ${#ESCROW_ADDR} -ne 42 ] || ! echo "$ESCROW_ADDR" | grep -qE '^0x[0-9a-fA-F]{40}$'; then
+  echo "Error: Failed to extract a valid PaymentEscrow address. Got: '$ESCROW_ADDR'" >&2
+  exit 1
+fi
+
+# Inject the address into .env
+python3 -c "
+import re, sys
+env_path = '.env'
+addr = sys.argv[1]
+with open(env_path, 'r') as f:
+    content = f.read()
+new_content, count = re.subn(r'^ESCROW_ADDRESS=.*', f'ESCROW_ADDRESS={addr}', content, flags=re.MULTILINE)
+if count == 0:
+    new_content = content + f'\nESCROW_ADDRESS={addr}'
+with open(env_path, 'w') as f:
+    f.write(new_content)
+" "$ESCROW_ADDR"
+
+echo "Extracted PaymentEscrow address: $ESCROW_ADDR and updated .env"
+
 echo "=== Deployment Successful ==="
