@@ -235,13 +235,113 @@ interface SplitSettleRequest {
 
 ---
 
-### 5. 不在 P1 范围内的工作
+## P2 详细设计：场景与客户端
 
-以下内容不在 P1 范围内，将在后续阶段实现：
+### 1. AI 代码安全审计智能体改造
 
-- 客户端 UI (`client.html`) → P2
-- 代码审计 Agent 改造 → P2
+为了提供真实的代码审计服务，需要将 `agent/src/index.ts` 中的推理提示词与输入输出改造为代码安全审计助手。
+
+#### 1.1 Prompt 提示词模板
+
+当 `agent` 接收到 `/agent/execute` 请求时，如果检测到输入类似于 Solidity 合约代码（或默认强制开启审计提示），其调用本地 Hermes 模型的 messages 结构将构造为：
+
+```typescript
+const systemPrompt = `你是一个顶级的 Web3 智能合约安全专家。请对用户提交的 Solidity 代码进行安全审计。
+要求必须返回以下格式的结构化 Markdown 审计报告：
+
+# 智能合约安全审计报告
+
+## 1. 漏洞概览
+- 🔴 高风险漏洞：[数量]
+- 🟡 中风险漏洞：[数量]
+- 🟢 低风险漏洞：[数量]
+
+## 2. 安全综合评分
+[分值，例如：85/100] 🛡️ [安全性评语]
+
+## 3. 漏洞详情与防范建议
+### [漏洞名称] ([风险级别])
+- **行号**: [大概行号或相关代码片段]
+- **原理说明**: [漏洞产生原因简述]
+- **防范建议**: [修复建议与安全代码示例]
+`;
+```
+
+#### 1.2 Agent 计费参数微调
+
+- 机器人收取的固定服务费 `serviceFee` 为 `2000` micro-units（由网关从环境变量中读取并作为 splitSettle 拆分入参）。
+- 模型推理费 `modelCost` 依旧基于实际产生的 Prompt & Completion Tokens 按公式计算。
+
+---
+
+### 2. 独立客户端 `client.html` 设计
+
+`client.html` 放置在项目根目录下，提供一个完全独立于开发者沙盒的用户审计服务界面。
+
+#### 2.1 UI 界面设计
+
+采用暗黑未来科技风（Neon Dark Theme）配以毛玻璃磨砂（Glassmorphism）质感。
+- **左侧面板**：
+  - **钱包连接组件**：
+    - 私钥直连模式：提供测试私钥输入框（隐藏/显示眼睛图标），默认填充 Anvil 账户 0。
+    - MetaMask / 浏览器钱包直连模式：点击 "Connect Browser Wallet" 按钮，通过 `window.ethereum` 自动获取账户地址，并使用 `ethers.BrowserProvider` 或 `viem` 在签名时拉起浏览器插件进行签名。
+    - 账户信息显示：动态更新当前连接的账户地址、USDC 测试代币余额。
+  - **代码编辑器**：
+    - 一个带有代码行号样式的 `<textarea>` 输入框，提供一键加载内置漏洞模板的功能（如“重入漏洞模板”、“整数溢出漏洞模板”）。
+  - **参数设置**：
+    - Agent ID 输入框（默认 `889`）。
+    - Max Price 限制输入框（默认 `15000` micro-units）。
+  - **执行按钮**：
+    - `[开始安全审计 (Execute Audit)]` 大按钮，点击后禁用并显示 loading spinners。
+- **右侧面板**：
+  - **实时状态追踪时间轴**：
+    - Step 1: 发起请求 (无凭证拦截)
+    - Step 2: 捕获 402 预扣款挑战
+    - Step 3: 本地 EIP-712 / MetaMask 签名 ChannelHold 授权
+    - Step 4: 携带签名重试并开始审计 (正在审计呼吸灯闪烁)
+    - Step 5: 审计完成 & 凭证清算 (自愈成功，解冻差额)
+  - **审计报告展示区**：
+    - 使用前端轻量级 Markdown 渲染器（如 `marked.js`，通过 CDN 引入），将大模型返回的审计 Markdown 渲染为排版精美的 HTML 页面。
+  - **账单费用拆分看板**：
+    - 清楚展示该笔交易的清算账单：
+      - 冻结预授权金额 (Hold Amount)：`0.05 USDC`
+      - 实际总扣款 (Actual Cost)：`actualCost`
+      - 模型费 (Model Cost)：`modelCost`
+      - 机器人服务费 (Service Fee)：`serviceFee`
+      - 平台佣金 (Platform Fee)：`platformFee` (0.1%)
+      - 解冻退还金额 (Refunded Payer)：`holdAmount - actualCost`
+
+#### 2.2 双模钱包签名实现细节
+
+- **测试私钥模式**：
+  - 直接在内存中利用传入的私钥使用 `ethers.Wallet` 或 `viem` 的 `privateKeyToAccount` 完成 `signTypedData`。
+- **浏览器插件钱包模式**：
+  - 检测 `window.ethereum`。
+  - 使用 Web3 提供者拉起钱包：
+    ```javascript
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+    const sig = await signer.signTypedData(domain, types, message);
+    ```
+
+---
+
+### 3. P2 验证计划
+
+#### 3.1 场景功能验证
+- 提交含有重入漏洞的 Solidity 合约，检查 Agent 控制台日志，验证 Hermes 模型成功被 Prompt 引导并输出了指定 Markdown 格式的报告。
+- 检查返回的 `X-Agent-Cost`，确保根据生成 Token 数量计算的模型费在 header 中正确返回。
+
+#### 3.2 客户端端到端验证
+- 用 `file://` 或本地静态服务器打开 `client.html`。
+- 在“私钥直连”模式下，点击安全审计，观察时间轴在 402 触发后自动完成签名与自愈，最终成功在右侧展示 Markdown 报告与费用分账明细。
+- 在“浏览器钱包连接”模式下，切换 MetaMask 到本地 Anvil 网络，点击审计，确认 MetaMask 成功弹出 EIP-712 结构化数据签名窗口，用户签名通过后，审计流程自愈完成并展示结果。
+- 检查 SQLite 队列，验证结算任务成功入队并最终清算完成。
+
+---
+
+### 4. 后续待开发阶段
+
 - 法币支付通道 (Stripe) → P3
 - 管理后台 (`admin.html`) → P4
-- 支付宝接口预留 → P3
 - 生产环境部署 → 所有阶段完成后
