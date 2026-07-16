@@ -78,6 +78,7 @@ server.addHook('onRequest', async (request, reply) => {
 
   const clientSecret = request.headers['x-internal-secret'];
   if (!clientSecret || clientSecret !== secret) {
+    server.log.error(`Secret Mismatch: clientSecret=${clientSecret}, serverSecret=${secret}`);
     return reply.status(401).send({
       success: false,
       error: 'Unauthorized: Missing or invalid x-internal-secret header',
@@ -578,10 +579,10 @@ server.post('/aa/split-settle', {
   }
 }, async (request, reply) => {
   const body = request.body as any;
-
   if (!body) {
     return reply.status(400).send({ error: 'Missing request body' });
   }
+  server.log.error(`split-settle body parameter values: ${JSON.stringify(body)}`);
 
   const {
     channelId,
@@ -620,15 +621,18 @@ server.post('/aa/split-settle', {
     });
   }
 
-  if (!isAddress(modelProvider) || modelProvider === '0x0000000000000000000000000000000000000000') {
+  const cleanModelProvider = modelProvider.toLowerCase();
+  const cleanTreasury = treasury.toLowerCase();
+
+  if (!isAddress(cleanModelProvider) || cleanModelProvider === '0x0000000000000000000000000000000000000000') {
     return reply.status(400).send({ error: 'Invalid modelProvider address' });
   }
 
-  if (!isAddress(treasury) || treasury === '0x0000000000000000000000000000000000000000') {
+  if (!isAddress(cleanTreasury) || cleanTreasury === '0x0000000000000000000000000000000000000000') {
     return reply.status(400).send({ error: 'Invalid treasury address' });
   }
 
-  const resolvedEscrowAddress = escrowAddress || process.env.ESCROW_ADDRESS;
+  const resolvedEscrowAddress = (escrowAddress || process.env.ESCROW_ADDRESS || '').toLowerCase();
   if (!resolvedEscrowAddress || !isAddress(resolvedEscrowAddress)) {
     return reply.status(400).send({ error: 'Invalid or missing escrowAddress' });
   }
@@ -850,7 +854,7 @@ server.post('/aa/split-settle', {
     const agentPayout = biAccumulated - biModelCost - platformFee - biServiceFee;
 
     const payouts = {
-      modelProvider,
+      modelProvider: cleanModelProvider,
       modelProviderPayout: biModelCost.toString(),
       platformFee: platformFee.toString(),
       agentPayout: agentPayout.toString(),
@@ -879,8 +883,8 @@ server.post('/aa/split-settle', {
           biAccumulated,
           biModelCost,
           biServiceFee,
-          modelProvider as `0x${string}`,
-          treasury as `0x${string}`,
+          cleanModelProvider as `0x${string}`,
+          cleanTreasury as `0x${string}`,
           platformBps,
           biHoldAmount,
           biNonce,
