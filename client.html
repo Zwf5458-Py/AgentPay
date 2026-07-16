@@ -18,11 +18,11 @@
     <!-- Content Security Policy -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' https: http: 'unsafe-inline' 'unsafe-eval' data:; connect-src 'self' http://localhost:8080 http://localhost:8545 http://127.0.0.1:8080 http://127.0.0.1:3001 http://127.0.0.1:8545 ws://localhost:* ws://127.0.0.1:*;">
     <!-- Marked.js for Markdown Rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/lib/marked.umd.min.js"></script>
+    <script src="./js/marked.umd.min.js"></script>
     <!-- DOMPurify for XSS Protection -->
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+    <script src="./js/purify.min.js"></script>
     <!-- Ethers.js CDN for Wallet Integration -->
-    <script src="https://cdn.jsdelivr.net/npm/ethers@5.6.9/dist/ethers.umd.min.js"></script>
+    <script src="./js/ethers.umd.min.js"></script>
     <!-- AgentPay SDK -->
     <script src="./sdk/dist/client.browser.js"></script>
     <style>
@@ -1659,7 +1659,10 @@ contract SafeEtherStore is ReentrancyGuard {
             executeAuditBtn.textContent = '安全审计运行中...';
             resetAuditSteps();
 
-            const gatewayUrl = document.getElementById('gatewayUrl').value.trim();
+            let gatewayUrl = document.getElementById('gatewayUrl').value.trim();
+            if (gatewayUrl.endsWith('/agent/execute')) {
+                gatewayUrl = gatewayUrl.substring(0, gatewayUrl.length - '/agent/execute'.length);
+            }
             const agentId = parseInt(document.getElementById('agentId').value.trim()) || 888;
             const codeInput = editorTextarea.value;
 
