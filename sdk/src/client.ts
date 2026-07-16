@@ -39,7 +39,7 @@ export class AgentPayClient {
     this.env = config.env || 'production';
     this.chainId = config.chainId || 31337;
     this.verifyingContract = config.verifyingContract || '0x4d5e11be368a8f5ea304197475467b3173c25eea';
-    this.erc20Address = config.erc20Address || '0x43b22e11d0444ce69528e5db1a868f7b587b1c3c';
+    this.erc20Address = config.erc20Address || (this.chainId === 31337 ? '0x5fbdb2315678afecb367f032d93f642f64180aa3' : '0x43b22e11d0444ce69528e5db1a868f7b587b1c3c');
     this.gatewayAddress = config.gatewayAddress;
 
     const chain = this.chainId === 31337 ? foundry : baseSepolia;
