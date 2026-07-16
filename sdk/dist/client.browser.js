@@ -19588,7 +19588,7 @@ ${prettyStateOverride(stateOverride)}`;
         account: userAddress
       });
       const receipt = await this.publicClient.waitForTransactionReceipt({ hash: lockHash });
-      const eventAbi = parseAbiItem("event ChannelLocked(bytes32 indexed channelId, uint256 indexed agentId, address indexed payer, uint256 amount, uint256 expiration)");
+      const eventAbi = parseAbiItem("event ChannelLocked(bytes32 indexed channelId, address indexed payer, uint256 indexed agentId, uint256 maxAmount, uint256 expiresAt)");
       const logs = await this.publicClient.getLogs({
         address: this.verifyingContract,
         event: eventAbi,
