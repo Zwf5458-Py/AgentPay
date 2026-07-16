@@ -129,3 +129,10 @@
     1.  **极速轮询**：在 SDK 构造函数中，对本地测试网（`chainId === 31337`）的 `publicClient` 配置了低延迟的 `pollingInterval: 100`（100毫秒轮询间隔），使 Approve 出块确认瞬间唤起下一笔交易，打通极致丝滑的钱包唤起体验。
     2.  **LLM 极速超时**：在 `agent` 微服务中为大模型 API 请求增加了 `AbortController` 绑定的 1000 毫秒（1秒）超时中断逻辑，防止因本地大模型端口不存活导致的网络傻等，保障 1 秒内顺畅降级到本地 Mock 生成。
     3.  **MetaMask 取消美化**：优化了前端网页上的异常捕获逻辑，当用户在 MetaMask 中取消或拒绝签名时，不再输出整页的 viem 冗长调试信息，而是友好地在红框中渲染出 `SDK 执行失败: 用户取消了钱包签名或交易授权`。
+
+### 6.6 Stripe 法币策略前后端路由与字段错配 (Unexpected non-whitespace character after JSON)
+*   **现象**：点击“法币支付 (Stripe)”发起安全审计时，右侧爆红提示：`Stripe 会话创建失败: Unexpected non-whitespace character after JSON at position 4`。
+*   **根因**：
+    1.  **路由前缀不匹配 (404)**：前端 `client.html` 默认请求 `${gatewayUrl}/api/stripe/create-session`（带 `/api`），而网关在 `main.go` 中仅挂载了根路径 `/stripe/create-session`。这导致 Chi 路由器直接拦截并返回了 `404 page not found` 纯文本，前端在对其进行 JSON 反序列化时遭遇语法报错。
+    2.  **JSON Payload 字段不匹配 (checkout_url)**：前端期望读取返回 JSON 中的 `session.checkout_url` 字段拉起收银台，而网关只返回了 `url`。
+*   **优化**：在 `main.go` 中，重构并同时兼容挂载了带 `/api` 前缀的 Stripe 相关路由，并在返回的 JSON payload 中同时返回 `"url"` 和 `"checkout_url"` 字段，确保了前后端的无缝兼容。
