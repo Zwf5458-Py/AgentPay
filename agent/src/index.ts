@@ -154,7 +154,7 @@ server.post('/agent/execute', async (request, reply) => {
 const start = async () => {
   try {
     const port = 3002;
-    const host = '127.0.0.1';
+    const host = '0.0.0.0';
     await server.listen({ port, host });
     console.log(`AgentPay Agent server running at http://${host}:${port}`);
   } catch (err) {

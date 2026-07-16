@@ -1041,8 +1041,8 @@ server.get('/', async () => ({ status: 'OK' }));
 const start = async () => {
   try {
     const port = Number(process.env.PORT) || 3001;
-    await server.listen({ port, host: '127.0.0.1' });
-    console.log(`Smart Account Bridge Microservice running on http://127.0.0.1:${port}`);
+    await server.listen({ port, host: '0.0.0.0' });
+    console.log(`Smart Account Bridge Microservice running on http://0.0.0.0:${port}`);
   } catch (err) {
     server.log.error(err);
     process.exit(1);
