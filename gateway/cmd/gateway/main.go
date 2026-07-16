@@ -101,7 +101,7 @@ func main() {
 
 	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
 	stripeRail := rail.NewStripeRail(stripeKey)
-	cryptoRail := rail.NewCryptoRail(aaBridgeURL)
+	cryptoRail := rail.NewCryptoRail(aaBridgeURL, internalSecret)
 
 	rails := map[string]rail.PaymentRail{
 		"stripe": stripeRail,

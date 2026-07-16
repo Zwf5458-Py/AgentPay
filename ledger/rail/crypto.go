@@ -13,8 +13,9 @@ import (
 )
 
 type CryptoRail struct {
-	aaBridgeURL string
-	httpClient  *http.Client
+	aaBridgeURL    string
+	internalSecret string
+	httpClient     *http.Client
 }
 
 type CryptoSettleMetadata struct {
@@ -33,9 +34,10 @@ type CryptoSettleMetadata struct {
 	EscrowAddress string `json:"escrow_address"`
 }
 
-func NewCryptoRail(aaBridgeURL string) *CryptoRail {
+func NewCryptoRail(aaBridgeURL string, internalSecret string) *CryptoRail {
 	return &CryptoRail{
-		aaBridgeURL: aaBridgeURL,
+		aaBridgeURL:    aaBridgeURL,
+		internalSecret: internalSecret,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -88,7 +90,9 @@ func (r *CryptoRail) Split(ctx context.Context, lockID string, payouts []Payout,
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
+	if r.internalSecret != "" {
+		req.Header.Set("X-Internal-Secret", r.internalSecret)
+	}
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to dispatch split transaction: %w", err)
