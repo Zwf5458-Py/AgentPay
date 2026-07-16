@@ -162,7 +162,7 @@ func main() {
 		r.Handle("/execute", proxyHandler)
 	})
 
-	r.Post("/stripe/create-session", func(w http.ResponseWriter, r *http.Request) {
+	stripeCreateSessionHandler := func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Amount     uint64 `json:"amount"`
 			SuccessURL string `json:"successUrl"`
@@ -192,12 +192,16 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
-			"sessionId": sessionID,
-			"url":       url,
+			"sessionId":    sessionID,
+			"url":          url,
+			"checkout_url": url,
 		})
-	})
+	}
 
-	r.Post("/stripe/webhook", func(w http.ResponseWriter, r *http.Request) {
+	r.Post("/stripe/create-session", stripeCreateSessionHandler)
+	r.Post("/api/stripe/create-session", stripeCreateSessionHandler)
+
+	stripeWebhookHandler := func(w http.ResponseWriter, r *http.Request) {
 		// Stripe Webhook 占位端点说明：
 		// 目前网关在 execute 审计时会主动通过 VerifyCheckoutSession 向 Stripe API 发送请求实时校验 Session 支付状态。
 		// 本端点目前作为接收支付成功异步回调的 Logging/审计日志占位端点。
@@ -211,7 +215,10 @@ func main() {
 		log.Println("[Stripe Webhook] Received webhook event notification.")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"success"}`))
-	})
+	}
+
+	r.Post("/stripe/webhook", stripeWebhookHandler)
+	r.Post("/api/stripe/webhook", stripeWebhookHandler)
 
 	// 调试及清理接口组（挂载 AdminAuthMiddleware 鉴权以防数据泄露/恶意清空）
 	r.Route("/debug", func(r chi.Router) {
