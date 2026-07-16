@@ -75,6 +75,9 @@ server.post('/agent/execute', async (request, reply) => {
         { role: 'user', content: input }
       ];
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1000);
+
       const llmResponse = await fetch(llmUrl, {
         method: 'POST',
         headers: {
@@ -85,8 +88,10 @@ server.post('/agent/execute', async (request, reply) => {
           model: llmModel,
           messages: messages,
           temperature: 0.2
-        })
+        }),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
       if (llmResponse.ok) {
         const data: any = await llmResponse.json();
         if (data.choices && data.choices[0] && data.choices[0].message) {

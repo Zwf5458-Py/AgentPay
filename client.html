@@ -1756,7 +1756,23 @@ contract SafeEtherStore is ReentrancyGuard {
                    if (document.getElementById('modelCostVal')) document.getElementById('modelCostVal').textContent = (cost / 1e6).toFixed(6) + " USDC";
                 }
             } catch (err) {
-                showError("SDK 执行失败: " + err.message);
+                const cleanMsg = (function(e) {
+                    if (!e) return "未知错误";
+                    const msg = e.message || String(e);
+                    if (msg.includes("User rejected") || msg.includes("User denied") || msg.includes("user rejected")) {
+                        return "用户取消了钱包签名或交易授权";
+                    }
+                    const detailsMatch = msg.match(/Details:\s*([^\n]+)/);
+                    if (detailsMatch && detailsMatch[1]) {
+                        return detailsMatch[1].trim();
+                    }
+                    const shortMatch = msg.split("Request Arguments:")[0];
+                    if (shortMatch) {
+                        return shortMatch.trim().replace(/Docs:\s*https?:\/\/[^\s]+/g, "");
+                    }
+                    return msg;
+                })(err);
+                showError("SDK 执行失败: " + cleanMsg);
                 setStepState('request', 'failed');
                 executeAuditBtn.disabled = false;
                 executeAuditBtn.textContent = '开始安全审计 (Execute Audit)';
