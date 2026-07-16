@@ -1700,6 +1700,57 @@ contract SafeEtherStore is ReentrancyGuard {
                     } else {
                         throw new Error('未返回 Stripe 收银台 URL');
                     }
+
+                    // 开始后台轮询校验支付状态并拉取审计结果
+                    const checkInterval = setInterval(async () => {
+                        try {
+                            const executeRes = await fetch(`${gatewayUrl}/agent/execute`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer stripe:${session.sessionId}`
+                                },
+                                body: JSON.stringify({
+                                    agentId: agentId,
+                                    input: codeInput
+                                })
+                            });
+                            
+                            if (executeRes.status === 402) {
+                                // 尚未支付成功，继续轮询
+                                return;
+                            }
+                            
+                            clearInterval(checkInterval);
+                            
+                            if (!executeRes.ok) {
+                                const errData = await executeRes.json();
+                                throw new Error(errData.message || 'HTTP ' + executeRes.status);
+                            }
+                            
+                            const resJson = await executeRes.json();
+                            
+                            setStepState('stripe-pay', 'completed');
+                            setStepState('audit', 'completed');
+                            updateSimulatedBalance();
+                            
+                            const output = resJson.output || "";
+                            reportContent.innerHTML = DOMPurify.sanitize(marked.parse(output));
+                            reportStatusText.textContent = '审计成功完成，Stripe 法币入账核销成功！';
+                            reportStatusText.style.color = 'var(--neon-green)';
+                            reportStatusText.className = '';
+                            
+                            executeAuditBtn.disabled = false;
+                            executeAuditBtn.textContent = '开始安全审计 (Execute Audit)';
+                            
+                        } catch (pollErr) {
+                            clearInterval(checkInterval);
+                            showError("Stripe 支付对账失败: " + pollErr.message);
+                            setStepState('request', 'failed');
+                            executeAuditBtn.disabled = false;
+                            executeAuditBtn.textContent = '开始安全审计 (Execute Audit)';
+                        }
+                    }, 2500);
                 } catch (err) {
                     showError("Stripe 会话创建失败: " + err.message);
                     setStepState('request', 'failed');
