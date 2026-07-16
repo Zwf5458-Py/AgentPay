@@ -999,8 +999,8 @@
                         <input type="text" id="gatewayUrl" class="neon-input" value="http://localhost:8080/agent/execute">
                     </div>
                     <div class="form-group">
-                        <label for="gatewayAddress">网关结算地址 (Gateway Address)</label>
-                        <input type="text" id="gatewayAddress" class="neon-input" value="0xF1DB65d699d5B409E77692783098197F80DbA174">
+                        <label for="gatewayAddress">托管合约地址 (Escrow Address)</label>
+                        <input type="text" id="gatewayAddress" class="neon-input" value="0xa513e6e4b8f2a923d98304ec87f64353c4d5c853">
                     </div>
                 </div>
             </div>
@@ -1719,9 +1719,11 @@ contract SafeEtherStore is ReentrancyGuard {
             
             let resJson;
             try {
+                const escrowContractAddr = document.getElementById('gatewayAddress').value.trim();
                 const clientConfig = {
                     gatewayUrl: gatewayUrl,
-                    chainId: 31337
+                    chainId: 31337,
+                    verifyingContract: escrowContractAddr
                 };
                 if (walletMode === 'private_key') {
                     const rawKey = privateKeyInput.value.trim();
