@@ -19588,6 +19588,9 @@ ${prettyStateOverride(stateOverride)}`;
         account: userAddress
       });
       const receipt = await this.publicClient.waitForTransactionReceipt({ hash: lockHash });
+      console.log("[SDK Debug] verifyingContract:", this.verifyingContract);
+      console.log("[SDK Debug] receipt blockNumber:", receipt.blockNumber);
+      console.log("[SDK Debug] expected agentId:", agentId, "expected userAddress:", userAddress);
       const eventAbi = parseAbiItem("event ChannelLocked(bytes32 indexed channelId, address indexed payer, uint256 indexed agentId, uint256 maxAmount, uint256 expiresAt)");
       const logs = await this.publicClient.getLogs({
         address: this.verifyingContract,
@@ -19595,6 +19598,7 @@ ${prettyStateOverride(stateOverride)}`;
         fromBlock: receipt.blockNumber,
         toBlock: receipt.blockNumber
       });
+      console.log("[SDK Debug] logs retrieved from publicClient:", JSON.stringify(logs, (k, v) => typeof v === "bigint" ? v.toString() : v, 2));
       let channelId = "";
       for (const log of logs) {
         if (log.args && log.args.agentId === BigInt(agentId) && log.args.payer?.toLowerCase() === userAddress.toLowerCase()) {
