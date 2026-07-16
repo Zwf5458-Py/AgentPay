@@ -96,5 +96,36 @@
    - 验证 Redis 限流在多网关实例下的集中管理效果。
 2. **高频计量在缓存中的延迟落库**：
    - 考虑在 `pricing/service` 层加入 Redis 对 `RecordUsage` 进行预处理，并在高频 tokens 刷新时定时 Bulk 批量更新至 SQLite 库，提升网关的并发吞吐能力。
-2. **高频计量在缓存中的延迟落库**：
-   - 考虑在 `pricing/service` 层加入 Redis 对 `RecordUsage` 进行预处理，并在高频 tokens 刷新时定时 Bulk 批量更新至 SQLite 库，提升网关的并发吞吐能力。
+
+---
+
+## 6. DApp 联调与链上全链路闭环问题及优化 (2026-07-16)
+
+在将整个项目部署到本地 Docker 容器并使用 DApp 网页（client.html）进行 MetaMask 链上全链路审计测试时，我们攻克了以下一系列极其隐藏的系统级与跨模块通信 Bug，特此沉淀以避免重复犯错：
+
+### 6.1 链上测试代币合约地址配置不一致 (Approve 0 Logs)
+*   **现象**：点击安全审计时，第一个 Approve 交易和第二个 LockChannel 交易能发送成功，但在 `lockChannel` 回执的 `receipt.logs` 中事件日志数量为 0，导致 `channelId` 匹配解析失败。
+*   **根因**：SDK 底层 `erc20Address` 默认写死为了一个空地址。本地 Anvil 部署的 MockUSDC 真实部署地址为 `0x5fbdb2315678afecb367f032d93f642f64180aa3`。因为地址不一致，Approve 授权发送到了空合约，未在真正的 USDC 合约上授权，导致锁仓划扣无日志。
+*   **优化**：更新 SDK 构造函数，若处于本地测试网（`chainId === 31337`）环境下，自动将 `erc20Address` 默认指向 Anvil 真实的 `MockERC20` 部署地址 `0x5fbdb2315678afecb367f032d93f642f64180aa3`。
+
+### 6.2 容器服务环回地址绑定拦截 (502 Connection Refused)
+*   **现象**：链上锁仓交易成功后，网关在代理 `POST /agent/execute` 转发时抛出 `502 Bad Gateway` 报错，提示 `dial tcp 172.19.0.5:3002: connect: connection refused`。
+*   **根因**：`agent` 和 `aa-bridge` 微服务在底层代码中将 Fastify 的监听 Host 绑定为了环回地址 `127.0.0.1`。在 Docker 虚拟网络中，这会导致其它容器（如 `gateway`）在通过容器 IP 访问它们时直接遭到拒绝。
+*   **优化**：将 `agent/src/index.ts` 和 `aa-bridge/src/index.ts` 中 Fastify 启动的 `host` 统一修改为 `'0.0.0.0'`，使服务可以接受跨网卡容器间连接，并重新构建镜像部署。
+
+### 6.3 复式记账分账轨密钥遗漏 (401 Unauthorized)
+*   **现象**：网关的结算任务在队列中一直 PENDING 重试，后台日志频繁打印 `bridge returned http error 401 Unauthorized`，提示丢失 `x-internal-secret`。
+*   **根因**：网关的异步分账记账是由 `LedgerService.SettleInvoice` 内部的 `CryptoRail.Split` 处理。但 `CryptoRail` 的 Split 实现在发起 HTTP 请求给 `aa-bridge` 时，代码里根本没有将管理员密钥 `INTERNAL_SECRET` 注入到 `X-Internal-Secret` 请求头中。
+*   **优化**：重构了 `CryptoRail` struct 与 `NewCryptoRail` 构造函数，支持传递 `internalSecret`，并在 `Split` 请求中成功注入该 HTTP Header。
+
+### 6.4 EVM 地址大小写校验拦截 (400 Invalid treasury address)
+*   **现象**：网关队列重试打印 `bridge returned http error 400 Bad Request: {"error":"Invalid treasury address"}`。
+*   **根因**：网关传入的 `platformTreasury` 是含有大写字母的 Checksum 地址，而 `aa-bridge` 端采用的以太坊 `isAddress()` 校验在未对地址进行小写归一化前，会因为校验和无效而返回 `false`。
+*   **优化**：在 `aa-bridge/src/index.ts` 路由拦截和传参处，对传入的 `modelProvider`、`treasury` 和 `escrowAddress` 地址参数进行强制 `.toLowerCase()` 小写归一化后再执行校验，彻底消除由于大小写格式问题导致的校验拦截。
+
+### 6.5 钱包确认间轮询卡顿与推理冷启动优化 (Metamask Low Latency)
+*   **现象**：MetaMask 弹出第一个确定（Approve）和第二个确定（Lock）之间存在明显的 10 秒左右卡顿，且首次点击审计时整体响应极其缓慢。
+*   **优化**：
+    1.  **极速轮询**：在 SDK 构造函数中，对本地测试网（`chainId === 31337`）的 `publicClient` 配置了低延迟的 `pollingInterval: 100`（100毫秒轮询间隔），使 Approve 出块确认瞬间唤起下一笔交易，打通极致丝滑的钱包唤起体验。
+    2.  **LLM 极速超时**：在 `agent` 微服务中为大模型 API 请求增加了 `AbortController` 绑定的 1000 毫秒（1秒）超时中断逻辑，防止因本地大模型端口不存活导致的网络傻等，保障 1 秒内顺畅降级到本地 Mock 生成。
+    3.  **MetaMask 取消美化**：优化了前端网页上的异常捕获逻辑，当用户在 MetaMask 中取消或拒绝签名时，不再输出整页的 viem 冗长调试信息，而是友好地在红框中渲染出 `SDK 执行失败: 用户取消了钱包签名或交易授权`。
