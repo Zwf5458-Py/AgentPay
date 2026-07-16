@@ -49,12 +49,17 @@ export class AgentPayClient {
       this.walletClient = createWalletClient({ chain, transport: custom(this.provider) }).extend(publicActions);
       this.publicClient = createPublicClient({
         chain,
-        transport: rpcUrl ? http(rpcUrl) : custom(this.provider)
+        transport: rpcUrl ? http(rpcUrl) : custom(this.provider),
+        pollingInterval: this.chainId === 31337 ? 100 : 4000
       });
     } else if (this.privateKey) {
       const account = privateKeyToAccount(this.privateKey);
       this.walletClient = createWalletClient({ account, chain, transport: http() }).extend(publicActions);
-      this.publicClient = createPublicClient({ chain, transport: http() });
+      this.publicClient = createPublicClient({
+        chain,
+        transport: http(),
+        pollingInterval: this.chainId === 31337 ? 100 : 4000
+      });
     }
   }
 
