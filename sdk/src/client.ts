@@ -43,9 +43,14 @@ export class AgentPayClient {
     this.gatewayAddress = config.gatewayAddress;
 
     const chain = this.chainId === 31337 ? foundry : baseSepolia;
+    const rpcUrl = this.chainId === 31337 ? 'http://127.0.0.1:8545' : undefined;
+
     if (this.provider) {
       this.walletClient = createWalletClient({ chain, transport: custom(this.provider) }).extend(publicActions);
-      this.publicClient = createPublicClient({ chain, transport: custom(this.provider) });
+      this.publicClient = createPublicClient({
+        chain,
+        transport: rpcUrl ? http(rpcUrl) : custom(this.provider)
+      });
     } else if (this.privateKey) {
       const account = privateKeyToAccount(this.privateKey);
       this.walletClient = createWalletClient({ account, chain, transport: http() }).extend(publicActions);
