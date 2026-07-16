@@ -1,4 +1,4 @@
-import { isAddress, recoverMessageAddress, createWalletClient, createPublicClient, http, custom, parseAbi, parseAbiItem, publicActions } from 'viem';
+import { isAddress, recoverMessageAddress, createWalletClient, createPublicClient, http, custom, parseAbi, parseAbiItem, publicActions, decodeEventLog } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { foundry, baseSepolia } from 'viem/chains';
 
@@ -98,22 +98,33 @@ export class AgentPayClient {
     console.log("[SDK Debug] verifyingContract:", this.verifyingContract);
     console.log("[SDK Debug] receipt blockNumber:", receipt.blockNumber);
     console.log("[SDK Debug] expected agentId:", agentId, "expected userAddress:", userAddress);
+    console.log("[SDK Debug] receipt logs count:", receipt.logs?.length);
 
-    const eventAbi = parseAbiItem('event ChannelLocked(bytes32 indexed channelId, address indexed payer, uint256 indexed agentId, uint256 maxAmount, uint256 expiresAt)');
-    const logs = await this.publicClient.getLogs({
-      address: this.verifyingContract,
-      event: eventAbi,
-      fromBlock: receipt.blockNumber,
-      toBlock: receipt.blockNumber
-    });
+    const escrowEventAbi = parseAbi([
+      'event ChannelLocked(bytes32 indexed channelId, address indexed payer, uint256 indexed agentId, uint256 maxAmount, uint256 expiresAt)'
+    ]);
 
-    console.log("[SDK Debug] logs retrieved from publicClient:", JSON.stringify(logs, (k, v) => typeof v === 'bigint' ? v.toString() : v, 2));
-    
     let channelId = '';
-    for (const log of logs) {
-      if (log.args && log.args.agentId === BigInt(agentId) && log.args.payer?.toLowerCase() === userAddress.toLowerCase()) {
-        channelId = log.args.channelId as string;
-        break;
+    if (receipt.logs) {
+      for (const log of receipt.logs) {
+        try {
+          const decoded = decodeEventLog({
+            abi: escrowEventAbi,
+            data: log.data,
+            topics: log.topics
+          });
+          console.log("[SDK Debug] successfully decoded log:", decoded);
+          if (decoded.eventName === 'ChannelLocked' && decoded.args) {
+            const args = decoded.args as any;
+            if (args.agentId === BigInt(agentId) && args.payer?.toLowerCase() === userAddress.toLowerCase()) {
+              channelId = args.channelId;
+              console.log("[SDK Debug] matched channelId:", channelId);
+              break;
+            }
+          }
+        } catch (e) {
+          // ignore parsing error for other contract logs (like ERC20 Transfer/Approval events)
+        }
       }
     }
     
