@@ -87,7 +87,7 @@ RPC_READY=false
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
   RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" \
     --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-    http://localhost:8545 || true)
+    http://127.0.0.1:8545 || true)
   
   if echo "$RESPONSE" | grep -q "result"; then
     BLOCK_HEX=$(echo "$RESPONSE" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
@@ -112,9 +112,12 @@ fi
 echo "Deploying PaymentEscrow contracts to local Anvil..."
 (
   cd contracts
+  unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+  export no_proxy="localhost,127.0.0.1,127.0.0.1:8545,localhost:8545"
+  export NO_PROXY="localhost,127.0.0.1,127.0.0.1:8545,localhost:8545"
   export FOUNDRY_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
   export GATEWAY_SETTLER_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
-  if ! forge script script/Deploy.s.sol:DeployScript --rpc-url http://localhost:8545 --broadcast; then
+  if ! forge script script/Deploy.s.sol:DeployScript --rpc-url http://127.0.0.1:8545 --broadcast; then
     echo "Error: Contract deployment failed." >&2
     exit 1
   fi

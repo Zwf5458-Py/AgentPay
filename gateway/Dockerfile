@@ -1,5 +1,4 @@
-# Build Stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.25-alpine
 ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /app
 
@@ -17,12 +16,8 @@ COPY gateway/ ./gateway/
 COPY ledger/ ./ledger/
 COPY pricing/ ./pricing/
 
-# Build gateway
-RUN CGO_ENABLED=0 GOOS=linux go build -o gateway ./gateway/cmd/gateway/main.go
+# Build gateway matching the native builder container architecture (naming output gateway_bin to avoid clash with folder name)
+RUN CGO_ENABLED=0 go build -o gateway_bin ./gateway/cmd/gateway/main.go
 
-# Production Stage
-FROM alpine:latest
-WORKDIR /app
-COPY --from=builder /app/gateway .
 EXPOSE 8080
-CMD ["./gateway"]
+CMD ["./gateway_bin"]
