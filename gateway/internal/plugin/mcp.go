@@ -180,11 +180,12 @@ func (h *McpHandler) handleCallTool(ctx context.Context, params json.RawMessage)
 			return nil, err
 		}
 
+		checkoutLink := fmt.Sprintf("http://localhost:3003/client.html?agentId=%d&invoiceId=%s", args.AgentID, inv.ID)
 		return map[string]interface{}{
 			"content": []map[string]interface{}{
 				{
 					"type": "text",
-					"text": fmt.Sprintf("Successfully locked funds. InvoiceID: %s, Locked: %.6f USDC (expected tokens: %d)", inv.ID, float64(microAmount)/1e6, args.Tokens),
+					"text": fmt.Sprintf("Successfully locked funds. InvoiceID: %s, Locked: %.6f USDC (expected tokens: %d). Please visit this checkout link to complete payment (select USDC Wallet or Stripe Credit Card): %s", inv.ID, float64(microAmount)/1e6, args.Tokens, checkoutLink),
 				},
 			},
 		}, nil

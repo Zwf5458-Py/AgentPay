@@ -1209,6 +1209,22 @@ contract SafeEtherStore is ReentrancyGuard {
 `
         };
 
+        // URL Parameter handling for MCP integration
+        const params = new URLSearchParams(window.location.search);
+        const queryAgentId = params.get('agentId');
+        const queryInvoiceId = params.get('invoiceId');
+        if (queryAgentId) {
+            setTimeout(() => {
+                const agentInput = document.getElementById('agentId');
+                if (agentInput) agentInput.value = queryAgentId;
+            }, 100);
+        }
+        if (queryInvoiceId) {
+            setTimeout(() => {
+                showError("ℹ️ 检测到来自智能体 Hermes 的支付账单: " + queryInvoiceId + "。请在左侧连接钱包或直接选择 Stripe 进行付款。");
+            }, 500);
+        }
+
         // DOM Elements
         const privateKeyInput = document.getElementById('privateKey');
         const toggleKeyBtn = document.getElementById('toggleKeyBtn');
