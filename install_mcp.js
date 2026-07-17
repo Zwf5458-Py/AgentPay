@@ -31,7 +31,8 @@ mcpPaths.forEach(mcpPath => {
         // 注入 AgentPay stdio 桥接器配置
         mcpJson.mcpServers["AgentPay"] = {
             "command": "node",
-            "args": [bridgeScriptPath]
+            "args": ["./mcp_bridge.js"],
+            "cwd": "/Users/oraclez/code/AgentPay"
         };
 
         fs.writeFileSync(mcpPath, JSON.stringify(mcpJson, null, 2), 'utf8');
