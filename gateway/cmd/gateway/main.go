@@ -177,10 +177,10 @@ func main() {
 			req.Amount = 50000 // 默认 50000 微单位 (0.05 USD)
 		}
 		if req.SuccessURL == "" {
-			req.SuccessURL = "http://localhost:3000/success"
+			req.SuccessURL = "http://localhost:8080/stripe/success"
 		}
 		if req.CancelURL == "" {
-			req.CancelURL = "http://localhost:3000/cancel"
+			req.CancelURL = "http://localhost:3003/client.html"
 		}
 
 		sessionID, url, err := stripeClient.CreateCheckoutSession(req.Amount, req.SuccessURL, req.CancelURL)
@@ -219,6 +219,81 @@ func main() {
 
 	r.Post("/stripe/webhook", stripeWebhookHandler)
 	r.Post("/api/stripe/webhook", stripeWebhookHandler)
+
+	stripeSuccessPageHandler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Payment Successful - AgentPay</title>
+    <style>
+        body {
+            background: #0d0e15;
+            color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 3rem;
+            text-align: center;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            backdrop-filter: blur(8px);
+            max-width: 400px;
+        }
+        h1 {
+            color: #00ffcc;
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            text-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+        }
+        p {
+            color: #a0a5c0;
+            line-height: 1.6;
+        }
+        .loader {
+            border: 3px solid rgba(255,255,255,0.1);
+            border-radius: 50%;
+            border-top: 3px solid #00ffcc;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 2rem auto 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🎉 支付成功！</h1>
+        <p>Stripe 信用卡模拟支付已核销完成。本窗口将在 2 秒后自动关闭，请返回原审计工作区查看您的报告。</p>
+        <div class="loader"></div>
+    </div>
+    <script>
+        setTimeout(() => {
+            window.close();
+        }, 2000);
+    </script>
+</body>
+</html>
+		`))
+	}
+
+	r.Get("/stripe/success", stripeSuccessPageHandler)
+	r.Get("/api/stripe/success", stripeSuccessPageHandler)
 
 	// 调试及清理接口组（挂载 AdminAuthMiddleware 鉴权以防数据泄露/恶意清空）
 	r.Route("/debug", func(r chi.Router) {
